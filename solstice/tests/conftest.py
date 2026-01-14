@@ -51,6 +51,10 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers",
+        "distributed: mark test as distributed test (multi-worker Ray pipelines)",
+    )
+    config.addinivalue_line(
+        "markers",
         "workflow: mark test as workflow test (end-to-end pipeline test)",
     )
     config.addinivalue_line(

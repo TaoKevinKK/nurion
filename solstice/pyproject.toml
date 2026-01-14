@@ -138,6 +138,7 @@ filterwarnings = [
 ]
 markers = [
     "integration: marks integration tests",
+    "distributed: marks distributed tests (multi-worker Ray pipelines)",
     "benchmark: marks performance benchmark tests (skipped by default in CI)",
     "slow: marks slow tests (Tansu broker startup ~5s per test)",
     "timeout: marks tests with timeout (requires pytest-timeout)",

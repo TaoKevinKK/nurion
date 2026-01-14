@@ -42,8 +42,8 @@ from tests.utils import (
     wait_for_progress,
 )
 
-# Mark all tests in this module as integration tests
-pytestmark = pytest.mark.integration
+# Mark all tests in this module as distributed tests
+pytestmark = pytest.mark.distributed
 
 
 class TestQueueFaultRecovery:
