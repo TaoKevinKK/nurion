@@ -51,8 +51,8 @@ class FileSource(SourceOperator):
 
     SUPPORTED_FORMATS = {"json", "parquet", "csv"}
 
-    def __init__(self, config: FileSourceConfig, worker_id: Optional[str] = None):
-        super().__init__(config, worker_id)
+    def __init__(self, config: FileSourceConfig):
+        super().__init__(config)
         self.file_paths = [str(path) for path in config.file_paths]
         self.file_format = config.format.lower()
 

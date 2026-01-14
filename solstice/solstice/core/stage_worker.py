@@ -20,6 +20,7 @@ to an output queue. It's designed for streaming-style execution with:
 - EOF-based completion detection
 - Partition-aware processing
 - WebUI metrics push
+- Iterative processing support (for CC, PageRank, etc.)
 """
 
 from __future__ import annotations
@@ -113,8 +114,14 @@ class StageWorker:
 
         self.logger = create_ray_logger(f"Worker-{self.stage_id}-{worker_id}")
 
+        # Set runtime context on operator config before setup()
+        op_config = stage.operator_config
+        op_config.job_id = job_id
+        op_config.stage_id = stage.stage_id
+        op_config.worker_id = worker_id
+
         # Initialize operator using OperatorConfig.setup()
-        self.operator = stage.operator_config.setup(worker_id=worker_id)
+        self.operator = op_config.setup()
 
         # State
         self._running = False
@@ -726,6 +733,56 @@ class StageWorker:
             output_records=self._total_output_records,
             processing_time=self._total_processing_time,
         )
+
+    # === Operator Method Dispatch ===
+    #
+    # Generic mechanism for masters to call operator methods via worker.
+    # Instead of adding proxy methods for each operator feature, we provide
+    # a single dispatch method that forwards calls to the operator.
+    #
+    # Security: Only methods decorated with @master_callable can be invoked.
+    # See solstice.core.operator.master_callable for the decorator.
+
+    def invoke_operator(self, method_name: str, *args, **kwargs) -> Any:
+        """Invoke an operator method by name (generic dispatch).
+
+        Only methods marked with @master_callable decorator can be invoked.
+        This provides extensibility without modifying StageWorker for each
+        new operator feature.
+
+        Args:
+            method_name: Name of the operator method to call
+            *args: Positional arguments to pass
+            **kwargs: Keyword arguments to pass
+
+        Returns:
+            Result from the operator method, or None if method doesn't exist
+
+        Raises:
+            ValueError: If method exists but is not marked @master_callable
+
+        Example:
+            # In master:
+            changes = ray.get(worker.invoke_operator.remote("get_iteration_changes"))
+
+            # In operator (must be decorated):
+            @master_callable
+            def get_iteration_changes(self) -> int:
+                return self._changes
+        """
+        from solstice.core.operator import is_master_callable
+
+        method = getattr(self.operator, method_name, None)
+        if method is None:
+            return None
+
+        if not is_master_callable(method):
+            raise ValueError(
+                f"Method '{method_name}' is not marked @master_callable. "
+                f"Add the decorator to allow remote invocation."
+            )
+
+        return method(*args, **kwargs)
 
     def _should_track_lineage(self) -> bool:
         """Check if this split should be tracked based on sample rate.

@@ -50,8 +50,8 @@ class LanceSinkConfig(OperatorConfig):
 class LanceSink(SinkOperator):
     """Sink that writes records to a Lance table."""
 
-    def __init__(self, config: LanceSinkConfig, worker_id: Optional[str] = None):
-        super().__init__(config, worker_id)
+    def __init__(self, config: LanceSinkConfig):
+        super().__init__(config)
         if not config.table_path:
             raise ValueError("table_path is required for LanceSink")
 

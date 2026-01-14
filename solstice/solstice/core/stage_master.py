@@ -575,6 +575,12 @@ class StageMaster:
             return await self._backpressure_monitor.scale_down(count)
         return 0
 
+    async def scale_up(self, count: int) -> int:
+        """Scale up by spawning new workers."""
+        if self._backpressure_monitor:
+            return await self._backpressure_monitor.scale_up(count)
+        return 0
+
     async def cleanup_queue(self) -> None:
         """Clean up output queue (called by runner after all consumers done)."""
         if self._output_queue:

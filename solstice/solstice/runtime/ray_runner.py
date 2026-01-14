@@ -284,7 +284,18 @@ class RayJobRunner:
 
             if not is_source:
                 # Non-source stage: get upstream endpoint
-                upstream_id = upstream_ids[0]  # TODO: handle multi-input
+                # TODO: Implement multi-upstream support (currently only uses first upstream)
+                # For stages with multiple upstreams (e.g., dedupe receiving from cc_iterate
+                # and doc_registry), a proper implementation would:
+                # 1. Create consumers for all upstream topics
+                # 2. Merge messages from all sources
+                # 3. Track EOF markers from each source
+                if len(upstream_ids) > 1:
+                    self.logger.warning(
+                        f"Stage {stage_id} has {len(upstream_ids)} upstreams but "
+                        f"multi-upstream is not yet implemented. Using first upstream only."
+                    )
+                upstream_id = upstream_ids[0]
                 upstream_master = self._masters[upstream_id]
 
                 # Start upstream if needed to get its endpoint

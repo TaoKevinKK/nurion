@@ -131,8 +131,8 @@ class CollectingSink(Operator):
     output to a centralized collector for validation.
     """
 
-    def __init__(self, config: CollectingSinkConfig, worker_id: str = None):
-        super().__init__(config, worker_id)
+    def __init__(self, config: CollectingSinkConfig):
+        super().__init__(config)
         self._collector_name = config.collector_name
         self._collector = None
 

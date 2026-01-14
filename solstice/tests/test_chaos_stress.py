@@ -378,9 +378,9 @@ class TestLongRunningStability:
         assert validator.verify_count(sink_data, expected_count), (
             f"Data loss in sustained chaos: expected {expected_count}, got {len(sink_data)}"
         )
-        assert validator.verify_no_duplicates_composite(
-            sink_data, ["id", "copy_idx"]
-        ), "Duplicates found in sustained chaos test"
+        assert validator.verify_no_duplicates_composite(sink_data, ["id", "copy_idx"]), (
+            "Duplicates found in sustained chaos test"
+        )
         assert validator.verify_explode_result(sink_data, NUM_RECORDS, EXPLODE_FACTOR), (
             f"Explode result verification failed: expected factor {EXPLODE_FACTOR}"
         )

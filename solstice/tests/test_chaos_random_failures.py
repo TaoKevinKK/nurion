@@ -164,9 +164,9 @@ class TestRandomFailureInjection:
         assert validator.verify_count(sink_data, expected_count), (
             f"Data count mismatch in chaos test: expected {expected_count}, got {len(sink_data)}"
         )
-        assert validator.verify_no_duplicates_composite(
-            sink_data, ["id", "copy_idx"]
-        ), "Duplicates found in chaos test - exactly-once semantics violated"
+        assert validator.verify_no_duplicates_composite(sink_data, ["id", "copy_idx"]), (
+            "Duplicates found in chaos test - exactly-once semantics violated"
+        )
 
     @pytest.mark.asyncio
     async def test_burst_kills(self, ray_cluster):
@@ -307,7 +307,9 @@ class TestCombinedFailures:
                         master = runner._masters.get("transform")
                         if master and master._worker_manager and len(master._workers) < 6:
                             partition_count = master._partition_count
-                            await master._worker_manager.spawn_worker(partition_count=partition_count)
+                            await master._worker_manager.spawn_worker(
+                                partition_count=partition_count
+                            )
                             actions_taken += 1
                     # "nothing" - just wait
                 except Exception:

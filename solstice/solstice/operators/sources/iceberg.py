@@ -47,8 +47,8 @@ class IcebergSourceConfig(OperatorConfig):
 class IcebergSource(SourceOperator):
     """Source operator for reading from Iceberg tables."""
 
-    def __init__(self, config: IcebergSourceConfig, worker_id: Optional[str] = None):
-        super().__init__(config, worker_id)
+    def __init__(self, config: IcebergSourceConfig):
+        super().__init__(config)
         self.catalog_uri: Optional[str] = config.catalog_uri
         self.table_name: Optional[str] = config.table_name
         self.filter_expr: Optional[str] = config.filter

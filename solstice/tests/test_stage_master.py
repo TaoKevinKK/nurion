@@ -47,8 +47,8 @@ from solstice.core.operator import OperatorConfig, Operator
 class MockOperator(Operator):
     """Mock operator that passes through data."""
 
-    def __init__(self, config: "MockOperatorConfig", worker_id: str = None):
-        super().__init__(config, worker_id)
+    def __init__(self, config: "MockOperatorConfig"):
+        super().__init__(config)
         self._closed = False
 
     def process_split(self, split, payload):

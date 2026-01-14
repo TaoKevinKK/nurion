@@ -35,8 +35,8 @@ class PrintSinkConfig(OperatorConfig):
 class PrintSink(SinkOperator):
     """Sink that prints records to stdout."""
 
-    def __init__(self, config: PrintSinkConfig, worker_id: Optional[str] = None):
-        super().__init__(config, worker_id)
+    def __init__(self, config: PrintSinkConfig):
+        super().__init__(config)
         self.logger = logging.getLogger(self.__class__.__name__)
         self.count = 0
 

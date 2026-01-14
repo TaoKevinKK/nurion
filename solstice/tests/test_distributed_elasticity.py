@@ -120,9 +120,7 @@ class TestElasticScaling:
             # Verify workers increased
             await asyncio.sleep(1)
             new_count = len(master._workers) if master else 0
-            assert new_count > initial_count, (
-                f"Scale up failed: {initial_count} -> {new_count}"
-            )
+            assert new_count > initial_count, f"Scale up failed: {initial_count} -> {new_count}"
 
             # Wait for completion
             await asyncio.wait_for(run_task, timeout=360)
@@ -313,7 +311,9 @@ class TestElasticScaling:
                     partition_count = master._partition_count
                     for _ in range(2):
                         try:
-                            await master._worker_manager.spawn_worker(partition_count=partition_count)
+                            await master._worker_manager.spawn_worker(
+                                partition_count=partition_count
+                            )
                         except Exception:
                             pass
 
@@ -409,8 +409,8 @@ class TestElasticScaling:
         assert validator.verify_count(sink_data, expected_count), (
             f"Data loss after rebalance: expected {expected_count}, got {len(sink_data)}"
         )
-        assert validator.verify_no_duplicates_composite(
-            sink_data, ["id", "copy_idx"]
-        ), "Duplicates after rebalance"
+        assert validator.verify_no_duplicates_composite(sink_data, ["id", "copy_idx"]), (
+            "Duplicates after rebalance"
+        )
         assert validator.verify_explode_result(sink_data, NUM_RECORDS, EXPLODE_FACTOR)
         assert validator.verify_checksums(source_data, sink_data)

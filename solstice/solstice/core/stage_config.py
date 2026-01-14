@@ -90,6 +90,9 @@ class StageConfig:
     # Upstream queue connection (set by runner for non-source stages)
     upstream_endpoint: Optional["QueueEndpoint"] = None
     upstream_topic: Optional[str] = None
+    # TODO: Add multi-upstream support
+    # upstream_endpoints: List["QueueEndpoint"] = field(default_factory=list)
+    # upstream_topics: List[str] = field(default_factory=list)
 
     # Shared broker endpoint (set by runner, required for TANSU queue type)
     # All stages connect to this single broker instead of creating their own

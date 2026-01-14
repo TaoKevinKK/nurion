@@ -72,29 +72,26 @@ class MockStageMaster:
             is_finished=self._finished,
         )
 
-    async def get_input_queue_lag(self) -> int:
+    def get_input_queue_lag(self) -> int:
+        """Synchronous queue lag getter (matches real StageMaster)."""
         return self._input_queue_lag
 
-    async def _spawn_worker(self) -> str:
-        worker_id = f"worker_{len(self._workers)}"
-        self._workers[worker_id] = MagicMock()
-        return worker_id
+    async def scale_up(self, count: int) -> int:
+        """Scale up by spawning new workers."""
+        to_add = min(count, self.config.max_workers - len(self._workers))
+        for _ in range(to_add):
+            worker_id = f"worker_{len(self._workers)}"
+            self._workers[worker_id] = MagicMock()
+        return to_add
 
     async def scale_down(self, count: int) -> int:
+        """Scale down by removing workers."""
         to_remove = min(count, len(self._workers) - self.config.min_workers)
         for _ in range(to_remove):
             if self._workers:
                 key = list(self._workers.keys())[-1]
                 del self._workers[key]
         return to_remove
-
-    def _rebalance_partitions(self) -> None:
-        """Mock partition rebalancing."""
-        pass
-
-    async def _notify_workers_partition_update(self) -> None:
-        """Mock worker partition notification."""
-        pass
 
 
 class MockSourceMaster:

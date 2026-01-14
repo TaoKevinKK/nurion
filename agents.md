@@ -258,7 +258,42 @@ For Solstice integration tests, you need:
 
 ### Preferred Patterns
 
-1. **Use Protocols over Abstract Classes**: Prefer `typing.Protocol` for structural subtyping
+1. **Operators are config-driven, stateless containers**: All runtime context flows through `OperatorConfig`
+   ```python
+   # Good: Operator only takes config, runtime context via config properties
+   @dataclass
+   class MyOperatorConfig(OperatorConfig):
+       input_path: str
+       num_partitions: int = 1
+       # Runtime context inherited from base: job_id, stage_id, worker_id
+   
+   class MyOperator(Operator):
+       def __init__(self, config: MyOperatorConfig):  # Only config!
+           super().__init__(config)
+           self.my_config = config
+       
+       def process_split(self, split, payload):
+           # Access runtime context via properties (from config)
+           self.logger.info(f"Worker {self.worker_id} processing")
+           # Access job_id, stage_id similarly
+   
+   # Bad: Passing runtime context separately
+   class BadOperator(Operator):
+       def __init__(self, config, worker_id=None):  # Don't do this
+           ...
+       
+       def set_state_store(self, store, partition):  # Don't do this
+           ...
+   ```
+   
+   **Design principles**:
+   - `Operator.__init__` only takes `OperatorConfig` - no `worker_id`, no `state_store`
+   - Runtime context (`job_id`, `stage_id`, `worker_id`) lives in `OperatorConfig` base class
+   - `StageWorker` sets runtime context on config before calling `config.setup()`
+   - Stateful operators create their own state store lazily from config values
+   - No `set_*()` methods for injecting dependencies - everything comes from config
+
+2. **Use Protocols over Abstract Classes**: Prefer `typing.Protocol` for structural subtyping
    ```python
    # Good: Protocol (structural)
    from typing import Protocol
@@ -380,13 +415,26 @@ runner.run()
 ### Custom Operator
 
 ```python
+from dataclasses import dataclass
 from typing import Optional
 
-from solstice.core.operator import Operator
+from solstice.core.operator import Operator, OperatorConfig
 from solstice.core.models import Split, SplitPayload
 
 
+@dataclass
+class MyOperatorConfig(OperatorConfig):
+    """Configuration for MyOperator."""
+    multiplier: int = 2
+
+
 class MyOperator(Operator):
+    """Example custom operator."""
+    
+    def __init__(self, config: MyOperatorConfig):
+        super().__init__(config)
+        self.my_config = config
+
     def process_split(
         self,
         split: Split,
@@ -399,6 +447,10 @@ class MyOperator(Operator):
         table = payload.to_table()
         # TODO: apply transformations on `table`
         return SplitPayload(data=table, split_id=split.split_id)
+
+
+# Link config to operator class
+MyOperatorConfig.operator_class = MyOperator
 ```
 
 ## WebUI - Debugging Interface
@@ -509,9 +561,10 @@ solstice history-server -s s3://bucket/solstice-history/ -p 8080
 
 ---
 
-*Last updated: 2025-01-08*
+*Last updated: 2025-01-14*
 
 <!-- Changelog:
+- 2025-01-14: Added pattern #1 (operators are config-driven); updated Custom Operator example
 - 2025-01-08: Added pattern #8 (keep API responses minimal)
 - 2025-01-07: Added patterns #6 (no uncertain fallbacks) and #7 (minimize self._ state)
 -->

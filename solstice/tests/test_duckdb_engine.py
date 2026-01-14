@@ -34,11 +34,13 @@ class TestDuckDBEngine:
     @pytest.fixture
     def sample_table(self):
         """Create a sample table for testing."""
-        return pa.table({
-            "user_id": [1, 2, 1, 3, 2, 1],
-            "amount": [100, 200, 150, 300, 250, 50],
-            "category": ["A", "B", "A", "C", "B", "A"],
-        })
+        return pa.table(
+            {
+                "user_id": [1, 2, 1, 3, 2, 1],
+                "amount": [100, 200, 150, 300, 250, 50],
+                "category": ["A", "B", "A", "C", "B", "A"],
+            }
+        )
 
     def test_hash_partition(self, engine, sample_table):
         """Test hash partitioning."""
@@ -105,10 +107,7 @@ class TestDuckDBEngine:
         assert "sum_amount" in result.column_names
 
         # Verify sums
-        result_dict = {
-            row["user_id"]: row["sum_amount"]
-            for row in result.to_pylist()
-        }
+        result_dict = {row["user_id"]: row["sum_amount"] for row in result.to_pylist()}
         assert result_dict[1] == 300  # 100 + 150 + 50
         assert result_dict[2] == 450  # 200 + 250
         assert result_dict[3] == 300
@@ -155,17 +154,22 @@ class TestDuckDBEngine:
 
     def test_hash_join_inner(self, engine):
         """Test inner hash join."""
-        left = pa.table({
-            "user_id": [1, 2, 3],
-            "name": ["Alice", "Bob", "Charlie"],
-        })
-        right = pa.table({
-            "user_id": [1, 2, 4],
-            "score": [100, 200, 400],
-        })
+        left = pa.table(
+            {
+                "user_id": [1, 2, 3],
+                "name": ["Alice", "Bob", "Charlie"],
+            }
+        )
+        right = pa.table(
+            {
+                "user_id": [1, 2, 4],
+                "score": [100, 200, 400],
+            }
+        )
 
         result = engine.hash_join(
-            left, right,
+            left,
+            right,
             join_keys=["user_id"],
             join_type="inner",
         )
@@ -177,17 +181,22 @@ class TestDuckDBEngine:
 
     def test_hash_join_left(self, engine):
         """Test left hash join."""
-        left = pa.table({
-            "user_id": [1, 2, 3],
-            "name": ["Alice", "Bob", "Charlie"],
-        })
-        right = pa.table({
-            "user_id": [1, 2, 4],
-            "score": [100, 200, 400],
-        })
+        left = pa.table(
+            {
+                "user_id": [1, 2, 3],
+                "name": ["Alice", "Bob", "Charlie"],
+            }
+        )
+        right = pa.table(
+            {
+                "user_id": [1, 2, 4],
+                "score": [100, 200, 400],
+            }
+        )
 
         result = engine.hash_join(
-            left, right,
+            left,
+            right,
             join_keys=["user_id"],
             join_type="left",
         )
@@ -199,17 +208,22 @@ class TestDuckDBEngine:
 
     def test_hash_join_duplicate_columns(self, engine):
         """Test join with duplicate column names."""
-        left = pa.table({
-            "user_id": [1, 2],
-            "value": [10, 20],
-        })
-        right = pa.table({
-            "user_id": [1, 2],
-            "value": [100, 200],
-        })
+        left = pa.table(
+            {
+                "user_id": [1, 2],
+                "value": [10, 20],
+            }
+        )
+        right = pa.table(
+            {
+                "user_id": [1, 2],
+                "value": [100, 200],
+            }
+        )
 
         result = engine.hash_join(
-            left, right,
+            left,
+            right,
             join_keys=["user_id"],
             left_suffix="_l",
             right_suffix="_r",
@@ -250,10 +264,12 @@ class TestDuckDBEngine:
 
     def test_dedupe_basic(self, engine):
         """Test basic deduplication (non-deterministic without order_by)."""
-        table = pa.table({
-            "user_id": [1, 1, 2, 2, 3],
-            "value": [10, 20, 30, 40, 50],
-        })
+        table = pa.table(
+            {
+                "user_id": [1, 1, 2, 2, 3],
+                "value": [10, 20, 30, 40, 50],
+            }
+        )
 
         result = engine.dedupe(table, key_columns=["user_id"])
 
@@ -261,11 +277,13 @@ class TestDuckDBEngine:
 
     def test_dedupe_with_order_keep_first(self, engine):
         """Test deduplication keeping first by order column."""
-        table = pa.table({
-            "user_id": [1, 1, 1, 2, 2],
-            "value": ["first", "second", "third", "a", "b"],
-            "seq": [1, 2, 3, 4, 5],
-        })
+        table = pa.table(
+            {
+                "user_id": [1, 1, 1, 2, 2],
+                "value": ["first", "second", "third", "a", "b"],
+                "seq": [1, 2, 3, 4, 5],
+            }
+        )
 
         result = engine.dedupe(table, key_columns=["user_id"], order_by="seq", keep="first")
 
@@ -280,11 +298,13 @@ class TestDuckDBEngine:
 
     def test_dedupe_with_order_keep_last(self, engine):
         """Test deduplication keeping last by order column."""
-        table = pa.table({
-            "user_id": [1, 1, 1, 2, 2],
-            "value": ["first", "second", "third", "a", "b"],
-            "seq": [1, 2, 3, 4, 5],
-        })
+        table = pa.table(
+            {
+                "user_id": [1, 1, 1, 2, 2],
+                "value": ["first", "second", "third", "a", "b"],
+                "seq": [1, 2, 3, 4, 5],
+            }
+        )
 
         result = engine.dedupe(table, key_columns=["user_id"], order_by="seq", keep="last")
 
@@ -299,10 +319,12 @@ class TestDuckDBEngine:
 
     def test_dedupe_first_vs_last_differ(self, engine):
         """Test that keep='first' and keep='last' produce different results with order_by."""
-        table = pa.table({
-            "key": ["a", "a", "b", "b"],
-            "seq_num": [1, 2, 3, 4],
-        })
+        table = pa.table(
+            {
+                "key": ["a", "a", "b", "b"],
+                "seq_num": [1, 2, 3, 4],
+            }
+        )
 
         first_result = engine.dedupe(table, key_columns=["key"], order_by="seq_num", keep="first")
         last_result = engine.dedupe(table, key_columns=["key"], order_by="seq_num", keep="last")
@@ -325,10 +347,12 @@ class TestDuckDBEngine:
 
     def test_dedupe_without_order_ignores_keep(self, engine):
         """Test that keep param is ignored when order_by is not specified."""
-        table = pa.table({
-            "key": [1, 1, 2],
-            "value": ["a", "b", "c"],
-        })
+        table = pa.table(
+            {
+                "key": [1, 1, 2],
+                "value": ["a", "b", "c"],
+            }
+        )
 
         # Both should work without error (keep is ignored)
         result1 = engine.dedupe(table, key_columns=["key"], keep="first")
@@ -339,12 +363,14 @@ class TestDuckDBEngine:
 
     def test_dedupe_multiple_keys(self, engine):
         """Test deduplication with multiple key columns."""
-        table = pa.table({
-            "key1": ["a", "a", "a", "b"],
-            "key2": [1, 1, 2, 1],
-            "value": ["first", "second", "third", "fourth"],
-            "seq": [1, 2, 3, 4],
-        })
+        table = pa.table(
+            {
+                "key1": ["a", "a", "a", "b"],
+                "key2": [1, 1, 2, 1],
+                "value": ["first", "second", "third", "fourth"],
+                "seq": [1, 2, 3, 4],
+            }
+        )
 
         result = engine.dedupe(table, key_columns=["key1", "key2"], order_by="seq", keep="first")
 
@@ -359,14 +385,18 @@ class TestDuckDBEngine:
     def test_partial_and_merge_aggregate_sum(self, engine):
         """Test two-phase sum aggregation."""
         # Simulate data split across two partitions
-        table1 = pa.table({
-            "user_id": [1, 2],
-            "amount": [100, 200],
-        })
-        table2 = pa.table({
-            "user_id": [1, 3],
-            "amount": [150, 300],
-        })
+        table1 = pa.table(
+            {
+                "user_id": [1, 2],
+                "amount": [100, 200],
+            }
+        )
+        table2 = pa.table(
+            {
+                "user_id": [1, 3],
+                "amount": [150, 300],
+            }
+        )
 
         # Partial aggregates
         partial1 = engine.partial_aggregate(
@@ -388,10 +418,7 @@ class TestDuckDBEngine:
         )
 
         # Verify
-        result_dict = {
-            row["user_id"]: row["sum_amount"]
-            for row in result.to_pylist()
-        }
+        result_dict = {row["user_id"]: row["sum_amount"] for row in result.to_pylist()}
         assert result_dict[1] == 250  # 100 + 150
         assert result_dict[2] == 200
         assert result_dict[3] == 300
@@ -408,15 +435,19 @@ class TestDuckDBEngine:
         Correct: (500 + 100) / 110 = 5.45
         """
         # Partition 1: 3 rows with values 10, 20, 30 (sum=60, avg=20)
-        table1 = pa.table({
-            "group_id": [1, 1, 1],
-            "value": [10, 20, 30],
-        })
+        table1 = pa.table(
+            {
+                "group_id": [1, 1, 1],
+                "value": [10, 20, 30],
+            }
+        )
         # Partition 2: 1 row with value 100 (sum=100, avg=100)
-        table2 = pa.table({
-            "group_id": [1],
-            "value": [100],
-        })
+        table2 = pa.table(
+            {
+                "group_id": [1],
+                "value": [100],
+            }
+        )
 
         # Partial aggregates
         partial1 = engine.partial_aggregate(
@@ -444,14 +475,18 @@ class TestDuckDBEngine:
 
     def test_partial_and_merge_aggregate_multiple(self, engine):
         """Test two-phase aggregation with multiple functions."""
-        table1 = pa.table({
-            "user_id": [1, 1],
-            "amount": [100, 200],
-        })
-        table2 = pa.table({
-            "user_id": [1, 1, 1],
-            "amount": [300, 400, 500],
-        })
+        table1 = pa.table(
+            {
+                "user_id": [1, 1],
+                "amount": [100, 200],
+            }
+        )
+        table2 = pa.table(
+            {
+                "user_id": [1, 1, 1],
+                "amount": [300, 400, 500],
+            }
+        )
 
         # Partial aggregates with sum, count, avg, min, max
         partial1 = engine.partial_aggregate(

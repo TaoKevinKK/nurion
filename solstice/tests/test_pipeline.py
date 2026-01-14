@@ -46,8 +46,8 @@ pytestmark = pytest.mark.asyncio(loop_scope="function")
 class MockSourceOperator(Operator):
     """Source operator that generates test data."""
 
-    def __init__(self, config: "MockSourceConfig", worker_id: str = None):
-        super().__init__(config, worker_id)
+    def __init__(self, config: "MockSourceConfig"):
+        super().__init__(config)
         self._generated = 0
 
     def generate_splits(self) -> List[Split]:
@@ -127,8 +127,8 @@ MockSourceConfig.master_class = MockSourceMaster
 class MockTransformOperator(Operator):
     """Transform operator that modifies data."""
 
-    def __init__(self, config: "MockTransformConfig", worker_id: str = None):
-        super().__init__(config, worker_id)
+    def __init__(self, config: "MockTransformConfig"):
+        super().__init__(config)
         self._processed = 0
 
     def process_split(
@@ -175,8 +175,8 @@ class MockSinkOperator(Operator):
     # Shared storage for test verification
     collected_records: List[Dict] = []
 
-    def __init__(self, config: "MockSinkConfig", worker_id: str = None):
-        super().__init__(config, worker_id)
+    def __init__(self, config: "MockSinkConfig"):
+        super().__init__(config)
 
     def process_split(
         self, split: Split, payload: Optional[SplitPayload]

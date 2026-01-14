@@ -23,7 +23,6 @@ from solstice.checkpoint import (
     FsspecCheckpointStorage,
     JobCheckpointData,
     PartitionCheckpointData,
-    RecoveryResult,
     StageCheckpointData,
     get_partition_offset,
     recover_from_checkpoint,

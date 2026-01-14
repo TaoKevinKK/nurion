@@ -15,8 +15,8 @@
 """Base operator interface with EasyConfig pattern"""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, fields
-from typing import Any, ClassVar, Dict, Optional, Type, TypeVar, TYPE_CHECKING
+from dataclasses import dataclass, field, fields
+from typing import Any, Callable, ClassVar, Dict, Optional, Type, TypeVar, TYPE_CHECKING
 import logging
 
 from solstice.core.models import SplitPayload, Split
@@ -26,6 +26,51 @@ if TYPE_CHECKING:
 
 
 T = TypeVar("T", bound="Operator")
+F = TypeVar("F", bound=Callable[..., Any])
+
+
+# =============================================================================
+# Master-Callable Decorator
+# =============================================================================
+#
+# Marks operator methods that can be invoked remotely by the master via
+# worker.invoke_operator(). This provides a secure, extensible mechanism
+# for master-worker communication without modifying StageWorker for each
+# new operator feature.
+
+
+def master_callable(func: F) -> F:
+    """Decorator to mark operator methods as callable by master.
+
+    Methods decorated with @master_callable can be invoked remotely via
+    worker.invoke_operator("method_name", *args, **kwargs).
+
+    This enables extensible master-worker communication:
+    - Add new operator methods without modifying StageWorker
+    - Explicit marking ensures only intended methods are exposed
+    - Type safety preserved in the operator class
+
+    Example:
+        class MyOperator(Operator):
+            @master_callable
+            def get_stats(self) -> Dict[str, int]:
+                return {"processed": self._count}
+
+            @master_callable
+            def reset_state(self, iteration: int) -> None:
+                self._iteration = iteration
+
+        # From master:
+        stats = ray.get(worker.invoke_operator.remote("get_stats"))
+        ray.get(worker.invoke_operator.remote("reset_state", iteration=2))
+    """
+    func._master_callable = True  # type: ignore[attr-defined]
+    return func
+
+
+def is_master_callable(method: Any) -> bool:
+    """Check if a method is marked with @master_callable."""
+    return getattr(method, "_master_callable", False)
 
 
 @dataclass
@@ -45,31 +90,49 @@ class OperatorConfig(ABC):
 
         # Usage:
         config = MyOperatorConfig(param1="value")
-        operator = config.setup(worker_id="worker_0")
+        config.job_id = "job_123"
+        config.stage_id = "stage_0"
+        config.worker_id = "worker_0"
+        operator = config.setup()
 
     Class Variables:
         operator_class: The operator class to instantiate
         master_class: The master class to use (None = use default StageMaster)
+
+    Runtime Context (set by runner before setup()):
+        job_id: Job identifier
+        stage_id: Stage identifier
+        worker_id: Worker identifier
     """
 
     operator_class: ClassVar[Type["Operator"]]
     master_class: ClassVar[Optional[Type["StageMaster"]]] = None  # Default: use StageMaster
 
-    def setup(self, worker_id: Optional[str] = None) -> "Operator":
+    # Runtime context - set by runner/worker before setup()
+    # These are NOT constructor args, set via attribute assignment after init
+    # Using init=False to avoid dataclass inheritance ordering issues
+    job_id: Optional[str] = field(default=None, init=False, repr=False)
+    stage_id: Optional[str] = field(default=None, init=False, repr=False)
+    worker_id: Optional[str] = field(default=None, init=False, repr=False)
+
+    def setup(self) -> "Operator":
         """Create and return an operator instance with this configuration.
 
-        Args:
-            worker_id: Optional worker ID to pass to the operator
+        Note: job_id, stage_id, worker_id should be set on the config
+        before calling setup(). The operator accesses these via config.
 
         Returns:
             Configured operator instance
         """
-        return self.operator_class(config=self, worker_id=worker_id)
+        return self.operator_class(config=self)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert config to dictionary representation."""
         result = {}
         for f in fields(self):
+            # Skip runtime context fields
+            if f.name in ("job_id", "stage_id", "worker_id"):
+                continue
             value = getattr(self, f.name)
             # Handle nested configs
             if isinstance(value, OperatorConfig):
@@ -80,16 +143,30 @@ class OperatorConfig(ABC):
 
 
 class Operator(ABC):
-    """Base class for all operators"""
+    """Base class for all operators.
 
-    def __init__(
-        self,
-        config: OperatorConfig,
-        worker_id: Optional[str] = None,
-    ):
+    Design Principle: Operators should be stateless configuration containers.
+    Runtime context (job_id, stage_id, worker_id) is accessed via self.config.
+    """
+
+    def __init__(self, config: OperatorConfig):
         self.config = config
         self.logger = logging.getLogger(self.__class__.__name__)
-        self.worker_id = worker_id
+
+    @property
+    def worker_id(self) -> Optional[str]:
+        """Worker ID from config (for backward compatibility)."""
+        return self.config.worker_id
+
+    @property
+    def job_id(self) -> Optional[str]:
+        """Job ID from config."""
+        return self.config.job_id
+
+    @property
+    def stage_id(self) -> Optional[str]:
+        """Stage ID from config."""
+        return self.config.stage_id
 
     @abstractmethod
     def process_split(
@@ -109,12 +186,8 @@ class SourceOperator(Operator):
     Subclasses should update the offset after reading data using `update_offset()`.
     """
 
-    def __init__(
-        self,
-        config: OperatorConfig,
-        worker_id: Optional[str] = None,
-    ):
-        super().__init__(config, worker_id)
+    def __init__(self, config: OperatorConfig):
+        super().__init__(config)
         # Offset tracking for checkpoint/resume
         self._current_offset: Dict[str, Any] = {}
 
@@ -192,12 +265,8 @@ class SinkOperator(Operator):
     For simpler at-least-once semantics, just implement `process_split()`.
     """
 
-    def __init__(
-        self,
-        config: OperatorConfig,
-        worker_id: Optional[str] = None,
-    ):
-        super().__init__(config, worker_id)
+    def __init__(self, config: OperatorConfig):
+        super().__init__(config)
         # Track pending writes for exactly-once
         self._pending_commit_id: Optional[str] = None
         self._commit_offset: Dict[str, Any] = {}

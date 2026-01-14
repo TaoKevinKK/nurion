@@ -1,7 +1,12 @@
 """Core components of the streaming framework"""
 
 from solstice.core.job import Job, JobConfig
-from solstice.core.operator import Operator, OperatorConfig
+from solstice.core.operator import (
+    Operator,
+    OperatorConfig,
+    master_callable,
+    is_master_callable,
+)
 from solstice.core.stage import Stage
 from solstice.core.stage_config import (
     StageConfig,
@@ -29,6 +34,8 @@ __all__ = [
     # Operator
     "Operator",
     "OperatorConfig",
+    "master_callable",
+    "is_master_callable",
     # Queue
     "QueueType",
     "QueueEndpoint",

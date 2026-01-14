@@ -95,12 +95,8 @@ class CandidatePairOperator(Operator):
     so all documents with the same band_hash are in the same partition.
     """
 
-    def __init__(
-        self,
-        config: CandidatePairConfig,
-        worker_id: Optional[str] = None,
-    ):
-        super().__init__(config, worker_id)
+    def __init__(self, config: CandidatePairConfig):
+        super().__init__(config)
         self.candidate_config = config
 
     def process_split(

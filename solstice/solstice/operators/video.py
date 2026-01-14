@@ -140,8 +140,8 @@ class FFmpegSceneDetectConfig(OperatorConfig):
 class FFmpegSceneDetectOperator(Operator):
     """Detect scenes for each video referenced in a batch."""
 
-    def __init__(self, config: FFmpegSceneDetectConfig, worker_id: Optional[str] = None):
-        super().__init__(config, worker_id)
+    def __init__(self, config: FFmpegSceneDetectConfig):
+        super().__init__(config)
         self.scene_threshold = config.scene_threshold
         self.min_scene_duration = config.min_scene_duration
 
@@ -238,8 +238,8 @@ class FFmpegSliceOperator(Operator):
     Slices are stored as binary data (bytes) for Lance blob storage.
     """
 
-    def __init__(self, config: FFmpegSliceConfig, worker_id: Optional[str] = None):
-        super().__init__(config, worker_id)
+    def __init__(self, config: FFmpegSliceConfig):
+        super().__init__(config)
         self.min_duration = config.min_scene_duration
 
     def _build_slice_filename(self, record: Dict[str, Any]) -> str:

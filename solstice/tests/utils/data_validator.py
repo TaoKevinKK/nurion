@@ -41,9 +41,7 @@ class DataValidator:
         return len(ids) == len(set(ids))
 
     @staticmethod
-    def verify_no_duplicates_composite(
-        records: List[Dict], id_fields: List[str]
-    ) -> bool:
+    def verify_no_duplicates_composite(records: List[Dict], id_fields: List[str]) -> bool:
         """Verify no duplicates using composite key (multiple fields).
 
         Useful for exploded data where (id, copy_idx) forms unique key.
@@ -147,8 +145,7 @@ class DataValidator:
         """
         # Calculate expected count
         expected_count = sum(
-            1 for i in range(source_count)
-            if i % filter_modulo == filter_remainder
+            1 for i in range(source_count) if i % filter_modulo == filter_remainder
         )
 
         if len(records) != expected_count:
@@ -223,8 +220,7 @@ class DataValidator:
         """
         # Calculate expected count
         filtered_count = sum(
-            1 for i in range(source_count)
-            if i % filter_modulo == filter_remainder
+            1 for i in range(source_count) if i % filter_modulo == filter_remainder
         )
         expected_count = filtered_count * explode_factor
 
@@ -232,10 +228,7 @@ class DataValidator:
             return False
 
         # Verify each filtered ID appears exactly explode_factor times
-        expected_ids = {
-            i for i in range(source_count)
-            if i % filter_modulo == filter_remainder
-        }
+        expected_ids = {i for i in range(source_count) if i % filter_modulo == filter_remainder}
 
         id_counts = {}
         for record in records:
@@ -260,10 +253,7 @@ class DataValidator:
         filter_remainder: int,
     ) -> int:
         """Calculate expected record count after filter."""
-        return sum(
-            1 for i in range(source_count)
-            if i % filter_modulo == filter_remainder
-        )
+        return sum(1 for i in range(source_count) if i % filter_modulo == filter_remainder)
 
     @staticmethod
     def calculate_filter_explode_expected_count(
@@ -273,8 +263,5 @@ class DataValidator:
         explode_factor: int,
     ) -> int:
         """Calculate expected record count after filter + explode."""
-        filtered = sum(
-            1 for i in range(source_count)
-            if i % filter_modulo == filter_remainder
-        )
+        filtered = sum(1 for i in range(source_count) if i % filter_modulo == filter_remainder)
         return filtered * explode_factor

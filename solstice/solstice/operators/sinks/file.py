@@ -54,8 +54,8 @@ class FileSink(SinkOperator):
     - On rollback(), the staging file is deleted
     """
 
-    def __init__(self, config: FileSinkConfig, worker_id: Optional[str] = None):
-        super().__init__(config, worker_id)
+    def __init__(self, config: FileSinkConfig):
+        super().__init__(config)
         if not config.output_path:
             raise ValueError("output_path is required for FileSink")
 

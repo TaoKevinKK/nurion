@@ -377,14 +377,14 @@ class TestExplodeOperatorConsistency:
         assert validator.verify_count(sink_data, expected_count), (
             f"Explode 3x: expected {expected_count}, got {len(sink_data)}"
         )
-        assert validator.verify_explode_result(
-            sink_data, NUM_RECORDS, EXPLODE_FACTOR
-        ), "Explode result incorrect"
+        assert validator.verify_explode_result(sink_data, NUM_RECORDS, EXPLODE_FACTOR), (
+            "Explode result incorrect"
+        )
 
         # Verify no duplicates with composite key (id, copy_idx)
-        assert validator.verify_no_duplicates_composite(
-            sink_data, ["id", "copy_idx"]
-        ), "Duplicate (id, copy_idx) found"
+        assert validator.verify_no_duplicates_composite(sink_data, ["id", "copy_idx"]), (
+            "Duplicate (id, copy_idx) found"
+        )
 
         # Verify checksums (each copy should have same checksum as source)
         assert validator.verify_checksums(source_data, sink_data)
@@ -419,9 +419,7 @@ class TestExplodeOperatorConsistency:
         assert validator.verify_count(sink_data, expected_count), (
             f"Explode 5x: expected {expected_count}, got {len(sink_data)}"
         )
-        assert validator.verify_explode_result(
-            sink_data, NUM_RECORDS, EXPLODE_FACTOR
-        )
+        assert validator.verify_explode_result(sink_data, NUM_RECORDS, EXPLODE_FACTOR)
 
 
 class TestFilterExplodeConsistency:
@@ -752,8 +750,8 @@ class TestFaultScenarioConsistency:
         assert validator.verify_count(sink_data, expected_count), (
             f"Data loss in large dataset: expected {expected_count}, got {len(sink_data)}"
         )
-        assert validator.verify_no_duplicates_composite(
-            sink_data, ["id", "copy_idx"]
-        ), "Duplicates in large dataset"
+        assert validator.verify_no_duplicates_composite(sink_data, ["id", "copy_idx"]), (
+            "Duplicates in large dataset"
+        )
         assert validator.verify_explode_result(sink_data, NUM_RECORDS, EXPLODE_FACTOR)
         assert validator.verify_checksums(source_data, sink_data)

@@ -113,9 +113,7 @@ async def wait_for_stage_workers(
             pass
         await asyncio.sleep(0.1)
 
-    raise TimeoutError(
-        f"Stage {stage_id} did not reach {min_workers} workers within {timeout}s"
-    )
+    raise TimeoutError(f"Stage {stage_id} did not reach {min_workers} workers within {timeout}s")
 
 
 async def kill_random_worker(

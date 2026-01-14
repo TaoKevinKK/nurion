@@ -46,7 +46,8 @@ class TestMapOperator:
             return {"value": value["value"] + 1}
 
         config = MapOperatorConfig(map_fn=increment)
-        operator = config.setup(worker_id="worker-1")
+        config.worker_id = "worker-1"
+        operator = config.setup()
         split = make_split()
         batch = make_payload([{"value": 1}, {"value": 41}])
 
@@ -80,7 +81,8 @@ class TestFlatMapOperator:
             return pa.Table.from_pylist(expanded)
 
         config = FlatMapOperatorConfig(flatmap_fn=duplicate)
-        operator = config.setup(worker_id="w0")
+        config.worker_id = "w0"
+        operator = config.setup()
         split = make_split()
         batch = make_payload([{"video": "a"}, {"video": "b"}])
 
@@ -182,7 +184,8 @@ class TestFileSink:
             format="json",
             buffer_size=1,
         )
-        sink = config.setup(worker_id="sink_worker_0")
+        config.worker_id = "sink_worker_0"
+        sink = config.setup()
         split = make_split("sink-split")
         batch = make_payload([{"value": 1, "key": "k"}])
 

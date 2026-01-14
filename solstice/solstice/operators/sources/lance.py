@@ -67,8 +67,8 @@ def _get_lance_storage_options(uri: str) -> Optional[dict]:
 class LanceTableSource(SourceOperator):
     """Source operator for reading from Lance tables."""
 
-    def __init__(self, config: LanceTableSourceConfig, worker_id: Optional[str] = None):
-        super().__init__(config, worker_id)
+    def __init__(self, config: LanceTableSourceConfig):
+        super().__init__(config)
         if not config.dataset_uri:
             raise ValueError("dataset_uri is required for LanceTableSource")
         self.dataset_uri: str = config.dataset_uri

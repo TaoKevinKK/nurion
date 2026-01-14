@@ -47,8 +47,8 @@ class _TestOperatorConfig(OperatorConfig):
 class _TestOperator(Operator):
     """Test operator that passes through data (prefixed with _ to avoid pytest collection)."""
 
-    def __init__(self, config: _TestOperatorConfig, worker_id: str = None):
-        super().__init__(config, worker_id)
+    def __init__(self, config: _TestOperatorConfig):
+        super().__init__(config)
         self._closed = False
 
     def process_split(self, split, payload):

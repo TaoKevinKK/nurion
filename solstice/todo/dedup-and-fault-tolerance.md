@@ -2,7 +2,7 @@
 
 Track implementation status of deduplication operators and fault tolerance features.
 
-> **Last Updated**: 2025-01-12
+> **Last Updated**: 2026-01-13
 
 ---
 
@@ -60,21 +60,44 @@ Track implementation status of deduplication operators and fault tolerance featu
 
 ---
 
+## ✅ Recently Completed (2026-01-13)
+
+### CCIterateMaster Full Iteration - IMPLEMENTED
+
+- [x] **StageWorker iteration methods**
+  - `start_iteration(iteration, config)` - Prepare worker for new iteration
+  - `output_final_labels()` - Output final results after convergence
+  - `report_partition_changes(partition_id, count)` - Record changes for convergence
+  - `complete_iteration()` - Report changes to master
+
+- [x] **CCIterateOperator integration**
+  - `set_change_reporter(reporter)` - Set callback for reporting changes
+  - `start_iteration(iteration, config)` - Prepare for new iteration
+  - Reports changes during `process_data()` via change reporter
+
+- [x] **CCIterateMaster full iteration loop**
+  - Implements convergence detection (changes < threshold or max iterations)
+  - Notifies workers of new iterations
+  - Waits for all partitions to report
+  - Tracks iteration statistics
+
+### Worker State Store Integration - IMPLEMENTED
+
+- [x] **StageWorker state store support**
+  - `set_state_store_config(path)` - Configure state store path
+  - `_init_state_store()` - Initialize SlateDB for assigned partitions
+  - `_update_state_store_partitions()` - Handle partition rebalance
+  - `_close_state_store()` - Release all partitions on shutdown
+
+- [x] **WorkerManager integration**
+  - Extracts `state_store_path` from operator config
+  - Passes state store path to workers after creation
+
+---
+
 ## 📋 TODO
 
 ### High Priority
-
-- [ ] **CCIterateMaster Full Iteration (NOT IMPLEMENTED)**
-  - Current status: Runs single pass, no actual iteration
-  - ❌ `StageWorker` missing `start_iteration()` method
-  - ❌ `StageWorker` missing `output_final_labels()` method
-  - ❌ Workers don't call `report_partition_changes()` back to master
-  
-  **Required for full MinHash dedup:**
-  1. Add iteration methods to StageWorker
-  2. CCIterateOperator reports changes per partition
-  3. Master collects changes, decides convergence
-  4. Master triggers next iteration if not converged
 
 - [ ] **Checkpoint Recovery (NOT IMPLEMENTED)**
   - Current status: Scaffolding exists but doesn't work
@@ -87,11 +110,6 @@ Track implementation status of deduplication operators and fault tolerance featu
   **Options:**
   1. Implement fully (significant work)
   2. Remove scaffolding, implement later when needed
-
-- [ ] **Worker State Store Integration**
-  - Workers need to create/acquire state stores
-  - Pass state store to operators via `set_state_store()`
-  - Release state store on worker shutdown
 
 ### Medium Priority
 

@@ -325,8 +325,8 @@ class TestQueueFaultRecovery:
         assert validator.verify_count(sink_data, expected_count), (
             f"Messages skipped: expected {expected_count}, got {len(sink_data)}"
         )
-        assert validator.verify_no_duplicates_composite(
-            sink_data, ["id", "copy_idx"]
-        ), "Duplicate records found"
+        assert validator.verify_no_duplicates_composite(sink_data, ["id", "copy_idx"]), (
+            "Duplicate records found"
+        )
         assert validator.verify_explode_result(sink_data, NUM_RECORDS, EXPLODE_FACTOR)
         assert validator.verify_checksums(source_data, sink_data)

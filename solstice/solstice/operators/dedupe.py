@@ -41,7 +41,6 @@ from typing import ClassVar, List, Optional, Type
 import pyarrow as pa
 
 from solstice.operators.shuffle import ShuffleOperator, ShuffleOperatorConfig
-from solstice.state import SlateDBPartitionStateStore
 
 
 @dataclass
@@ -54,12 +53,12 @@ class HashDedupeConfig(ShuffleOperatorConfig):
     Attributes:
         dedup_keys: Columns that define uniqueness (same as partition_keys)
         keep: Which duplicate to keep ("first" or "last")
-        state_store_path: Path for SlateDB state storage
+        state_store_path: Inherited from ShuffleOperatorConfig
     """
 
     dedup_keys: List[str] = field(default_factory=list)
     keep: str = "first"  # "first" or "last"
-    state_store_path: Optional[str] = None
+    # state_store_path is inherited from ShuffleOperatorConfig
 
     operator_class: ClassVar[Type["HashDedupeOperator"]] = None  # type: ignore[assignment]  # Set below
 
@@ -95,30 +94,9 @@ class HashDedupeOperator(ShuffleOperator):
         - On recovery, SlateDB state is restored automatically
     """
 
-    def __init__(
-        self,
-        config: HashDedupeConfig,
-        worker_id: Optional[str] = None,
-    ):
-        super().__init__(config, worker_id)
+    def __init__(self, config: HashDedupeConfig):
+        super().__init__(config)
         self.dedupe_config = config
-
-        # State store reference (set by worker, not owned by operator)
-        self._state_store: Optional[SlateDBPartitionStateStore] = None
-        self._partition_id: Optional[int] = None
-
-    def set_state_store(
-        self,
-        state_store: SlateDBPartitionStateStore,
-        partition_id: int,
-    ) -> None:
-        """Set the state store for tracking seen keys.
-
-        Called by the worker with the partition's state store.
-        The operator does not own or manage the state store lifecycle.
-        """
-        self._state_store = state_store
-        self._partition_id = partition_id
 
     @property
     def dedup_keys(self) -> List[str]:
@@ -153,20 +131,25 @@ class HashDedupeOperator(ShuffleOperator):
             return None
 
         # If no state store, only do batch-level dedup
-        if self._state_store is None:
-            self.logger.warning("No state store set - only performing batch-level deduplication")
+        if self.state_store is None:
+            self.logger.warning(
+                "No state store configured - only performing batch-level deduplication"
+            )
             return deduped_table
 
         # Cross-batch dedup via state store (synchronous)
         output_rows = []
         keys_to_mark = []
 
+        # Compute partition from first row's key (all rows in batch should go to same partition)
+        partition_id = self._compute_partition_for_row(deduped_table, 0)
+        self._ensure_partition_acquired(partition_id)
+
         for i in range(deduped_table.num_rows):
             key_hash = self._compute_key_hash(deduped_table, i)
 
             # Check if key exists in state store (synchronous)
-            assert self._partition_id is not None, "partition_id not set"
-            existing = self._state_store.get(self._partition_id, key_hash)
+            existing = self.state_store.get(partition_id, key_hash)
 
             if existing is None:
                 # Key not seen before - output it
@@ -174,17 +157,27 @@ class HashDedupeOperator(ShuffleOperator):
                 keys_to_mark.append(key_hash)
 
         # Mark new keys as seen (synchronous)
-        # _partition_id assertion already done above
-        partition_id = self._partition_id
-        assert partition_id is not None
         for key_hash in keys_to_mark:
-            self._state_store.put(partition_id, key_hash, b"1")
+            self.state_store.put(partition_id, key_hash, b"1")
 
         if not output_rows:
             return None
 
         # Select only the non-duplicate rows
         return deduped_table.take(output_rows)
+
+    def _compute_partition_for_row(self, table: pa.Table, row_idx: int) -> int:
+        """Compute partition ID for a row based on key columns."""
+        import hashlib
+
+        key_parts = []
+        for col_name in self.dedup_keys:
+            value = table.column(col_name)[row_idx].as_py()
+            key_parts.append(str(value))
+
+        key_str = "|".join(key_parts)
+        h = int(hashlib.sha256(key_str.encode()).hexdigest(), 16)
+        return h % self.num_partitions
 
     def _compute_key_hash(self, table: pa.Table, row_idx: int) -> bytes:
         """Compute a hash of the dedup key values for a row."""
@@ -197,13 +190,6 @@ class HashDedupeOperator(ShuffleOperator):
 
         key_str = "|".join(key_parts)
         return hashlib.sha256(key_str.encode()).digest()[:16]
-
-    def close(self) -> None:
-        """Clean up resources.
-
-        Note: The operator does not own the state store, so we don't close it.
-        """
-        super().close()
 
 
 # Set the operator class reference

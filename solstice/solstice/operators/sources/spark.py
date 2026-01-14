@@ -99,12 +99,8 @@ class SparkSource(SourceOperator):
     by SparkSourceMaster using raydp.
     """
 
-    def __init__(
-        self,
-        config: SparkSourceConfig,
-        worker_id: Optional[str] = None,
-    ):
-        super().__init__(config, worker_id)
+    def __init__(self, config: SparkSourceConfig):
+        super().__init__(config)
 
     def read(self, split: Split) -> Optional[SplitPayload]:
         """Read Arrow data from Ray object store.

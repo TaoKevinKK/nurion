@@ -32,8 +32,8 @@ class FilterOperatorConfig(OperatorConfig):
 class FilterOperator(Operator):
     """Operator that filters records based on a predicate"""
 
-    def __init__(self, config: FilterOperatorConfig, worker_id: Optional[str] = None):
-        super().__init__(config, worker_id)
+    def __init__(self, config: FilterOperatorConfig):
+        super().__init__(config)
 
         if not callable(config.filter_fn):
             raise ValueError("filter_fn must be a callable returning bool")

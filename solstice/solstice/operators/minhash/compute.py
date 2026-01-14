@@ -34,6 +34,7 @@ The output is shuffled by band_hash so that similar documents
 (with matching band hashes) end up in the same partition.
 """
 
+import hashlib
 from dataclasses import dataclass
 from typing import ClassVar, Optional, Type
 
@@ -41,6 +42,28 @@ import numpy as np
 import pyarrow as pa
 
 from solstice.operators.shuffle import ShuffleOperator, ShuffleOperatorConfig
+
+
+def _hash_string(s: str) -> int:
+    """Deterministic hash for strings using SHA-256.
+
+    Unlike Python's built-in hash(), this is:
+    - Deterministic across processes (not affected by PYTHONHASHSEED)
+    - Consistent across Python versions
+
+    Returns a 64-bit unsigned integer.
+    """
+    digest = hashlib.sha256(s.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], byteorder="little")
+
+
+def _hash_bytes(data: bytes) -> int:
+    """Deterministic hash for bytes using SHA-256.
+
+    Returns a positive 63-bit integer (for compatibility with int64).
+    """
+    digest = hashlib.sha256(data).digest()
+    return int.from_bytes(digest[:8], byteorder="little") & 0x7FFFFFFFFFFFFFFF
 
 
 # Constants for MinHash
@@ -99,12 +122,8 @@ class MinHashComputeOperator(ShuffleOperator):
         stage = Stage("minhash", config, parallelism=8)
     """
 
-    def __init__(
-        self,
-        config: MinHashComputeConfig,
-        worker_id: Optional[str] = None,
-    ):
-        super().__init__(config, worker_id)
+    def __init__(self, config: MinHashComputeConfig):
+        super().__init__(config)
         self.minhash_config = config
 
         # Pre-compute hash function parameters
@@ -187,8 +206,8 @@ class MinHashComputeOperator(ShuffleOperator):
             # Return max values if no shingles
             return np.full(config.num_hashes, np.iinfo(np.uint64).max, dtype=np.uint64)
 
-        # Hash each shingle
-        shingle_hashes = np.array([hash(s) & 0xFFFFFFFFFFFFFFFF for s in shingles], dtype=np.uint64)
+        # Hash each shingle using deterministic hash
+        shingle_hashes = np.array([_hash_string(s) for s in shingles], dtype=np.uint64)
 
         # Compute MinHash signature
         signature = np.full(config.num_hashes, np.iinfo(np.uint64).max, dtype=np.uint64)
@@ -209,9 +228,8 @@ class MinHashComputeOperator(ShuffleOperator):
         return {text[i : i + k] for i in range(len(text) - k + 1)}
 
     def _hash_band(self, band_values: np.ndarray) -> int:
-        """Hash a band of signature values."""
-        # Use a simple hash of the band values
-        return hash(band_values.tobytes()) & 0x7FFFFFFFFFFFFFFF  # Positive int64
+        """Hash a band of signature values using deterministic hash."""
+        return _hash_bytes(band_values.tobytes())
 
 
 # Set the operator class reference

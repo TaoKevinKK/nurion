@@ -20,9 +20,7 @@ import pytest
 from solstice.core.models import Split, SplitPayload
 from solstice.operators.minhash import (
     MinHashComputeConfig,
-    MinHashComputeOperator,
     CandidatePairConfig,
-    CandidatePairOperator,
 )
 from solstice.operators.minhash.compute import jaccard_similarity
 
@@ -37,14 +35,16 @@ class TestMinHashComputeOperator:
 
     def test_compute_basic(self, sample_split):
         """Test basic MinHash computation."""
-        table = pa.table({
-            "id": ["doc1", "doc2", "doc3"],
-            "content": [
-                "The quick brown fox jumps over the lazy dog",
-                "The quick brown fox jumps over the lazy cat",
-                "A completely different document about something else",
-            ],
-        })
+        table = pa.table(
+            {
+                "id": ["doc1", "doc2", "doc3"],
+                "content": [
+                    "The quick brown fox jumps over the lazy dog",
+                    "The quick brown fox jumps over the lazy cat",
+                    "A completely different document about something else",
+                ],
+            }
+        )
         payload = SplitPayload(data=table, split_id="test")
 
         config = MinHashComputeConfig(
@@ -52,9 +52,9 @@ class TestMinHashComputeOperator:
             id_column="id",
             num_hashes=64,
             num_bands=8,
+            num_partitions=4,
         )
         operator = config.setup()
-        operator.set_num_partitions(4)
 
         result = operator.process_split(sample_split, payload)
 
@@ -75,13 +75,15 @@ class TestMinHashComputeOperator:
     def test_compute_similar_docs_share_bands(self, sample_split):
         """Test that similar documents share some band hashes."""
         # Two very similar documents
-        table = pa.table({
-            "id": ["doc1", "doc2"],
-            "content": [
-                "The quick brown fox jumps over the lazy dog",
-                "The quick brown fox jumps over the lazy cat",
-            ],
-        })
+        table = pa.table(
+            {
+                "id": ["doc1", "doc2"],
+                "content": [
+                    "The quick brown fox jumps over the lazy dog",
+                    "The quick brown fox jumps over the lazy cat",
+                ],
+            }
+        )
         payload = SplitPayload(data=table, split_id="test")
 
         config = MinHashComputeConfig(
@@ -90,9 +92,9 @@ class TestMinHashComputeOperator:
             num_hashes=128,
             num_bands=16,
             seed=42,
+            num_partitions=4,
         )
         operator = config.setup()
-        operator.set_num_partitions(4)
 
         result = operator.process_split(sample_split, payload)
         result_table = result.to_table()
@@ -113,8 +115,7 @@ class TestMinHashComputeOperator:
 
         # Similar docs should share at least some band hashes
         shared_bands = sum(
-            1 for band_id in doc1_bands
-            if doc1_bands[band_id] == doc2_bands.get(band_id)
+            1 for band_id in doc1_bands if doc1_bands[band_id] == doc2_bands.get(band_id)
         )
 
         # With high similarity, we expect at least a few shared bands
@@ -124,10 +125,12 @@ class TestMinHashComputeOperator:
 
     def test_compute_empty_content(self, sample_split):
         """Test handling of empty content."""
-        table = pa.table({
-            "id": ["doc1", "doc2"],
-            "content": ["Some content", ""],
-        })
+        table = pa.table(
+            {
+                "id": ["doc1", "doc2"],
+                "content": ["Some content", ""],
+            }
+        )
         payload = SplitPayload(data=table, split_id="test")
 
         config = MinHashComputeConfig(
@@ -135,9 +138,9 @@ class TestMinHashComputeOperator:
             id_column="id",
             num_hashes=64,
             num_bands=8,
+            num_partitions=4,
         )
         operator = config.setup()
-        operator.set_num_partitions(4)
 
         result = operator.process_split(sample_split, payload)
 
@@ -151,10 +154,12 @@ class TestMinHashComputeOperator:
 
     def test_compute_deterministic(self, sample_split):
         """Test that MinHash computation is deterministic."""
-        table = pa.table({
-            "id": ["doc1"],
-            "content": ["The quick brown fox"],
-        })
+        table = pa.table(
+            {
+                "id": ["doc1"],
+                "content": ["The quick brown fox"],
+            }
+        )
         payload = SplitPayload(data=table, split_id="test")
 
         config = MinHashComputeConfig(
@@ -163,14 +168,13 @@ class TestMinHashComputeOperator:
             num_hashes=64,
             num_bands=8,
             seed=42,
+            num_partitions=4,
         )
 
         operator1 = config.setup()
-        operator1.set_num_partitions(4)
         result1 = operator1.process_split(sample_split, payload)
 
         operator2 = config.setup()
-        operator2.set_num_partitions(4)
         result2 = operator2.process_split(sample_split, payload)
 
         # Signatures should be identical
@@ -200,11 +204,13 @@ class TestCandidatePairOperator:
         sig2 = np.array([1, 2, 3, 4], dtype=np.uint64).tobytes()  # Identical
         sig3 = np.array([5, 6, 7, 8], dtype=np.uint64).tobytes()  # Different
 
-        table = pa.table({
-            "doc_id": ["doc1", "doc2", "doc3"],
-            "band_hash": [100, 100, 200],  # doc1 and doc2 share band_hash
-            "signature": [sig1, sig2, sig3],
-        })
+        table = pa.table(
+            {
+                "doc_id": ["doc1", "doc2", "doc3"],
+                "band_hash": [100, 100, 200],  # doc1 and doc2 share band_hash
+                "signature": [sig1, sig2, sig3],
+            }
+        )
         payload = SplitPayload(data=table, split_id="test")
 
         config = CandidatePairConfig(similarity_threshold=0.5)
@@ -229,11 +235,13 @@ class TestCandidatePairOperator:
         sig1 = np.array([1, 2, 3, 4], dtype=np.uint64).tobytes()
         sig2 = np.array([5, 6, 7, 8], dtype=np.uint64).tobytes()  # All different
 
-        table = pa.table({
-            "doc_id": ["doc1", "doc2"],
-            "band_hash": [100, 100],  # Same band_hash
-            "signature": [sig1, sig2],
-        })
+        table = pa.table(
+            {
+                "doc_id": ["doc1", "doc2"],
+                "band_hash": [100, 100],  # Same band_hash
+                "signature": [sig1, sig2],
+            }
+        )
         payload = SplitPayload(data=table, split_id="test")
 
         config = CandidatePairConfig(similarity_threshold=0.5)
@@ -258,11 +266,13 @@ class TestCandidatePairOperator:
         sig = np.array([1, 2, 3, 4], dtype=np.uint64).tobytes()
 
         # Same pair appears in same batch via different bands
-        table = pa.table({
-            "doc_id": ["doc1", "doc2", "doc1", "doc2"],
-            "band_hash": [100, 100, 200, 200],  # Two bands, same docs
-            "signature": [sig, sig, sig, sig],
-        })
+        table = pa.table(
+            {
+                "doc_id": ["doc1", "doc2", "doc1", "doc2"],
+                "band_hash": [100, 100, 200, 200],  # Two bands, same docs
+                "signature": [sig, sig, sig, sig],
+            }
+        )
         payload = SplitPayload(data=table, split_id="test")
 
         config = CandidatePairConfig(similarity_threshold=0.5)
@@ -287,18 +297,22 @@ class TestCandidatePairOperator:
         sig = np.array([1, 2, 3, 4], dtype=np.uint64).tobytes()
 
         # Same pair in two separate batches
-        table1 = pa.table({
-            "doc_id": ["doc1", "doc2"],
-            "band_hash": [100, 100],
-            "signature": [sig, sig],
-        })
+        table1 = pa.table(
+            {
+                "doc_id": ["doc1", "doc2"],
+                "band_hash": [100, 100],
+                "signature": [sig, sig],
+            }
+        )
         payload1 = SplitPayload(data=table1, split_id="test1")
 
-        table2 = pa.table({
-            "doc_id": ["doc1", "doc2"],
-            "band_hash": [200, 200],  # Different band, same docs
-            "signature": [sig, sig],
-        })
+        table2 = pa.table(
+            {
+                "doc_id": ["doc1", "doc2"],
+                "band_hash": [200, 200],  # Different band, same docs
+                "signature": [sig, sig],
+            }
+        )
         payload2 = SplitPayload(data=table2, split_id="test2")
 
         config = CandidatePairConfig(similarity_threshold=0.5)
@@ -325,11 +339,13 @@ class TestCandidatePairOperator:
         n_docs = 100
         sig = np.array([1, 2, 3, 4], dtype=np.uint64).tobytes()
 
-        table = pa.table({
-            "doc_id": [f"doc{i}" for i in range(n_docs)],
-            "band_hash": [100] * n_docs,  # All same band_hash
-            "signature": [sig] * n_docs,
-        })
+        table = pa.table(
+            {
+                "doc_id": [f"doc{i}" for i in range(n_docs)],
+                "band_hash": [100] * n_docs,  # All same band_hash
+                "signature": [sig] * n_docs,
+            }
+        )
         payload = SplitPayload(data=table, split_id="test")
 
         config = CandidatePairConfig(

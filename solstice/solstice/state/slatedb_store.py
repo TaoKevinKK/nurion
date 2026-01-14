@@ -148,6 +148,60 @@ class SlateDBPartitionStateStore(PartitionStateStore):
             del self._dbs[partition_id]
             raise
 
+    def put_batch(
+        self,
+        writes: list[tuple[int, bytes, bytes]],
+    ) -> None:
+        """Batch put values into partition state.
+
+        Much more efficient than individual put() calls because:
+        1. Only flushes once per partition after all writes
+        2. Better I/O batching at the storage level
+
+        Args:
+            writes: List of (partition_id, key, value) tuples
+        """
+        # Group writes by partition
+        by_partition: dict[int, list[tuple[bytes, bytes]]] = {}
+        for partition_id, key, value in writes:
+            if partition_id not in by_partition:
+                by_partition[partition_id] = []
+            by_partition[partition_id].append((key, value))
+
+        # Write each partition and flush once
+        for partition_id, kvs in by_partition.items():
+            db = self._check_partition(partition_id)
+            try:
+                for key, value in kvs:
+                    db.put(key, value)
+                db.flush()  # Single flush per partition
+            except ClosedError as e:
+                self.logger.error(f"Partition {partition_id} fenced out: {e}")
+                del self._dbs[partition_id]
+                raise
+
+    def get_batch(
+        self,
+        reads: list[tuple[int, bytes]],
+    ) -> dict[tuple[int, bytes], Optional[bytes]]:
+        """Batch get values from partition state.
+
+        Args:
+            reads: List of (partition_id, key) tuples
+
+        Returns:
+            Dict mapping (partition_id, key) to value (or None if not found)
+        """
+        results: dict[tuple[int, bytes], Optional[bytes]] = {}
+        for partition_id, key in reads:
+            db = self._check_partition(partition_id)
+            try:
+                results[(partition_id, key)] = db.get(key)
+            except ClosedError:
+                self.logger.error(f"Partition {partition_id} fenced out during get")
+                raise
+        return results
+
     def close(self) -> None:
         """Close the state store and release all resources."""
         for partition_id in list(self._dbs.keys()):

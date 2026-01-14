@@ -81,6 +81,7 @@ Example:
 """
 
 import logging
+import os
 from typing import Any, Dict
 
 from solstice.core.job import Job, JobConfig
@@ -228,8 +229,12 @@ def create_job(
     )
 
     # =========================================================================
-    # Stage 4: CC Init - Initialize labels for Connected Components
+    # Stage 4: CC Init - Initialize labels from candidate pairs
     # =========================================================================
+    # NOTE: Documents without candidate pairs are not included in the output.
+    # This is a known limitation - to preserve all documents, multi-upstream
+    # support needs to be implemented in Solstice to merge doc_registry output
+    # with cc_iterate output. See TODO in ray_runner.py.
     cc_init_stage = Stage(
         stage_id="cc_init",
         operator_config=CCInitConfig(
@@ -243,6 +248,12 @@ def create_job(
     # =========================================================================
     # Stage 5: CC Iterate - Label propagation (iterative)
     # =========================================================================
+    # State store path for CC iteration (derived from output path)
+    state_store_path = config.get(
+        "state_store_path",
+        os.path.join(os.path.dirname(output_path), f".{job_id}_cc_state"),
+    )
+
     cc_iterate_stage = Stage(
         stage_id="cc_iterate",
         operator_config=CCIterateConfig(
@@ -251,6 +262,7 @@ def create_job(
             partition_keys=["doc_id"],
             num_partitions=config.get("num_partitions", 32),
             max_iterations=max_iterations,  # Iteration handled by CCIterateMaster
+            state_store_path=state_store_path,  # Enable multi-iteration via state store
         ),
         parallelism=cc_parallelism,
         worker_resources=worker_resources,
@@ -298,6 +310,11 @@ def create_job(
     # =========================================================================
     # Build DAG
     # =========================================================================
+    # Pipeline structure:
+    #   source -> minhash -> candidates -> cc_init -> cc_iterate -> dedupe -> sink
+    #
+    # NOTE: Documents without candidate pairs are dropped. To preserve all
+    # documents, multi-upstream support needs to be implemented.
     job.add_stage(source_stage)
     job.add_stage(minhash_stage, upstream_stages=["source"])
     job.add_stage(candidate_stage, upstream_stages=["minhash"])

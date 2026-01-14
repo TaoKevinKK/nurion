@@ -32,8 +32,8 @@ class MapOperatorConfig(OperatorConfig):
 class MapOperator(Operator):
     """Operator that applies a function to each record"""
 
-    def __init__(self, config: MapOperatorConfig, worker_id: Optional[str] = None):
-        super().__init__(config, worker_id)
+    def __init__(self, config: MapOperatorConfig):
+        super().__init__(config)
 
         if not callable(config.map_fn):
             raise ValueError("map_fn must be a callable")
@@ -80,8 +80,8 @@ class MapBatchesOperatorConfig(OperatorConfig):
 class MapBatchesOperator(Operator):
     """Operator that applies a function to entire batches"""
 
-    def __init__(self, config: MapBatchesOperatorConfig, worker_id: Optional[str] = None):
-        super().__init__(config, worker_id)
+    def __init__(self, config: MapBatchesOperatorConfig):
+        super().__init__(config)
 
         if not callable(config.map_batches_fn):
             raise ValueError("map_batches_fn must be a callable")
@@ -125,8 +125,8 @@ class FlatMapOperatorConfig(OperatorConfig):
 class FlatMapOperator(Operator):
     """Operator that applies a function that returns multiple records"""
 
-    def __init__(self, config: FlatMapOperatorConfig, worker_id: Optional[str] = None):
-        super().__init__(config, worker_id)
+    def __init__(self, config: FlatMapOperatorConfig):
+        super().__init__(config)
 
         if not callable(config.flatmap_fn):
             raise ValueError("flatmap_fn must be a callable")
