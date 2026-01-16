@@ -16,7 +16,6 @@
 
 import asyncio
 import os
-import socket
 import sys
 import tempfile
 import threading
@@ -24,7 +23,6 @@ import time
 import hashlib
 import uuid
 from collections.abc import Generator
-from contextlib import closing
 from typing import TYPE_CHECKING
 
 import pytest
@@ -33,6 +31,7 @@ import ray
 
 from solstice.core.split_payload_store import RaySplitPayloadStore
 from solstice.queue import TansuBrokerManager, TansuQueueClient, MemoryBroker, MemoryClient
+from solstice.utils.network import find_free_port
 
 if TYPE_CHECKING:
     pass
@@ -99,14 +98,6 @@ RAY_RUNTIME_EXCLUDES = [
 ]
 
 
-def _find_free_port() -> int:
-    """Find an available port on localhost."""
-    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
-        s.bind(("", 0))
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        return s.getsockname()[1]
-
-
 class TansuTestBackend:
     """Wrapper combining TansuBrokerManager + TansuQueueClient for tests."""
 
@@ -136,7 +127,7 @@ class TansuTestBackend:
 @pytest_asyncio.fixture
 async def tansu_backend():
     """Start a Tansu broker and client wrapped for easy testing."""
-    port = _find_free_port()
+    port = find_free_port()
     broker = TansuBrokerManager(storage_url="memory://tansu/", port=port, startup_timeout=5.0)
     broker.start()
     client = TansuQueueClient(broker.get_broker_url())
@@ -342,7 +333,7 @@ def aether_server(
         pass
 
     # Find free port
-    port = _find_free_port()
+    port = find_free_port()
     base_url = f"http://127.0.0.1:{port}"
 
     # Patch database module

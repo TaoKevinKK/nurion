@@ -45,7 +45,6 @@ Example:
 
 from __future__ import annotations
 
-import socket
 import threading
 import time
 from typing import Dict, List, Optional
@@ -58,15 +57,7 @@ from tansu_py import BrokerConfig, BrokerError, BrokerEventHandler, TansuBroker
 
 from solstice.queue.backend import Record
 from solstice.utils.logging import create_ray_logger
-
-
-def _find_free_port() -> int:
-    """Find a free port on localhost."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        port: int = s.getsockname()[1]
-        return port
+from solstice.utils.network import find_free_port
 
 
 # =============================================================================
@@ -137,7 +128,7 @@ class TansuBrokerManager:
             startup_timeout: Timeout for broker startup in seconds.
         """
         self.storage_url = storage_url
-        self.port = port or _find_free_port()
+        self.port = port or find_free_port()
         self.host = host
         self.startup_timeout = startup_timeout
 

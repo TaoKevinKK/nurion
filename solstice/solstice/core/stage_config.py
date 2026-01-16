@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, final
 
 from solstice.queue import QueueType
 
@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     pass
 
 
+@final
 @dataclass
 class StageConfig:
     """Configuration for Stage Master v2.
