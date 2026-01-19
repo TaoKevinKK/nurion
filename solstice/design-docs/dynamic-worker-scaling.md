@@ -3,6 +3,29 @@
 _Design document for Solstice auto-scaling feature_
 _Created: December 2025_
 
+---
+
+## Implementation Status (Updated 2026-01-19)
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| **SimpleAutoscaler** | ✅ Complete | `runtime/autoscaler.py` |
+| **AutoscaleConfig** | ✅ Complete | Dataclass with threshold settings |
+| **Queue Lag Metrics** | ✅ Complete | Via `BackpressureMonitor` |
+| **Worker Scale Up/Down** | ✅ Complete | Via `WorkerManager` |
+| **Cooldown Period** | ✅ Complete | Prevents thrashing |
+| **Manual Override API** | ✅ Complete | `set_stage_workers()`, `freeze_stage()` |
+| **Resource-Aware Scaling** | ⚠️ Basic | Checks Ray available resources |
+| **Bottleneck Prioritization** | ❌ Not Implemented | Future work |
+
+**Current Implementation:**
+- Threshold-based scaling using queue lag
+- Configurable check interval (default 15s)
+- Cooldown between scaling decisions
+- Manual intervention via runner API
+
+---
+
 ## 1. Overview
 
 This document describes the design for dynamic worker scaling in Solstice, a batch/offline data processing framework. The design prioritizes simplicity over complexity, recognizing that offline processing has different requirements than real-time streaming.

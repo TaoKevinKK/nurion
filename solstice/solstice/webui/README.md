@@ -2,6 +2,19 @@
 
 A web-based debugging and monitoring interface for Solstice streaming jobs.
 
+## Implementation Status
+
+| Feature | Status |
+|---------|--------|
+| Portal Service (Ray Serve) | ✅ Complete |
+| Unified Read-Only Architecture | ✅ Complete |
+| Push-Based Metrics (Tansu) | ✅ Complete |
+| Job/Stage/Worker Pages | ✅ Complete |
+| SlateDB Storage | ✅ Complete |
+| SSE Real-Time Updates | ❌ Pending |
+| Lineage Visualization | ❌ Pending |
+| Chart.js Metrics | ❌ Pending |
+
 ## Features
 
 - **Real-time Monitoring**: Live metrics, progress tracking, and resource usage

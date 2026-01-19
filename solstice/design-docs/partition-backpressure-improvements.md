@@ -2,6 +2,36 @@
 
 _Design Document - December 2025_
 
+---
+
+## Implementation Status (Updated 2026-01-19)
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **Backpressure Monitor** | ✅ Complete | `BackpressureMonitor` class in `managers/` |
+| **Queue Lag Tracking** | ✅ Complete | Via queue backend methods |
+| **Autoscaler Integration** | ✅ Complete | `SimpleAutoscaler` uses lag metrics |
+| **Dynamic Partition Management** | ✅ Complete | `PartitionManager` handles assignment |
+| **Multi-Partition Queues** | ✅ Complete | Topics created with `partitions=max_workers` |
+| **Partition Assignment** | ✅ Complete | Round-robin assignment, rebalance on scale |
+| **Partition Skew Detection** | ⚠️ Partial | `get_all_partition_offsets()` exists, no alert |
+| **Universal Source Backpressure** | ⚠️ Partial | Basic support exists |
+
+**What Works:**
+- Backpressure detection via queue lag monitoring
+- Autoscaler can adjust worker count based on lag
+- Workers pull at their own pace (natural backpressure)
+- Multi-partition topics (partition count = `partition_count` config or `max_workers`)
+- Partition assignment to workers (round-robin)
+- Dynamic rebalance when workers scale up/down
+- Per-partition offset tracking and commit
+
+**What Doesn't Work (Future):**
+- Proactive partition-level skew alerting
+- Source rate control based on downstream backpressure signals
+
+---
+
 ## Executive Summary
 
 This document describes improvements to the Solstice framework to address three critical issues:

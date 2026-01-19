@@ -1,213 +1,295 @@
 # Solstice Runtime Architecture
 
 ## Overview
+
 Solstice implements a **high-throughput dataflow engine** on top of Ray actors. Conceptually it is a **batch processing engine** (jobs are finite DAGs over finite inputs), but its internal execution model is **streaming-style and pull-based**. It is designed to run long-lived, multimodal pipelines (video, images, embeddings, text, binary blobs) with:
 
 - **Streaming-style execution** – no global stage barriers, no batch-style long tails.
-- **Stateless workers + checkpointed masters** – workers can be scaled in/out freely, while stage masters manage split state and recovery.
-- **Built-in backpressure** – downstream stages pull from upstream, so the system naturally throttles producers and can adapt resource usage.
-- **Externalised shuffle and state** – splits reference data in external storage (e.g. S3-like backends), avoiding tight coupling to the Ray object store.
+- **Stateless workers + queue-based coordination** – workers can be scaled in/out freely, while stage masters manage output queues.
+- **Built-in backpressure** – workers pull from upstream queues, so the system naturally throttles producers and can adapt resource usage.
+- **Queue-based data flow** – stages exchange data via Tansu (Kafka-compatible) or in-memory queues with offset tracking.
 
-Workflows are expressed as directed acyclic graphs (DAGs) of stages. Each stage owns a user-defined operator and a pool of stateless `StageWorker` actors, while the stage master manages split-scoped state and checkpointing. Stages exchange *Splits*, which are metadata records describing batches of data pointed to by Ray object references or external storage locations. This orchestration keeps hot data off the control plane and allows the pipeline to scale horizontally across workers while maintaining exactly-once semantics.
+Workflows are expressed as directed acyclic graphs (DAGs) of stages. Each stage owns a user-defined operator and a pool of stateless `StageWorker` actors, while the `StageMaster` manages the output queue and coordinates workers. Stages exchange *Splits*, which are metadata records describing batches of data stored in the `SplitPayloadStore`. This orchestration keeps hot data off the control plane and allows the pipeline to scale horizontally across workers.
 
 ```
        +-------------+       +-------------+       +-------------+
        | SourceStage |  -->  |  MapStage   |  -->  | SinkStage   |
        +-------------+       +-------------+       +-------------+
              |                     |                      |
-   (read, produce batches)   (process splits)      (consume splits)
-       Split + BatchRef         Split + BatchRef        Split + BatchRef
+   (produce to queue)       (pull → process → produce)   (pull → write)
+       Output Queue           Output Queue              Output Queue
 ```
 
 ## Data Flow Model: Pull-Based Architecture
 
-Solstice uses a **Pull-based** data flow model where downstream stages actively pull data from upstream stages. This design provides natural backpressure and reduces coupling between stages.
+Solstice uses a **Pull-based** data flow model where workers actively pull data from upstream queues. This design provides natural backpressure and reduces coupling between stages.
 
 ### Key Characteristics
 
-1. **Downstream pulls from upstream**: Each stage maintains an `OutputBuffer` containing completed splits. Downstream stages call `fetch_splits()` to retrieve data.
+1. **Workers pull from upstream queues**: Each worker fetches messages from its upstream stage's output queue, processes them, and writes results to its own stage's output queue.
 
-2. **Natural backpressure**: If a downstream stage is slow, it simply pulls less frequently. The upstream's output buffer fills up, and the upstream stage naturally slows down when its buffer is full.
+2. **Natural backpressure**: If a downstream stage is slow, its workers pull less frequently. The upstream's output queue fills up, and the upstream stage naturally slows down when its buffer is full.
 
-3. **Single-direction dependency**: Downstream stages know about their upstreams (to pull from them), but upstream stages don't need to know about their downstreams. This simplifies DAG modifications.
+3. **Single-direction dependency**: Workers know about their upstream queue (to pull from), but upstream stages don't need to know about their downstreams.
 
-4. **Cursor-based consumption**: Each consumer maintains a cursor tracking its read position, enabling multiple downstreams to consume at different rates.
+4. **Offset-based consumption**: Each consumer group tracks its read offset, enabling multiple consumers and recovery from failures.
 
 ```
 Pull-Based Data Flow:
 
-Source.output_buffer <── fetch_splits() ── Processor.output_buffer <── fetch_splits() ── Sink
-                     (cursor-based pull)                          (cursor-based pull)
+Source.output_queue <── pull ── Transform.workers ── produce ──> Transform.output_queue
+                                                                        ↑
+                              Sink.workers ── pull ── from ─────────────┘
 ```
 
 ## Components
 
 ### Job Definition
-* `Job`: Declarative DAG specification. Tracks stages, edges, and state backend configuration.
-* `Stage`: Wraps an operator class, parallelism configuration, and resource requirements.
+
+* `Job`: Declarative DAG specification. Tracks stages, edges, and configuration (queue type, autoscaling, WebUI).
+* `Stage`: Wraps an operator config, parallelism configuration, and resource requirements.
 * `Split`: Control-plane record representing a unit of work (batch metadata, lineage, status).
+* `SplitPayload`: The actual data (Arrow table) associated with a split.
 
 ### Runtime
+
 * `RayJobRunner`: Orchestrates the execution lifecycle. Responsibilities:
-  - Initialise Ray services (`MetaService`, `StageMasterActor`).
-  - Configure upstream references for each stage (enabling pull-based data flow).
-  - Monitor stage counters to detect when the DAG is quiescent, trigger checkpoints, and collect metrics.
+  - Initialize Ray and payload store.
+  - Create stage masters in topological order.
+  - Configure upstream references for each stage.
+  - Monitor stage counters to detect when the DAG is quiescent.
+  - Coordinate shutdown.
 
-* `StageMasterActor`: Manages the split queues, per-split state, output buffer, and a pool of StageWorkers. Functions:
-  - **Pull from upstream**: Actively fetches splits from upstream stages via `fetch_splits()`.
-  - **Process splits**: Schedule splits on available workers (`process_split`) and track inflight work.
-  - **Buffer outputs**: Write completed splits to `OutputBuffer` for downstream consumption.
-  - **Serve downstream pulls**: Expose `fetch_splits()` for downstream stages to pull data.
-  - Provide per-stage metrics and queue counters for lifecycle decisions.
+* `StageMaster`: Manages the output queue and a pool of StageWorkers. Delegates to component managers:
+  - `PartitionManager`: Partition assignment and rebalancing
+  - `WorkerManager`: Worker lifecycle (spawn, stop, status tracking)
+  - `RecoveryManager`: Failure tracking and worker recovery
+  - `BackpressureMonitor`: Queue lag monitoring and scaling signals
 
-* `OutputBuffer`: Thread-safe buffer for completed splits with cursor-based consumption:
-  - Bounded size with configurable max capacity.
-  - Multiple consumers with independent cursors.
-  - Slow consumer detection.
-  - Automatic GC of consumed splits.
+* `StageWorker`: Executes the user operator over batches. Responsibilities:
+  - Pull messages from upstream queue.
+  - Fetch payload from `SplitPayloadStore`.
+  - Invoke operator's `process_split()`.
+  - Store output payload and produce message to output queue.
+  - Commit offset after successful processing.
 
-* `StageWorker`: Executes the user operator over batches without retaining persistent state. Responsibilities:
-  - Materialise Ray batch references and invoke `process_split`.
-  - Produce output batches and return Ray references alongside operator metrics.
+### Queue Backends
 
-### State & Checkpointing
-* `CheckpointManager`: Coordinates checkpoint triggers, collects stage checkpoint data, and orchestrates restore.
-* `StageCheckpointTracker`: Lives with each stage master, tracking completed/inflight splits.
-* `StageCheckpointData`: Captures completed splits, inflight splits, and upstream cursor positions for restoration.
-* Checkpoints include upstream cursors, enabling precise resume from the last processed position.
+* `TansuBrokerManager`: Manages embedded Tansu broker lifecycle (start, stop, health check).
+* `TansuQueueClient`: Kafka client for Tansu (produce, fetch, commit offset).
+* `MemoryBroker` / `MemoryClient`: In-process queue for testing.
 
-### Control Plane Services
-* `MetaService`: Maintains the DAG topology, stage metadata, and global job status. Handles stage registration and metrics aggregation.
+The queue layer follows the **Interface Segregation Principle** with focused protocols:
+- `QueueProducer`: Message production
+- `QueueConsumer`: Message consumption and offset management
+- `QueueAdmin`: Topic management
+- `QueueBroker`: Broker lifecycle
+- `QueueClient`: Combined interface
+
+### Payload Store
+
+* `SplitPayloadStore`: Protocol for storing and retrieving split payloads.
+* `RaySplitPayloadStore`: Implementation using Ray Object Store with a registry actor.
+  - Payloads stored as Arrow tables via `ray.put()`.
+  - Registry actor tracks key → ObjectRef mapping.
+  - Auto-converts Arrow IPC bytes from JVM writers.
 
 ## Dataflow
 
 ### 1. Source Ingestion
-- Source stages generate splits internally (via `SourceOperator.plan_splits()` or similar).
-- Splits are enqueued to the stage's pending queue and processed by workers.
-- Completed splits are written to the source stage's `OutputBuffer`.
+
+- Source stages generate splits via `SourceOperator.plan_splits()` or similar.
+- Splits are processed by workers and written to the source stage's output queue.
+- Completed payloads are stored in `SplitPayloadStore`.
 
 ### 2. Stage Processing (Pull-Based)
-- Each stage's run loop actively pulls from its upstream stages:
-  ```python
-  # Pseudocode for stage run loop
-  while running:
-      # Pull from all upstream stages
-      for upstream in upstream_stage_refs:
-          splits, cursor, finished = upstream.fetch_splits(cursor)
-          pending_splits.extend(splits)
-      
-      # Schedule pending splits to workers
-      schedule_pending_splits()
-      
-      # Drain completed results into output buffer
-      drain_completed_results()
-  ```
-- Workers process splits and return results with output payload references.
-- Completed splits are buffered in `OutputBuffer` for downstream consumption.
 
-### 3. Output Buffering & Consumption
-- Each stage maintains an `OutputBuffer` containing completed splits.
-- Downstream stages call `fetch_splits(consumer_id, cursor)` to retrieve new splits.
-- The buffer tracks each consumer's cursor independently, supporting fan-out to multiple downstreams.
-- Splits are GC'd only after all registered consumers have fetched them.
+Each worker runs a processing loop:
+
+```python
+# Pseudocode for worker processing loop
+while running:
+    # Pull batch from upstream queue
+    records = upstream_queue.fetch(topic, offset, max_records)
+    
+    for record in records:
+        message = QueueMessage.from_bytes(record.value)
+        
+        # Fetch payload from store
+        payload = payload_store.get(message.payload_key)
+        
+        # Process with operator
+        output_payload = operator.process_split(split, payload)
+        
+        # Store output and produce to output queue
+        output_key = payload_store.store(output_payload)
+        output_queue.produce(output_topic, output_message)
+    
+    # Commit offset after batch
+    upstream_queue.commit_offset(group, topic, last_offset + 1)
+```
+
+### 3. Queue-Based Buffering
+
+- Each stage maintains an output queue (Tansu topic or in-memory).
+- Workers produce messages after processing; downstream workers consume.
+- Queue provides durability (Tansu) and backpressure signal (lag).
 
 ### 4. Completion Detection
-- A stage is idle when:
-  - All upstreams have marked themselves as finished.
-  - No pending splits remain.
-  - No inflight results remain.
-- When all stages are idle, the runner stops the job.
+
+A stage is complete when:
+- All upstreams have marked themselves as finished.
+- No pending messages in input queue.
+- All workers have processed their assigned work.
+
+When all stages are complete, the runner stops the job.
 
 ## Scheduling & Backpressure
 
 ### Natural Backpressure (Pull Model)
-* **Buffer-based throttling**: When a stage's output buffer is full, `append()` returns false, and the stage waits for downstream to consume.
+
+* **Queue lag-based throttling**: When downstream workers can't keep up, upstream queue fills up, naturally throttling producers.
+* **Lag monitoring**: `BackpressureMonitor` tracks queue lag and can signal autoscaler to adjust worker count.
 * **No explicit backpressure signals needed**: Downstream controls the flow rate by its pull frequency.
-* **Per-consumer tracking**: Slow consumers can be detected and handled (warning, disconnection, etc.).
 
 ### Worker Scheduling
-* Each stage master enforces per-worker concurrency limits (`max_active_splits_per_worker`).
-* Workers are selected based on current load (least-loaded first).
-* `max_queue_size` controls the input pending queue size.
+
+* Workers are Ray actors with configurable resources (num_cpus, num_gpus, memory).
+* `WorkerManager` handles spawning and stopping workers.
+* `PartitionManager` can assign specific partitions to workers (when multi-partition is enabled).
 
 ## Elasticity
-* `StageMasterActor.scale_workers()` adjusts worker pool size according to load.
-* Workers can be added/removed without stopping the job; new workers immediately begin processing enqueued splits.
-* When scaling in, idle workers are shut down gracefully; inflight splits are re-queued if necessary.
+
+* `SimpleAutoscaler` adjusts worker pool size according to queue lag.
+* Workers can be added/removed without stopping the job.
+* When scaling in, workers complete current batch before stopping.
 
 ## Fault Tolerance
-1. Runner triggers checkpoint (periodic or manual).
-2. Each stage prepares checkpoint data including:
-   - Completed splits
-   - Inflight splits
-   - Upstream cursor positions
-3. Checkpoint manifest persisted via the configured backend (e.g., SlateDB, S3).
-4. On failure, the runner:
-   - Recreates stage masters and workers.
-   - Restores checkpointed state including cursor positions.
-   - Resumes pulling from the last checkpointed cursor position.
+
+### Current Implementation (Scaffolding)
+
+1. **Offset tracking**: Each worker tracks committed offset in queue.
+2. **Checkpoint storage**: `FsspecCheckpointStorage` can read/write checkpoint files.
+3. **Recovery loading**: `recover_from_checkpoint()` can load checkpoint data.
+
+### Not Yet Implemented
+
+- Periodic checkpoint saving during execution
+- Passing recovered offsets to workers on restart
+- Workers seeking to recovered offset
+
+### Planned Recovery Flow
+
+```
+1. Job starts
+2. Load checkpoint from storage (if exists)
+3. For each stage:
+   - Get partition offsets from checkpoint
+   - Pass offsets to workers
+4. Workers:
+   - Seek queue consumer to recovered offset
+   - Resume processing
+5. Periodic checkpoint:
+   - Collect offsets from all workers
+   - Save to checkpoint storage
+```
 
 ## CLI Lifecycle
-1. Create `Job` via workflow module.
+
+1. Create `Job` via workflow module or direct API.
 2. Build `RayJobRunner`.
-3. `runner.run()`:
-   - Initialize stages and configure upstream references.
-   - Start stage run loops (each stage pulls from its upstreams).
-   - Monitor until all stages are idle.
+3. `await runner.run()`:
+   - Initialize stages in topological order.
+   - Configure upstream references.
+   - Start stage processing loops.
+   - Monitor until all stages are complete.
    - Stop job and report status/metrics.
 4. `runner.shutdown()` cleans up actors and Ray services.
 
 ## ASCII Architecture Diagram
+
 ```
-             +--------------------+
-             |    RayJobRunner    |
-             |--------------------|
-             | - MetaService      |
-             | - CheckpointMgr    |
-             +---------+----------+
-                       |
-        configure_upstream (downward arrows show pull direction)
-                       |
-      +----------------+----------------+
-      |                                 |
-+-----v----+                      +-----v----+
-| Stage A  |                      | Stage B  |
-| Master   |<─── fetch_splits ────| Master   |
-| (Source) |                      | (Map)    |
-+----+-----+                      +----+-----+
-     |                                 |
-  Workers                        fetch_splits
-     |                                 |
-+----v----------+               +------v---------+
-| StageWorker A |               | Stage C Master |<── fetch_splits ── Sink
-+---------------+               +----------------+
-     |                                 |
-output_buffer                    output_buffer
+                    ┌─────────────────────────────────────────┐
+                    │            RayJobRunner                  │
+                    │  - Stage lifecycle management            │
+                    │  - Optional autoscaling                  │
+                    │  - Optional WebUI integration            │
+                    └───────────────────┬─────────────────────┘
+                                        │
+              ┌─────────────────────────┼─────────────────────────┐
+              │                         │                         │
+              ▼                         ▼                         ▼
+      ┌───────────────┐        ┌───────────────┐        ┌───────────────┐
+      │  StageMaster  │        │  StageMaster  │        │  StageMaster  │
+      │   (Source)    │        │  (Transform)  │        │    (Sink)     │
+      │               │        │               │        │               │
+      │ ┌───────────┐ │        │ ┌───────────┐ │        │ ┌───────────┐ │
+      │ │WorkerMgr  │ │        │ │WorkerMgr  │ │        │ │WorkerMgr  │ │
+      │ │PartMgr    │ │        │ │PartMgr    │ │        │ │PartMgr    │ │
+      │ │RecoveryMgr│ │        │ │RecoveryMgr│ │        │ │RecoveryMgr│ │
+      │ │BackpresMon│ │        │ │BackpresMon│ │        │ │BackpresMon│ │
+      │ └───────────┘ │        │ └───────────┘ │        │ └───────────┘ │
+      └───────┬───────┘        └───────┬───────┘        └───────┬───────┘
+              │                        │                        │
+         [Workers]                [Workers]                [Workers]
+              │                        │                        │
+              ▼                        │                        │
+      ┌───────────────┐                │                        │
+      │ Output Queue  │◄───── pull ────┤                        │
+      │   (Tansu)     │                │                        │
+      └───────────────┘                ▼                        │
+                               ┌───────────────┐                │
+                               │ Output Queue  │◄───── pull ────┤
+                               │   (Tansu)     │                │
+                               └───────────────┘                ▼
+                                                        ┌───────────────┐
+                                                        │ Output Queue  │
+                                                        │   (Tansu)     │
+                                                        └───────────────┘
+
+                        ┌─────────────────────────────────────────┐
+                        │          SplitPayloadStore              │
+                        │  (Ray Object Store + Registry Actor)    │
+                        └─────────────────────────────────────────┘
 ```
 
 ## Configuration
 
-### StageMasterConfig Options
-* `max_split_attempts`: Maximum retry attempts for failed splits (default: 3)
-* `max_active_splits_per_worker`: Concurrency limit per worker (default: 100)
-* `max_queue_size`: Maximum pending split queue size (default: 1000)
-* `max_output_buffer_size`: Maximum output buffer size (default: 1000)
-* `max_consumer_lag`: Maximum allowed lag before slow consumer warning (default: 500)
-* `fetch_batch_size`: Number of splits to fetch per pull request (default: 100)
-* `fetch_timeout`: Timeout for upstream fetch calls (default: 1.0s)
-* `fail_fast`: Stop immediately on exception (default: true)
+### StageConfig Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `min_workers` | Minimum worker count | 1 |
+| `max_workers` | Maximum worker count | 4 |
+| `batch_size` | Messages per fetch batch | 100 |
+| `poll_interval_ms` | Polling interval when queue empty | 100 |
+| `failure_policy` | How to handle failures (FAIL_FAST, SKIP, RETRY) | FAIL_FAST |
+| `max_retries` | Max retries per message (if RETRY) | 3 |
+
+### JobConfig Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `queue_type` | TANSU or MEMORY | TANSU |
+| `tansu_storage_url` | Tansu storage backend | memory:// |
+| `autoscale_config` | Autoscaling configuration | None |
+| `webui` | WebUI configuration | disabled |
+| `checkpoint_path` | Checkpoint storage path | /tmp/solstice-checkpoints/ |
 
 ## Known Gaps & Issues
-* **Iceberg ingestion is not streaming**: `IcebergSource.read()` materialises `scan.to_arrow()` up front, so multi-billion-row tables will not fit in memory and cannot be processed incrementally without configuring `batch_size` or refactoring to iterate scan tasks.
-* **Split metadata lacks resume coordinates**: `Split.data_range` contains only upstream stage and batch IDs. Without file paths, fragment IDs, or offsets, precise replay/checkpoint alignment is difficult after failure.
-* **Buffer persistence**: Output buffers are in-memory; if a stage restarts, buffered splits are lost. Downstream stages need to re-pull from source or checkpoint.
+
+* **Checkpoint recovery not functional**: Scaffolding exists but checkpoints are not saved during execution and not restored on restart.
+* **Iceberg ingestion not streaming**: `IcebergSource.read()` materialises data up front.
+* **Buffer persistence**: If a stage master restarts, in-flight messages may be lost.
 
 ## Future Improvements
-* Add long-polling support for reduced latency (upstream waits briefly for new data before returning empty).
-* Implement buffer persistence for fault tolerance.
-* Add adaptive batch sizing based on throughput metrics.
-* Explore auto-scaling policies driven by observed processing rates or backlog sizes.
-* Extend checkpointing to support partial DAG snapshots and rolling restores.
+
+* Implement full checkpoint save/restore cycle.
+* Add multi-partition support for higher parallelism.
+* Add long-polling support for reduced latency.
+* Implement adaptive batch sizing based on throughput metrics.
+* Extend checkpointing to support partial DAG snapshots.
 
 ---
-*Last updated: 2025-12-05*
+
+*Last updated: 2026-01-19*

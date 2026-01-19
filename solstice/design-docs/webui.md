@@ -1,5 +1,26 @@
 # Solstice Debug WebUI Design
 
+---
+
+## Implementation Status (Updated 2026-01-19)
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| **Portal Service** | ✅ Complete | Ray Serve deployment, `/solstice` route prefix |
+| **Unified Read-Only Architecture** | ✅ Complete | Portal reads from SlateDB only |
+| **Push-Based Metrics** | ✅ Complete | Tansu-based state push from workers/masters |
+| **SlateDB Storage** | ✅ Complete | Job data persistence |
+| **Job/Stage/Worker Pages** | ✅ Complete | Basic UI pages |
+| **SSE Real-Time Updates** | ❌ Not Implemented | Design exists |
+| **Lineage Visualization** | ❌ Not Implemented | Returns empty data |
+| **Stage DAG Graph** | ❌ Not Implemented | Only shows list |
+| **Chart.js Charts** | ❌ Not Implemented | Metrics charts pending |
+| **Grafana Dashboards** | ❌ Not Implemented | Phase 2 |
+
+See `todo/webui.md` for detailed tracking.
+
+---
+
 ## Overview
 
 The Solstice Debug WebUI provides a web-based interface for monitoring, debugging, and analyzing streaming data pipelines. It supports both real-time monitoring during job execution and historical analysis through a History Server.

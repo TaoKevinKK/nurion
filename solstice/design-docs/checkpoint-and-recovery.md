@@ -2,6 +2,37 @@
 
 _Design discussion summary - December 5-6, 2025_
 
+---
+
+## ⚠️ Implementation Status (Updated 2026-01-19)
+
+This document describes the **design intent** for checkpoint and recovery. The actual implementation status is:
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| **Queue Backend Interface** | ✅ Complete | `QueueBackend` protocol with `MemoryBackend` and `TansuBackend` |
+| **Worker Pull Model** | ✅ Complete | Workers pull from upstream queues |
+| **Offset Tracking** | ✅ Complete | `commit_offset()` / `get_committed_offset()` in queue backends |
+| **Tansu Integration** | ✅ Complete | Embedded Tansu broker with PyO3 bindings |
+| **Checkpoint Storage** | ⚠️ Scaffolding | `FsspecCheckpointStorage` can read/write files |
+| **Checkpoint Saving** | ❌ Not Implemented | No code saves checkpoints during execution |
+| **Checkpoint Recovery** | ❌ Not Implemented | `recover_from_checkpoint()` loads data but doesn't apply it |
+| **Multi-Partition** | ✅ Complete | `PartitionManager` handles assignment and rebalance |
+
+**What Works Today:**
+- Queue-based stage-to-stage communication
+- Workers pull from upstream, produce to downstream
+- Offset commit after processing (for idempotency within a run)
+
+**What Doesn't Work:**
+- Checkpoint-based recovery after job restart
+- Resuming from last committed offset after crash
+- Multi-partition parallel consumption
+
+See `todo/dedup-and-fault-tolerance.md` for detailed tracking.
+
+---
+
 ## Problem Statement
 
 ### Core Issue: Split Determinism
@@ -975,9 +1006,10 @@ fc29b94 test: Add performance benchmark tests
 
 ### Low Priority (Future)
 
-8. **Multi-Partition Support**
-   - Current: single partition (partition=0)
-   - Future: parallel partitions for higher throughput
+8. **Multi-Partition Support** ✅ DONE
+   - Partition count based on `partition_count` config or `max_workers`
+   - `PartitionManager` handles assignment and rebalance
+   - Workers poll assigned partitions round-robin
 
 9. **Cross-Node Queue Access**
    - TansuBackend: works (network broker)

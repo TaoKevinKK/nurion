@@ -3,6 +3,25 @@
 _Design document for optimized Spark-to-Solstice data pipeline_
 _Created: December 2025_
 
+---
+
+## Implementation Status (Updated 2026-01-19)
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| **SparkSourceV2Config** | ✅ Complete | `operators/sources/sparkv2.py` |
+| **SparkSourceV2Master** | ✅ Complete | Custom SourceMaster |
+| **SplitPayloadStoreWriter.scala** | ✅ Complete | JVM-side writer |
+| **Arrow data in Kafka message** | ✅ Complete | `_v2arrow:` prefix encoding |
+| **Auto-convert in get()** | ✅ Complete | `SplitPayloadStore.get()` handles Arrow bytes |
+| **Cross-language actor call** | ⚠️ Changed | Uses embedded Arrow in message instead |
+| **Benchmark** | ❌ Not Done | V1 vs V2 comparison pending |
+
+**Architecture Decision:**
+Original design planned JVM→Python actor calls for ObjectRef passing. Due to cross-language serialization issues, final implementation embeds Arrow IPC data directly in Kafka messages (base64 encoded with `_v2arrow:` prefix). This is simpler and reliable for typical partition sizes.
+
+---
+
 ## 1. Overview
 
 This document describes the design for Spark Source V2 (`sparkv2.py`), an optimized implementation that reduces data transfer overhead by having JVM-side Spark executors write directly to both `SplitPayloadStore` and the Tansu Queue.

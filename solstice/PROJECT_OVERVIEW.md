@@ -2,93 +2,172 @@
 
 ## What is Solstice?
 
-Solstice is a Ray-based **high-throughput batch processing framework** whose internal execution model is **streaming-style and pull-based**, featuring exactly-once semantics, elastic scaling, and fault tolerance.
+Solstice is a Ray-based **high-throughput batch processing framework** whose internal execution model is **streaming-style and pull-based**, featuring elastic scaling, backpressure, and fault tolerance.
 
 ## Key Characteristics
 
-- **Hybrid Model**: Batch + Streaming execution
-- **Exactly-Once**: Checkpoint-based recovery
-- **Elastic**: Dynamic worker scaling
-- **Fault-Tolerant**: Automatic recovery from failures
-- **Remote State**: S3/DFS/HDFS backends
-- **Zero Dependencies**: No Kafka, RocksDB, or ZooKeeper
+- **Streaming-Style Execution**: Pull-based data flow, no stage barriers
+- **Elastic Workers**: Dynamic worker scaling based on queue lag
+- **Queue-Based Communication**: Tansu (Kafka-compatible) or in-memory queues
+- **Fault-Tolerant Design**: Offset-based recovery (scaffolding implemented)
+- **Minimal Dependencies**: Only Ray and optional Tansu broker
 
 ## Directory Structure
 
 ```
 solstice/
-├── solstice/              # Framework implementation
-│   ├── core/              # Job, Stage, Operator abstractions
-│   ├── actors/            # Ray actors (Meta Service, Stage Master, Worker)
-│   ├── state/             # State management & checkpointing
-│   ├── operators/         # Built-in operators
-│   └── main.py            # CLI entry point
+├── solstice/                # Framework implementation
+│   ├── core/                # Core abstractions
+│   │   ├── job.py           # Job and JobConfig
+│   │   ├── stage.py         # Stage definition
+│   │   ├── stage_master.py  # StageMaster orchestration
+│   │   ├── stage_worker.py  # StageWorker execution
+│   │   ├── stage_config.py  # Configuration classes
+│   │   ├── operator.py      # Operator base class
+│   │   ├── models.py        # Split, SplitPayload
+│   │   └── managers/        # Component managers
+│   │       ├── partition_manager.py
+│   │       ├── worker_manager.py
+│   │       ├── recovery_manager.py
+│   │       └── backpressure_monitor.py
+│   ├── runtime/             # Runtime components
+│   │   ├── ray_runner.py    # RayJobRunner
+│   │   ├── autoscaler.py    # SimpleAutoscaler
+│   │   └── state_push.py    # StatePushManager (WebUI)
+│   ├── queue/               # Queue backends
+│   │   ├── protocols.py     # QueueProducer, QueueConsumer, etc.
+│   │   ├── memory.py        # MemoryBackend
+│   │   └── tansu.py         # TansuBrokerManager, TansuQueueClient
+│   ├── operators/           # Built-in operators
+│   │   ├── sources/         # Source operators
+│   │   ├── sinks/           # Sink operators
+│   │   ├── map.py           # Map/FlatMap operators
+│   │   ├── filter.py        # Filter operator
+│   │   ├── shuffle.py       # Shuffle/Repartition
+│   │   ├── dedupe.py        # Hash deduplication
+│   │   ├── minhash/         # MinHash operators
+│   │   ├── connected_components.py  # CC algorithm
+│   │   ├── http/            # HTTP operator
+│   │   ├── llm/             # LLM inference
+│   │   └── video.py         # Video processing
+│   ├── state/               # State management
+│   ├── checkpoint/          # Checkpoint storage
+│   ├── webui/               # Debug WebUI
+│   └── utils/               # Utilities
 │
-├── workflows/             # Example workflows
-│   ├── simple_etl.py      # Basic ETL pipeline
-│   └── video_slice_workflow.py  # Video processing pipeline
-│
-└── design-docs/           # Architecture and design docs
+├── raydp/                   # Spark on Ray integration
+├── java/                    # Scala/Java Spark components
+├── tansu-py/                # Tansu PyO3 bindings
+├── workflows/               # Example workflows
+├── examples/                # Example scripts
+├── tests/                   # Test suite
+├── design-docs/             # Architecture documents
+└── todo/                    # Feature tracking
 ```
 
 ## Core Concepts
 
 ### 1. Job
+
 A complete processing pipeline with a DAG of stages.
 
 ```python
-job = Job(job_id='my_pipeline')
+from solstice.core.job import Job, JobConfig
+from solstice.queue import QueueType
+
+job = Job(
+    job_id='my_pipeline',
+    config=JobConfig(
+        queue_type=QueueType.TANSU,
+        tansu_storage_url='memory://',
+    ),
+)
 ```
 
 ### 2. Stage
-A processing step with an operator and parallelism configuration.
+
+A processing step with an operator configuration and parallelism.
 
 ```python
-Stage('transform', MapOperator, {...}, parallelism=4)
-Stage('scale', MapOperator, {...}, parallelism=(2, 10))
+from solstice.core.stage import Stage
+
+# Fixed parallelism (4 workers)
+Stage('transform', MyOperatorConfig(...), parallelism=4)
+
+# Auto-scaling parallelism (2 to 10 workers)
+Stage('scale', MyOperatorConfig(...), parallelism=(2, 10))
 ```
 
 ### 3. Operator
-The logic that processes data for a single split.
+
+The logic that processes data. Operators are stateless and config-driven.
 
 ```python
-from typing import Optional
+from dataclasses import dataclass
+from typing import Optional, ClassVar, Type
 
-from solstice.core.operator import Operator
+from solstice.core.operator import Operator, OperatorConfig
 from solstice.core.models import Split, SplitPayload
 
 
+@dataclass
+class MyOperatorConfig(OperatorConfig):
+    """Configuration for MyOperator."""
+    param: str = "default"
+    operator_class: ClassVar[Type["MyOperator"]]
+
+
 class MyOperator(Operator):
+    def __init__(self, config: MyOperatorConfig):
+        super().__init__(config)
+        self.param = config.param
+
     def process_split(
         self,
         split: Split,
         payload: Optional[SplitPayload] = None,
     ) -> Optional[SplitPayload]:
-        # Implement your transform here using the Arrow payload
         if payload is None:
             return None
 
         table = payload.to_table()
-        # TODO: apply transformations on `table`
+        # Transform the Arrow table...
         return SplitPayload(data=table, split_id=split.split_id)
+
+
+MyOperatorConfig.operator_class = MyOperator
 ```
 
-### 4. State Backend
-Where checkpoints are stored (see state backends configured in your Job/runner).
+### 4. Queue Backend
+
+Where messages flow between stages:
+- `TansuBackend`: Kafka-compatible broker (production)
+- `MemoryBackend`: In-process queue (testing)
 
 ## Built-in Operators
 
-| Operator | Type | Description |
-|----------|------|-------------|
-| LanceTableSource | Source | Read from Lance tables |
-| FileSource | Source | Read from JSON/Parquet/CSV |
-| MapOperator | Transform | 1-to-1 transformation |
-| FlatMapOperator | Transform | 1-to-N transformation |
-| FilterOperator | Transform | Filter records |
-| KeyByOperator | Transform | Extract keys |
-| FileSink | Sink | Write to files |
-| LanceSink | Sink | Write to Lance |
-| PrintSink | Sink | Print to stdout |
+| Category | Operator | Description |
+|----------|----------|-------------|
+| **Sources** | `LanceTableSource` | Read from Lance tables |
+| | `FileSource` | Read from JSON/Parquet/CSV |
+| | `IcebergSource` | Read from Iceberg tables |
+| | `SparkSource` | Read via Spark DataFrame |
+| | `SparkSourceV2` | Optimized Spark with direct queue writes |
+| **Transforms** | `MapOperator` | 1-to-1 transformation |
+| | `MapBatchesOperator` | Batch-level transformation |
+| | `FlatMapOperator` | 1-to-N transformation |
+| | `FilterOperator` | Filter records |
+| | `RepartitionOperator` | Repartition by hash key |
+| | `HashDedupeOperator` | Exact deduplication |
+| | `MinHashComputeOperator` | MinHash signature computation |
+| | `CandidatePairOperator` | LSH candidate pair generation |
+| **Sinks** | `FileSink` | Write to files |
+| | `LanceSink` | Write to Lance |
+| | `PrintSink` | Print to stdout |
+| **Specialized** | `HttpOperator` | HTTP API calls |
+| | `LLMOperator` | LLM inference |
+| | `FFmpegSceneDetectOperator` | Video scene detection |
+| | `FFmpegSliceOperator` | Video slicing |
 
 ## Parallelism Modes
 
@@ -98,7 +177,7 @@ parallelism=4  # Always 4 workers
 ```
 
 Use for:
-- Source/Sink operations
+- Source/Sink operations with known concurrency limits
 - Predictable workloads
 - When you want exact resource control
 
@@ -112,102 +191,120 @@ Use for:
 - CPU/GPU intensive operations
 - When you want optimal resource utilization
 
-## Usage Patterns
-
-### Pattern 1: Simple ETL
-```
-Source → Transform → Filter → Sink
-```
-
-### Pattern 2: Fan-Out
-```
-Source → FlatMap → [Multiple Workers] → Aggregate → Sink
-```
-
-### Pattern 3: Complex Pipeline
-```
-Source → Preprocess → Classify → Filter → 
-  Detect → Extract → PostProcess → Sink
-```
-
-## Running the Framework
-
-### On Ray Cluster
-```bash
-python -m solstice.main \
-  --workflow workflows.simple_etl \
-  --job-id my_job \
-  --ray-address ray://head-node:10001
-```
-
-## Checkpointing
-
-### Automatic
-```python
-job = Job(
-    job_id='my_job',
-    checkpoint_interval_secs=300,      # Every 5 minutes
-    checkpoint_interval_records=10000,  # Or 10k records
-)
-```
-
-### Manual
-```python
-runner = job.create_ray_runner()
-runner.initialize()
-checkpoint_id = runner.trigger_checkpoint()
-runner.restore_from_checkpoint(checkpoint_id)
-```
-
-## Implementation Stats
-
-- **Python Files**: 22 core + 3 workflows = 25 total
-- **Documentation**: 12 markdown files
-- **Examples**: 3 (quickstart + 2 workflows)
-- **Configurations**: 2 YAML files
-- **Lines of Code**: ~4,000+
-
 ## Architecture Layers
 
 ```
 ┌─────────────────────────────────────────┐
 │ Layer 4: User API                       │
-│ (Job, Stage, Operator)                  │
+│ (Job, Stage, OperatorConfig)            │
 ├─────────────────────────────────────────┤
-│ Layer 3: Coordination                   │
-│ (Meta Service, Global State Master)     │
+│ Layer 3: Runtime                        │
+│ (RayJobRunner, SimpleAutoscaler)        │
 ├─────────────────────────────────────────┤
 │ Layer 2: Execution                      │
-│ (Stage Master, Workers)                 │
+│ (StageMaster, StageWorker)              │
 ├─────────────────────────────────────────┤
-│ Layer 1: State Management               │
-│ (State Manager, Checkpoint Coordinator) │
+│ Layer 1: Queue                          │
+│ (TansuBackend, MemoryBackend)           │
 ├─────────────────────────────────────────┤
-│ Layer 0: Storage                        │
-│ (State Backend: S3/DFS/Local)           │
+│ Layer 0: Ray                            │
+│ (Actors, Object Store)                  │
 └─────────────────────────────────────────┘
+```
+
+## StageMaster Component Managers
+
+StageMaster delegates to specialized managers:
+
+| Manager | Responsibility |
+|---------|----------------|
+| `PartitionManager` | Partition assignment and rebalancing |
+| `WorkerManager` | Worker lifecycle (spawn, stop, status) |
+| `RecoveryManager` | Failure tracking and worker recovery |
+| `BackpressureMonitor` | Queue lag monitoring and scaling signals |
+
+## Running a Pipeline
+
+```python
+import asyncio
+from solstice.core.job import Job, JobConfig
+from solstice.core.stage import Stage
+from solstice.operators.sources import LanceTableSourceConfig
+from solstice.operators.map import MapOperatorConfig
+from solstice.operators.sinks import FileSinkConfig
+from solstice.queue import QueueType
+
+# 1. Create job
+job = Job(
+    job_id='my_job',
+    config=JobConfig(queue_type=QueueType.MEMORY),
+)
+
+# 2. Add stages
+job.add_stage(Stage(
+    'source',
+    LanceTableSourceConfig(table_path='/data/input'),
+    parallelism=1,
+))
+
+job.add_stage(Stage(
+    'transform',
+    MapOperatorConfig(map_fn=lambda x: x),
+    parallelism=(2, 8),
+), upstream_stages=['source'])
+
+job.add_stage(Stage(
+    'sink',
+    FileSinkConfig(output_path='/data/output.json'),
+    parallelism=1,
+), upstream_stages=['transform'])
+
+# 3. Run
+async def main():
+    runner = job.create_ray_runner()
+    await runner.run()
+
+asyncio.run(main())
 ```
 
 ## Feature Comparison
 
 | Feature | Solstice | Flink | Spark Streaming |
 |---------|----------|-------|-----------------|
-| Exactly-Once | ✅ | ✅ | ✅ |
+| Pull-Based Flow | ✅ | Push-based | Push-based |
 | Dynamic Scaling | ✅ | Limited | Limited |
-| No External Deps | ✅ | ❌ | ❌ |
+| No External Deps | ✅ (Ray only) | ❌ (Kafka, ZK) | ❌ (HDFS) |
 | Lance Integration | ✅ | ❌ | ❌ |
 | Python-First | ✅ | ❌ | ✅ |
-| State Backend | S3/DFS | RocksDB | HDFS |
+| Queue Backend | Tansu/Memory | Kafka | HDFS/Kafka |
+
+## Current Implementation Status
+
+| Feature | Status |
+|---------|--------|
+| Queue-based execution | ✅ Complete |
+| Worker auto-scaling | ✅ Complete |
+| Backpressure detection | ✅ Complete |
+| WebUI monitoring | ✅ Complete |
+| Multi-partition queues | ✅ Complete |
+| Partition assignment | ✅ Complete |
+| Offset-based recovery | 🚧 Scaffolding only |
+
+## Documentation
+
+- **`README.md`** - Quick start and overview
+- **`PROJECT_OVERVIEW.md`** - This file
+- **`design-docs/`** - Architecture decisions and designs
+- **`todo/`** - Implementation status tracking
+- **`solstice/webui/README.md`** - WebUI documentation
 
 ## Next Steps
 
-1. **Read**: `README.md`
-2. **Explore**: `workflows/` for complete workflows
-3. **Dive deeper**: `design-docs/` for architecture details
+1. Read `README.md` for quick start
+2. Explore `examples/` for sample pipelines
+3. Check `design-docs/` for architecture details
+4. See `todo/` for implementation status
 
-## Support & Documentation
+---
 
-- **Overview & API**: `README.md`
-- **Extended Overview**: `PROJECT_OVERVIEW.md`
-- **Architecture**: `design-docs/`
-
+*Last updated: 2026-01-19*

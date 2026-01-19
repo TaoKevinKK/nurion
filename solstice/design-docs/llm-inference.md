@@ -1,5 +1,27 @@
 # LLM Inference Design
 
+---
+
+## Implementation Status (Updated 2026-01-19)
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| **LLMOperatorConfig** | ✅ Complete | `operators/llm/config.py`, `operator.py` |
+| **LLMOperator** | ✅ Complete | Extends HttpOperator |
+| **HttpOperator base** | ✅ Complete | `operators/http/operator.py` |
+| **Rate Limiter** | ✅ Complete | GlobalRateLimiter + LocalRateLimiter |
+| **Circuit Breaker** | ✅ Complete | `operators/http/circuit_breaker.py` |
+| **SGLangRouterActor** | ✅ Complete | `operators/llm/router_actor.py` |
+| **SGLangWorkerActor** | ✅ Complete | `operators/llm/worker_actor.py` |
+| **LLMStageMaster** | ✅ Complete | Managed mode orchestration |
+| **Node Blacklist** | ✅ Complete | `core/fault_tolerance.py` |
+| **Timeout Monitor** | ✅ Complete | `core/fault_tolerance.py` |
+| **External Service Mode** | ✅ Complete | Connect to vLLM/SGLang/OpenAI |
+| **Managed Mode** | ✅ Complete | Auto-manage SGLang workers |
+| **Vision/Multimodal** | ✅ Complete | VLM support in config |
+
+---
+
 ## Overview
 
 Solstice supports large-scale LLM batch inference with two modes:

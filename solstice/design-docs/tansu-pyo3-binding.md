@@ -1,5 +1,21 @@
 # Tansu PyO3 Binding - Embedded Broker Architecture
 
+---
+
+## Implementation Status (Updated 2026-01-19)
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| **tansu-py PyO3 bindings** | ✅ Complete | `tansu-py/` directory |
+| **TansuBroker class** | ✅ Complete | Embedded broker wrapper |
+| **BrokerEventHandler** | ✅ Complete | Lifecycle callbacks |
+| **TansuBrokerManager** | ✅ Complete | `queue/tansu.py` |
+| **TansuQueueClient** | ✅ Complete | Kafka client wrapper |
+| **Protocol Layer (ISP)** | ✅ Complete | `queue/protocols.py` |
+| **All Tansu Tests** | ✅ Passing | 9 tests |
+
+---
+
 ## Overview
 
 This document describes the design and implementation of `tansu-py`, a PyO3-based Python binding for the Tansu message broker, and the queue abstraction layer that uses it.

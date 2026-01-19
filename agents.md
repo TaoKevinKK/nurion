@@ -70,25 +70,36 @@ nurion/
         |                  |                  |
 +-------v------+   +-------v------+   +-------v------+
 | StageMaster  |   | StageMaster  |   | StageMaster  |
-| (Source)     |-->| (Transform)  |-->| (Sink)       |
+| (Source)     |   | (Transform)  |   | (Sink)       |
 +------+-------+   +------+-------+   +------+-------+
        |                  |                  |
   StageWorkers       StageWorkers       StageWorkers
+       |                  |                  |
+       v                  v                  v
+  [Output Queue]    [Output Queue]    [Output Queue]
+       |                  ^                  ^
+       +------ pull ------+------ pull -----+
 ```
 
 **Key Components**:
 
-1. **Job**: DAG pipeline definition containing multiple Stages
-2. **Stage**: Processing step wrapping an Operator with parallelism config
-3. **StageMaster**: Manages output queue and worker pool
+1. **Job**: DAG pipeline definition containing multiple Stages (configured via `JobConfig`)
+2. **Stage**: Processing step wrapping an `OperatorConfig` with parallelism settings
+3. **StageMaster**: Manages output queue and worker pool via component managers:
+   - `PartitionManager`: Partition assignment and rebalancing
+   - `WorkerManager`: Worker lifecycle (spawn, stop, status)
+   - `RecoveryManager`: Failure tracking and worker recovery
+   - `BackpressureMonitor`: Queue lag monitoring and scaling signals
 4. **StageWorker**: Stateless Ray Actor executing Operator logic
-5. **Operator**: Data processing logic (Source/Transform/Sink)
-6. **Split**: Metadata record representing a unit of work
+5. **Operator**: Data processing logic (configured via `OperatorConfig` subclasses)
+6. **Split/SplitPayload**: Metadata and data for a unit of work
+7. **Queue Backend**: Tansu (production) or Memory (testing) for stage communication
 
-**Data Flow Model**: Pull-based
-- Downstream stages actively pull data from upstream
-- Natural backpressure mechanism
-- Cursor-based consumption
+**Data Flow Model**: Pull-based, queue-driven
+- Workers pull messages from upstream stage's output queue
+- Process data and write to own stage's output queue
+- Natural backpressure via queue lag
+- Offset-based consumption tracking
 
 ## Development Guidelines
 
@@ -359,18 +370,25 @@ For Solstice integration tests, you need:
 | Solstice entry point | `solstice/solstice/main.py` |
 | Job definition | `solstice/solstice/core/job.py` |
 | Stage definition | `solstice/solstice/core/stage.py` |
+| Stage configuration | `solstice/solstice/core/stage_config.py` |
 | Operator base class | `solstice/solstice/core/operator.py` |
 | Stage Master | `solstice/solstice/core/stage_master.py` |
-| Stage Worker | `solstice/solstice/core/worker.py` |
+| Stage Worker | `solstice/solstice/core/stage_worker.py` |
+| Component Managers | `solstice/solstice/core/managers/` |
 | Ray Runner | `solstice/solstice/runtime/ray_runner.py` |
+| Autoscaler | `solstice/solstice/runtime/autoscaler.py` |
+| Queue protocols | `solstice/solstice/queue/protocols.py` |
 | Queue backends | `solstice/solstice/queue/` |
 | Built-in Sources | `solstice/solstice/operators/sources/` |
 | Built-in Sinks | `solstice/solstice/operators/sinks/` |
-| **WebUI Portal** | `solstice/solstice/webui/portal.py` |
-| **WebUI Storage** | `solstice/solstice/webui/storage/` |
-| **WebUI Collectors** | `solstice/solstice/webui/collectors/` |
-| **WebUI API** | `solstice/solstice/webui/api/` |
-| **WebUI Templates** | `solstice/solstice/webui/templates/` |
+| Transform operators | `solstice/solstice/operators/map.py`, `filter.py` |
+| LLM operators | `solstice/solstice/operators/llm/` |
+| HTTP operators | `solstice/solstice/operators/http/` |
+| WebUI app | `solstice/solstice/webui/app.py` |
+| WebUI Storage | `solstice/solstice/webui/storage/` |
+| WebUI Collectors | `solstice/solstice/webui/collectors/` |
+| WebUI API | `solstice/solstice/webui/api/` |
+| WebUI Templates | `solstice/solstice/webui/templates/` |
 | Aether App | `aether/aether/app.py` |
 | Aether Routes | `aether/aether/api/routes/` |
 
@@ -379,44 +397,54 @@ For Solstice integration tests, you need:
 ### Creating a Simple Pipeline
 
 ```python
-from solstice.core.job import Job
+import asyncio
+from solstice.core.job import Job, JobConfig
 from solstice.core.stage import Stage
-from solstice.operators.sources import LanceTableSource
-from solstice.operators.map import MapOperator
-from solstice.operators.sinks import FileSink
+from solstice.operators.sources import LanceTableSourceConfig
+from solstice.operators.map import MapOperatorConfig
+from solstice.operators.sinks import FileSinkConfig
+from solstice.queue import QueueType
 
-job = Job(job_id='my_pipeline')
+# Create job with configuration
+job = Job(
+    job_id='my_pipeline',
+    config=JobConfig(queue_type=QueueType.MEMORY),
+)
 
+# Add source stage
 job.add_stage(Stage(
-    'source',
-    LanceTableSource,
-    {'table_path': '/data/input'},
+    stage_id='source',
+    operator_config=LanceTableSourceConfig(table_path='/data/input'),
     parallelism=1,
 ))
 
+# Add transform stage with auto-scaling
 job.add_stage(Stage(
-    'transform',
-    MapOperator,
-    {'map_fn': lambda x: x.upper()},
+    stage_id='transform',
+    operator_config=MapOperatorConfig(map_fn=lambda x: x),
     parallelism=(2, 8),  # Auto-scale 2-8 workers
 ), upstream_stages=['source'])
 
+# Add sink stage
 job.add_stage(Stage(
-    'sink',
-    FileSink,
-    {'output_path': '/data/output.json'},
+    stage_id='sink',
+    operator_config=FileSinkConfig(output_path='/data/output.json'),
     parallelism=1,
 ), upstream_stages=['transform'])
 
-runner = job.create_ray_runner()
-runner.run()
+# Run the job (async)
+async def main():
+    runner = job.create_ray_runner()
+    await runner.run()
+
+asyncio.run(main())
 ```
 
 ### Custom Operator
 
 ```python
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, ClassVar, Type
 
 from solstice.core.operator import Operator, OperatorConfig
 from solstice.core.models import Split, SplitPayload
@@ -426,6 +454,8 @@ from solstice.core.models import Split, SplitPayload
 class MyOperatorConfig(OperatorConfig):
     """Configuration for MyOperator."""
     multiplier: int = 2
+    # ClassVar to link config to operator class
+    operator_class: ClassVar[Type["MyOperator"]]
 
 
 class MyOperator(Operator):
@@ -433,7 +463,7 @@ class MyOperator(Operator):
     
     def __init__(self, config: MyOperatorConfig):
         super().__init__(config)
-        self.my_config = config
+        self.multiplier = config.multiplier
 
     def process_split(
         self,
@@ -445,11 +475,11 @@ class MyOperator(Operator):
             return None
 
         table = payload.to_table()
-        # TODO: apply transformations on `table`
+        # Apply transformations on `table`...
         return SplitPayload(data=table, split_id=split.split_id)
 
 
-# Link config to operator class
+# Link config to operator class (required!)
 MyOperatorConfig.operator_class = MyOperator
 ```
 
@@ -561,9 +591,10 @@ solstice history-server -s s3://bucket/solstice-history/ -p 8080
 
 ---
 
-*Last updated: 2025-01-14*
+*Last updated: 2026-01-19*
 
 <!-- Changelog:
+- 2026-01-19: Updated all examples to use new Stage API (operator_config); updated key files reference
 - 2025-01-14: Added pattern #1 (operators are config-driven); updated Custom Operator example
 - 2025-01-08: Added pattern #8 (keep API responses minimal)
 - 2025-01-07: Added patterns #6 (no uncertain fallbacks) and #7 (minimize self._ state)
