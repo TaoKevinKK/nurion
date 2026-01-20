@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unified LLM/VLM Operator for chat completions inference.
+"""External LLM/VLM Operator for calling external inference services.
+
+Use this operator to call external LLM services via OpenAI-compatible API.
+For maximum throughput with dedicated GPUs, use EmbeddedLLMOperator instead.
 
 Supports:
 - Text-only chat (messages_field)
@@ -25,23 +28,30 @@ Uses OpenAI-compatible Chat Completions API (/v1/chat/completions).
 from __future__ import annotations
 
 import asyncio
-import base64
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional, Type, Union
+from dataclasses import dataclass
+from typing import Any, ClassVar, Literal, Optional, Type
 
 import pyarrow as pa
 
 from solstice.core.models import Split, SplitPayload
 from solstice.operators.http.operator import HttpOperator, HttpOperatorConfig
-from solstice.operators.llm.config import RouterConfig, WorkerConfig
-
-if TYPE_CHECKING:
-    from solstice.operators.llm.stage_master import LLMStageMaster
+from solstice.operators.llm.utils import (
+    build_multi_image_message,
+    build_single_image_message,
+    extract_column,
+    extract_messages,
+    extract_prompts,
+)
 
 
 @dataclass
-class LLMOperatorConfig(HttpOperatorConfig):
-    """Configuration for LLM/VLM chat completions operator.
+class ExternalLLMOperatorConfig(HttpOperatorConfig):
+    """Configuration for calling external LLM services via HTTP.
+
+    Use this config to call external LLM services (vLLM, SGLang, OpenAI, etc.)
+    via OpenAI-compatible Chat Completions API.
+
+    For maximum throughput with dedicated GPUs, use EmbeddedLLMOperatorConfig.
 
     Supports three modes based on which fields are set:
 
@@ -71,17 +81,9 @@ class LLMOperatorConfig(HttpOperatorConfig):
         image_url_field: Input column containing single image URL
         images_field: Input column containing multiple images (list)
         detail: Image detail level for vision API
-
-        # Managed inference infrastructure
-        managed: Whether Solstice manages the inference servers
-        router_config: Configuration for the SGLang router
-        worker_config: Configuration for each SGLang worker
-        num_workers: Number of GPU workers to start
-        gpus_per_worker: GPUs allocated to each worker
     """
 
-    operator_class: ClassVar[Type["LLMOperator"]]
-    master_class: ClassVar[Optional[Type[LLMStageMaster]]] = None
+    operator_class: ClassVar[Type["ExternalLLMOperator"]]
 
     # Model configuration
     model: str = ""
@@ -108,16 +110,12 @@ class LLMOperatorConfig(HttpOperatorConfig):
     images_field: str = ""  # Column containing list of images
     detail: Literal["auto", "low", "high"] = "auto"
 
-    # Managed inference infrastructure
-    managed: bool = False
-    router_config: RouterConfig = field(default_factory=RouterConfig)
-    worker_config: WorkerConfig = field(default_factory=WorkerConfig)
-    num_workers: Optional[int] = None  # None = auto-detect from cluster
-    gpus_per_worker: int = 1
 
+class ExternalLLMOperator(HttpOperator):
+    """Operator for calling external LLM services via OpenAI-compatible API.
 
-class LLMOperator(HttpOperator):
-    """Unified LLM/VLM operator using OpenAI Chat Completions API.
+    Use this operator to call external LLM services. For maximum throughput
+    with dedicated GPUs, use EmbeddedLLMOperator instead.
 
     Supports three modes:
     1. Text-only: messages_field contains chat messages
@@ -129,14 +127,14 @@ class LLMOperator(HttpOperator):
 
     Usage:
         # Text-only chat
-        config = LLMOperatorConfig(
+        config = ExternalLLMOperatorConfig(
             base_url="http://server:8000",
             model="Qwen/Qwen2.5-72B-Instruct",
             messages_field="messages",
         )
 
         # Single image + fixed prompt (VLM)
-        config = LLMOperatorConfig(
+        config = ExternalLLMOperatorConfig(
             base_url="http://server:8000",
             model="Qwen/Qwen2.5-VL-72B-Instruct",
             prompt="Describe this image in detail.",
@@ -144,7 +142,7 @@ class LLMOperator(HttpOperator):
         )
 
         # Single image + per-row prompt
-        config = LLMOperatorConfig(
+        config = ExternalLLMOperatorConfig(
             base_url="http://server:8000",
             model="Qwen/Qwen2.5-VL-72B-Instruct",
             prompt_field="question",  # Each row has its own prompt
@@ -152,7 +150,7 @@ class LLMOperator(HttpOperator):
         )
 
         # Multiple images + fixed prompt
-        config = LLMOperatorConfig(
+        config = ExternalLLMOperatorConfig(
             base_url="http://server:8000",
             model="Qwen/Qwen2.5-VL-72B-Instruct",
             prompt="Describe the sequence of events in these frames.",
@@ -160,7 +158,7 @@ class LLMOperator(HttpOperator):
         )
     """
 
-    def __init__(self, config: LLMOperatorConfig):
+    def __init__(self, config: ExternalLLMOperatorConfig):
         super().__init__(config)
         self._config = config
 
@@ -175,11 +173,9 @@ class LLMOperator(HttpOperator):
 
         # Determine mode and extract data
         if self._config.messages_field:
-            # Text-only mode
-            messages_list = self._extract_messages(table)
+            messages_list = extract_messages(table, self._config.messages_field)
         else:
-            # Vision mode (single or multi-image)
-            messages_list = self._extract_vision_messages(table)
+            messages_list = self._build_vision_messages(table)
 
         # Generate outputs
         outputs = asyncio.run(self._generate_all(messages_list))
@@ -193,119 +189,28 @@ class LLMOperator(HttpOperator):
             split_id=f"{split.split_id}_{self.worker_id}",
         )
 
-    def _extract_messages(self, table: pa.Table) -> list[list[dict]]:
-        """Extract chat messages from table (text-only mode)."""
-        if self._config.messages_field not in table.column_names:
-            raise ValueError(
-                f"Messages field '{self._config.messages_field}' not found. "
-                f"Available: {table.column_names}"
-            )
-        return table[self._config.messages_field].to_pylist()
-
-    def _extract_vision_messages(self, table: pa.Table) -> list[list[dict]]:
-        """Extract and build vision messages from table."""
-        num_rows = table.num_rows
-
-        # Get prompts: either from field or use fixed prompt
-        if self._config.prompt_field:
-            if self._config.prompt_field not in table.column_names:
-                raise ValueError(
-                    f"Prompt field '{self._config.prompt_field}' not found. "
-                    f"Available: {table.column_names}"
-                )
-            prompts = table[self._config.prompt_field].to_pylist()
-        elif self._config.prompt:
-            prompts = [self._config.prompt] * num_rows
-        else:
-            raise ValueError("Either prompt or prompt_field must be set for vision mode")
-        messages_list = []
+    def _build_vision_messages(self, table: pa.Table) -> list[list[dict]]:
+        """Build OpenAI-compatible vision messages from table."""
+        prompts = extract_prompts(table, self._config.prompt_field, self._config.prompt)
+        detail = self._config.detail
 
         # Multi-image mode
         if self._config.images_field:
             if self._config.images_field not in table.column_names:
                 raise ValueError(f"Images field '{self._config.images_field}' not found.")
             images_list = table[self._config.images_field].to_pylist()
-
-            for prompt, images in zip(prompts, images_list):
-                messages_list.append(self._build_multi_image_message(prompt, images or []))
+            return [
+                build_multi_image_message(prompt, images or [], detail)
+                for prompt, images in zip(prompts, images_list)
+            ]
 
         # Single image mode
-        else:
-            images = self._get_single_images(table, len(prompts))
-            image_urls = self._get_image_urls(table, len(prompts))
-
-            for prompt, image, url in zip(prompts, images, image_urls):
-                messages_list.append(self._build_single_image_message(prompt, image, url))
-
-        return messages_list
-
-    def _get_single_images(self, table: pa.Table, count: int) -> list[Optional[Union[str, bytes]]]:
-        """Get single images from table."""
-        if self._config.image_field and self._config.image_field in table.column_names:
-            return table[self._config.image_field].to_pylist()
-        return [None] * count
-
-    def _get_image_urls(self, table: pa.Table, count: int) -> list[Optional[str]]:
-        """Get image URLs from table."""
-        if self._config.image_url_field and self._config.image_url_field in table.column_names:
-            return table[self._config.image_url_field].to_pylist()
-        return [None] * count
-
-    def _build_single_image_message(
-        self,
-        prompt: str,
-        image: Optional[Union[str, bytes]],
-        image_url: Optional[str],
-    ) -> list[dict]:
-        """Build message with single image."""
-        content: list[dict] = []
-
-        # Add image
-        if image_url:
-            content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": image_url, "detail": self._config.detail},
-                }
-            )
-        elif image:
-            image_b64 = base64.b64encode(image).decode() if isinstance(image, bytes) else image
-            content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{image_b64}",
-                        "detail": self._config.detail,
-                    },
-                }
-            )
-
-        # Add text
-        content.append({"type": "text", "text": prompt})
-
-        return [{"role": "user", "content": content}]
-
-    def _build_multi_image_message(
-        self, prompt: str, images: list[Union[str, bytes]]
-    ) -> list[dict]:
-        """Build message with multiple images."""
-        content: list[dict] = []
-
-        for image in images:
-            image_b64 = base64.b64encode(image).decode() if isinstance(image, bytes) else image
-            content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{image_b64}",
-                        "detail": self._config.detail,
-                    },
-                }
-            )
-
-        content.append({"type": "text", "text": prompt})
-
-        return [{"role": "user", "content": content}]
+        images = extract_column(table, self._config.image_field, len(prompts))
+        image_urls = extract_column(table, self._config.image_url_field, len(prompts))
+        return [
+            build_single_image_message(prompt, image, url, detail)
+            for prompt, image, url in zip(prompts, images, image_urls)
+        ]
 
     async def _generate_all(self, messages_list: list[list[dict]]) -> list[str]:
         """Generate responses for all message lists."""
@@ -343,4 +248,4 @@ class LLMOperator(HttpOperator):
 
 
 # Set operator_class after definition
-LLMOperatorConfig.operator_class = LLMOperator
+ExternalLLMOperatorConfig.operator_class = ExternalLLMOperator

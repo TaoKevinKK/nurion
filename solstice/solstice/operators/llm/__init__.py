@@ -14,35 +14,34 @@
 
 """LLM/VLM inference operators for Solstice.
 
-Provides:
-- SGLangRouterActor: Manages SGLang router lifecycle
-- SGLangWorkerActor: Manages SGLang worker with dynamic registration
-- LLMStageMaster: Orchestrates router and workers
-- LLMOperator: Unified LLM/VLM inference operator (text-only, single image, multi-image)
+Provides two inference modes:
+
+1. **Embedded Mode** (recommended for batch processing):
+   - EmbeddedLLMOperator: Embeds vLLM/SGLang engine directly in workers
+   - Zero HTTP overhead, maximum throughput
+   - Supports vLLM and SGLang backends
+   - KV Cache optimization
+
+2. **External Mode** (for external services):
+   - ExternalLLMOperator: Calls external LLM APIs via HTTP
+   - Works with any OpenAI-compatible API
+   - Includes rate limiting, circuit breaker, retries
 """
 
-from solstice.operators.llm.config import (
-    RouterConfig,
-    WorkerConfig,
+from solstice.operators.llm.embedded import (
+    EmbeddedLLMOperator,
+    EmbeddedLLMOperatorConfig,
 )
-from solstice.operators.llm.router_actor import SGLangRouterActor
-from solstice.operators.llm.worker_actor import SGLangWorkerActor
-from solstice.operators.llm.stage_master import LLMStageMaster
 from solstice.operators.llm.operator import (
-    LLMOperator,
-    LLMOperatorConfig,
+    ExternalLLMOperator,
+    ExternalLLMOperatorConfig,
 )
 
 __all__ = [
-    # Configs
-    "RouterConfig",
-    "WorkerConfig",
-    "LLMOperatorConfig",
-    # Actors
-    "SGLangRouterActor",
-    "SGLangWorkerActor",
-    # Stage Master
-    "LLMStageMaster",
-    # Operators
-    "LLMOperator",
+    # Embedded mode (recommended for batch processing)
+    "EmbeddedLLMOperator",
+    "EmbeddedLLMOperatorConfig",
+    # External mode (for calling external services)
+    "ExternalLLMOperator",
+    "ExternalLLMOperatorConfig",
 ]

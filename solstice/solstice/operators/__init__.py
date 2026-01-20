@@ -71,13 +71,10 @@ from solstice.operators.http import (
 
 # LLM operators
 from solstice.operators.llm import (
-    LLMOperator,
-    LLMOperatorConfig,
-    LLMStageMaster,
-    RouterConfig,
-    WorkerConfig,
-    SGLangRouterActor,
-    SGLangWorkerActor,
+    EmbeddedLLMOperator,
+    EmbeddedLLMOperatorConfig,
+    ExternalLLMOperator,
+    ExternalLLMOperatorConfig,
 )
 
 __all__ = [
@@ -140,12 +137,10 @@ __all__ = [
     "CircuitBreaker",
     "CircuitBreakerConfig",
     "GlobalRateLimiter",
-    # LLM operators
-    "LLMOperator",
-    "LLMOperatorConfig",
-    "LLMStageMaster",
-    "RouterConfig",
-    "WorkerConfig",
-    "SGLangRouterActor",
-    "SGLangWorkerActor",
+    # LLM operators (embedded mode - recommended for batch)
+    "EmbeddedLLMOperator",
+    "EmbeddedLLMOperatorConfig",
+    # LLM operators (external mode - for external services)
+    "ExternalLLMOperator",
+    "ExternalLLMOperatorConfig",
 ]
