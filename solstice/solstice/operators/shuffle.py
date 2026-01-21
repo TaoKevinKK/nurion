@@ -42,16 +42,13 @@ The worker handles the actual routing:
 
 from abc import abstractmethod
 from dataclasses import dataclass, field
-from typing import ClassVar, List, Optional, Type, TYPE_CHECKING
+from typing import ClassVar, List, Optional, Type
 
 import pyarrow as pa
 
 from solstice.core.models import Split, SplitPayload
 from solstice.core.operator import Operator, OperatorConfig
 from solstice.compute import DuckDBEngine
-
-if TYPE_CHECKING:
-    from solstice.state import SlateDBPartitionStateStore
 
 
 @dataclass
@@ -64,12 +61,11 @@ class ShuffleOperatorConfig(OperatorConfig):
     Attributes:
         partition_keys: Columns to partition by (hash of these determines partition)
         num_partitions: Number of output partitions (default: 1)
-        state_store_path: Optional path for SlateDB state storage (stateful operators)
+        state_store_path: Inherited from OperatorConfig for stateful operators
     """
 
     partition_keys: List[str] = field(default_factory=list)
     num_partitions: int = 1  # Default to 1 partition for safety
-    state_store_path: Optional[str] = None
 
     # Subclasses must set these
     operator_class: ClassVar[Type["ShuffleOperator"]]
@@ -97,6 +93,7 @@ class ShuffleOperator(Operator):
     - DuckDB engine lifecycle
     - Partition ID computation
     - Adding __target_partition column
+    - State store (inherited from Operator)
     """
 
     # Column name for target partition (added to output)
@@ -109,43 +106,12 @@ class ShuffleOperator(Operator):
         # DuckDB engine for partition computation (created lazily)
         self._engine: Optional[DuckDBEngine] = None
 
-        # State store for stateful operators (created lazily, owned by operator)
-        self._state_store: Optional["SlateDBPartitionStateStore"] = None
-        self._acquired_partitions: set[int] = set()
-
     @property
     def engine(self) -> DuckDBEngine:
         """Get or create the DuckDB engine."""
         if self._engine is None:
             self._engine = DuckDBEngine()
         return self._engine
-
-    @property
-    def state_store(self) -> Optional["SlateDBPartitionStateStore"]:
-        """Lazily create state store from config.
-
-        Returns None if state_store_path is not configured or runtime context
-        (job_id, stage_id) is not set.
-        """
-        if self._state_store is None:
-            config = self.shuffle_config
-            if config.state_store_path and self.job_id and self.stage_id:
-                from solstice.state import SlateDBPartitionStateStore
-
-                self._state_store = SlateDBPartitionStateStore(
-                    base_path=config.state_store_path,
-                    job_id=self.job_id,
-                    stage_id=self.stage_id,
-                )
-        return self._state_store
-
-    def _ensure_partition_acquired(self, partition_id: int) -> None:
-        """Ensure partition is acquired in state store."""
-        if self.state_store is None:
-            return
-        if partition_id not in self._acquired_partitions:
-            self.state_store.acquire_partition(partition_id)
-            self._acquired_partitions.add(partition_id)
 
     @property
     def num_partitions(self) -> int:
@@ -225,10 +191,8 @@ class ShuffleOperator(Operator):
         if self._engine is not None:
             self._engine.close()
             self._engine = None
-        if self._state_store is not None:
-            self._state_store.close()
-            self._state_store = None
-            self._acquired_partitions.clear()
+        # State store cleanup is handled by base Operator.close()
+        super().close()
 
 
 @dataclass

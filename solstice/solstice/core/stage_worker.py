@@ -12,20 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""StageWorker - Pull-based streaming worker.
+"""StageWorker - Pull-based streaming worker with partition-per-operator model.
 
-This worker pulls from an upstream queue, processes messages, and produces
-to an output queue. It's designed for streaming-style execution with:
-- Exactly-once semantics via offset tracking
-- EOF-based completion detection
-- Partition-aware processing
-- WebUI metrics push
-- Iterative processing support (for CC, PageRank, etc.)
+This worker implements the Simple Exactly-Once v4 architecture:
+
+1. **Partition-per-Operator**: Each partition has its own dedicated Operator instance
+2. **Concurrent Processing**: Partitions are processed in parallel via asyncio.gather
+3. **Deterministic Split ID**: split_id = f(job, stage, partition, offset)
+4. **At-Least-Once + Dedup**: Produce before commit, downstream deduplicates
+
+Key design principles:
+- State isolation: Each operator manages only its own partition's state
+- True parallelism: Multiple partitions processed concurrently
+- Simple recovery: Re-process from last committed offset, downstream dedup handles duplicates
 """
 
 from __future__ import annotations
 
 import asyncio
+import copy
 import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -38,8 +43,11 @@ from solstice.core.stage_config import (
     StageConfig,
     QueueEndpoint,
     QueueMessage,
+    make_split_id,
 )
 from solstice.core.split_payload_store import SplitPayloadStore
+from solstice.core.operator import Operator, SemanticGuarantee
+from solstice.testing.fault_injection import check_fault, FAULT_BEFORE_MARK_PROCESSED
 
 if TYPE_CHECKING:
     from solstice.core.stage import Stage
@@ -47,23 +55,20 @@ if TYPE_CHECKING:
 
 @ray.remote
 class StageWorker:
-    """Worker that pulls from upstream queue and produces to output queue.
+    """Worker with partition-per-operator model for exactly-once semantics.
 
-    This worker is self-scheduling: it pulls messages from upstream,
-    processes them, and produces results to the output queue.
+    Each assigned partition gets its own Operator instance, allowing:
+    - Independent state management per partition
+    - True concurrent processing via asyncio.gather
+    - Simplified recovery (re-process + dedup)
 
-    Exactly-once semantics:
-    1. Fetch batch from upstream
-    2. Process each message
-    3. Produce output to output queue
-    4. Commit upstream offset (only after output is durably stored)
-
-    Note: Workers create their own queue connections from endpoints,
-    since QueueClient instances contain locks and cannot be serialized.
-
-    Metrics Push:
-    Workers push metrics to a state topic for WebUI monitoring.
-    This replaces the pull-based ray.get() polling approach.
+    Exactly-once semantics (At-Least-Once + Downstream Dedup):
+    1. Fetch from partition
+    2. Check for duplicate (offset-based or split_id-based)
+    3. Process with partition's dedicated operator
+    4. Produce output with deterministic split_id
+    5. Commit upstream offset
+    6. Downstream worker deduplicates using split_id
     """
 
     def __init__(
@@ -82,12 +87,14 @@ class StageWorker:
         state_endpoint: Optional[QueueEndpoint] = None,
         state_topic: Optional[str] = None,
         lineage_sample_rate: float = 0.0,
+        semantic_guarantee: SemanticGuarantee = SemanticGuarantee.AT_LEAST_ONCE,
     ):
         self.worker_id = worker_id
         self.job_id = job_id
         self.stage_id = stage.stage_id
         self.stage = stage
         self.config = config
+        self.semantic_guarantee = semantic_guarantee
 
         # SplitPayloadStore for storing SplitPayload data across workers
         self.payload_store = payload_store
@@ -98,14 +105,14 @@ class StageWorker:
         self.output_endpoint = output_endpoint
         self.output_topic = output_topic
         self.consumer_group = consumer_group
-        self.assigned_partitions = assigned_partitions
+        self.assigned_partitions = list(assigned_partitions)
 
         # State push configuration (optional, for WebUI)
         self.state_endpoint = state_endpoint
         self.state_topic = state_topic
-        self._state_producer: Optional[StateProducer] = None  # Created in run() if configured
+        self._state_producer: Optional[StateProducer] = None
 
-        # Lineage tracking configuration (from WebUIConfig via runner)
+        # Lineage tracking configuration
         self._lineage_sample_rate = lineage_sample_rate
 
         # Queue connections (created lazily)
@@ -114,26 +121,42 @@ class StageWorker:
 
         self.logger = create_ray_logger(f"Worker-{self.stage_id}-{worker_id}")
 
-        # Set runtime context on operator config before setup()
-        op_config = stage.operator_config
-        op_config.job_id = job_id
-        op_config.stage_id = stage.stage_id
-        op_config.worker_id = worker_id
+        # Partition-per-Operator: Create one Operator per assigned partition
+        self._partition_operators: Dict[int, Operator] = {}
+        self._init_partition_operators()
 
-        # Initialize operator using OperatorConfig.setup()
-        self.operator = op_config.setup()
-
-        # State
+        # Worker-level state
         self._running = False
-        self._processed_count = 0
-        self._error_count = 0
-        self._total_input_records = 0
-        self._total_output_records = 0
-        self._total_processing_time = 0.0
-        self._last_commit_time = time.time()
-        self._last_metrics_emit_time = 0.0
         self._upstream_finished = False
-        self._partitions_updated = False  # Flag to signal partition rebalance
+        self._partition_update_event = asyncio.Event()
+
+    def _init_partition_operators(self) -> None:
+        """Initialize Operator instances for assigned partitions."""
+        for partition_id in self.assigned_partitions:
+            self._create_partition_operator(partition_id)
+
+    def _create_partition_operator(self, partition_id: int) -> Operator:
+        """Create a new Operator for the given partition.
+
+        Each partition gets its own Operator instance with isolated state.
+        """
+        # Deep copy the config to avoid shared state
+        op_config = copy.deepcopy(self.stage.operator_config)
+        op_config.job_id = self.job_id
+        op_config.stage_id = self.stage_id
+        op_config.worker_id = f"{self.worker_id}_p{partition_id}"
+        op_config.partition_id = partition_id
+        op_config.semantic_guarantee = self.semantic_guarantee
+
+        # Create operator instance
+        operator = op_config.setup()
+        self._partition_operators[partition_id] = operator
+
+        # Initialize from state store for recovery (if operator has one)
+        operator.init_from_state_store()
+
+        self.logger.debug(f"Created Operator for partition {partition_id}")
+        return operator
 
     async def _create_queue_from_endpoint(self, endpoint: QueueEndpoint) -> QueueClient:
         """Create a queue connection from endpoint info."""
@@ -142,79 +165,484 @@ class StageWorker:
             broker_url = f"{endpoint.host}:{endpoint.port}"
             queue = TansuQueueClient(broker_url)
         else:
-            # Memory: Use broker URL to look up the broker instance
             queue = MemoryClient(endpoint.storage_url)
         queue.start()
         return queue
 
     async def run(self) -> Dict[str, Any]:
-        """Main processing loop.
-
-        Workers always consume from upstream queue. Source stages use
-        SourceMaster which writes splits to a queue before workers consume.
-        """
+        """Main entry point - runs all partition loops concurrently."""
         self._running = True
-        self.logger.info(f"Worker {self.worker_id} starting")
+        self.logger.info(
+            f"Worker {self.worker_id} starting with {len(self.assigned_partitions)} partitions"
+        )
 
         if not self.upstream_endpoint or not self.upstream_topic:
             raise RuntimeError(
-                f"Worker {self.worker_id} requires upstream_endpoint and upstream_topic. "
-                "Source stages should use SourceMaster to generate splits into a queue."
+                f"Worker {self.worker_id} requires upstream_endpoint and upstream_topic."
             )
 
         try:
             # Create queue connections
-            self.logger.info(f"Output endpoint received: {self.output_endpoint}")
             self.output_queue = await self._create_queue_from_endpoint(self.output_endpoint)
-
-            self.logger.info(f"Connecting to upstream queue: {self.upstream_endpoint}")
             self.upstream_queue = await self._create_queue_from_endpoint(self.upstream_endpoint)
 
-            # Initialize state producer if configured (for WebUI metrics push)
+            # Initialize state producer for WebUI
             await self._init_state_producer()
-
-            # Emit worker started event
             await self._emit_worker_started()
 
-            # Process from upstream queue
-            await self._process_from_upstream()
+            # Run all partition loops concurrently
+            await self._run_partition_loops()
 
-            # Emit worker stopped event
+            # Emit completion
             await self._emit_worker_stopped(reason="completed")
+
+            # Aggregate stats from all partitions
+            total_processed = sum(p.processed_count for p in self._partition_operators.values())
+            total_errors = sum(p.error_count for p in self._partition_operators.values())
 
             return {
                 "worker_id": self.worker_id,
-                "processed_count": self._processed_count,
-                "error_count": self._error_count,
+                "processed_count": total_processed,
+                "error_count": total_errors,
             }
 
         except Exception as e:
             self.logger.error(f"Worker {self.worker_id} failed: {e}")
-            # Emit exception and worker stopped
             await self._emit_exception(e)
             await self._emit_worker_stopped(reason="failed")
             raise
         finally:
             self._running = False
+            await self._cleanup()
 
-            # Close operator (allows sink to flush buffers, etc.)
-            try:
-                self.operator.close()
-            except Exception as e:
-                self.logger.warning(f"Error during operator close: {e}")
+    async def _run_partition_loops(self) -> None:
+        """Run processing loops for all partitions concurrently using asyncio.gather."""
+        # Create tasks for each partition
+        for partition_id, pop in self._partition_operators.items():
+            pop.task = asyncio.create_task(
+                self._process_partition(partition_id),
+                name=f"partition-{partition_id}",
+            )
 
-            # Stop state producer
-            if self._state_producer:
+        # Wait for all partition tasks to complete
+        # This will also handle partition rebalancing via task cancellation/creation
+        while self._running and self._partition_operators:
+            # Get current tasks
+            tasks = [pop.task for pop in self._partition_operators.values() if pop.task]
+
+            if not tasks:
+                break
+
+            # Wait for any task to complete or for partition update
+            done, pending = await asyncio.wait(
+                tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+                timeout=1.0,  # Check for partition updates periodically
+            )
+
+            # Handle completed tasks
+            for task in done:
                 try:
-                    await self._state_producer.stop()
+                    task.result()  # Raise any exceptions
+                except asyncio.CancelledError:
+                    pass  # Task was cancelled during rebalance
                 except Exception as e:
-                    self.logger.warning(f"Error stopping state producer: {e}")
+                    self.logger.error(f"Partition task failed: {e}")
 
-            # Cleanup queue connections
-            if self.upstream_queue:
-                self.upstream_queue.stop()
-            if self.output_queue:
-                self.output_queue.stop()
+            # Check if partition update was requested
+            if self._partition_update_event.is_set():
+                self._partition_update_event.clear()
+                await self._handle_partition_update()
+
+            # Check if all partitions are done
+            all_done = all(
+                pop.task is None or pop.task.done() for pop in self._partition_operators.values()
+            )
+            if all_done:
+                break
+
+    async def _process_partition(self, partition_id: int) -> None:
+        """Process messages from a single partition.
+
+        Each partition runs its own independent processing loop with:
+        - Dedicated operator instance
+        - Independent offset tracking
+        - Deduplication via split_id
+        """
+        assert self.upstream_queue is not None
+        assert self.output_queue is not None
+        assert self.upstream_topic is not None
+
+        pop = self._partition_operators.get(partition_id)
+        if pop is None:
+            return
+
+        eof_received = False
+        empty_fetch_count = 0
+        MAX_EMPTY_FETCHES_WHEN_UPSTREAM_DONE = 10
+
+        self.logger.info(
+            f"Partition {partition_id} loop starting, consumer_group={self.consumer_group}"
+        )
+
+        while self._running and not eof_received:
+            try:
+                # Fetch from this partition
+                records = self.upstream_queue.fetch(
+                    self.upstream_topic,
+                    max_records=self.config.batch_size,
+                    timeout_ms=1000,
+                    partition=partition_id,
+                    group_id=self.consumer_group,
+                )
+
+                if not records:
+                    empty_fetch_count += 1
+                    if (
+                        self._upstream_finished
+                        and empty_fetch_count >= MAX_EMPTY_FETCHES_WHEN_UPSTREAM_DONE
+                    ):
+                        self.logger.info(
+                            f"Partition {partition_id} done (upstream finished, {empty_fetch_count} empty fetches)"
+                        )
+                        break
+                    await asyncio.sleep(0.05)
+                    continue
+
+                empty_fetch_count = 0
+
+                # Process records
+                for record in records:
+                    message = QueueMessage.from_bytes(record.value)
+
+                    # Check for EOF
+                    if message.is_eof():
+                        eof_received = True
+                        self.logger.info(f"Partition {partition_id} received EOF")
+                        # Commit EOF offset
+                        self.upstream_queue.commit_offset(
+                            self.consumer_group,
+                            self.upstream_topic,
+                            record.offset + 1,
+                            partition=partition_id,
+                        )
+                        break
+
+                    # Deduplication check (offset-based for sequential consumption)
+                    if pop.is_duplicate(record.offset):
+                        self.logger.debug(f"Skipping duplicate offset: {record.offset}")
+                        self.upstream_queue.commit_offset(
+                            self.consumer_group,
+                            self.upstream_topic,
+                            record.offset + 1,
+                            partition=partition_id,
+                        )
+                        continue
+
+                    # Generate deterministic split_id for downstream
+                    split_id = make_split_id(
+                        self.job_id, self.stage_id, partition_id, record.offset
+                    )
+
+                    # Process the message
+                    await self._process_message(pop, message, record.offset, partition_id, split_id)
+
+                    # Fault injection point (no-op in production)
+                    check_fault(FAULT_BEFORE_MARK_PROCESSED)
+
+                    # Mark as processed
+                    pop.mark_processed(record.offset)
+
+                    # Commit offset (at-least-once: commit after produce)
+                    self.upstream_queue.commit_offset(
+                        self.consumer_group,
+                        self.upstream_topic,
+                        record.offset + 1,
+                        partition=partition_id,
+                    )
+
+            except asyncio.CancelledError:
+                self.logger.info(f"Partition {partition_id} loop cancelled")
+                raise
+            except Exception as e:
+                pop.error_count += 1
+                self.logger.error(f"Error in partition {partition_id}: {e}")
+                await asyncio.sleep(0.1)  # Brief pause before retry
+
+        self.logger.info(
+            f"Partition {partition_id} loop finished: processed={pop.processed_count}, errors={pop.error_count}"
+        )
+
+    async def _process_message(
+        self,
+        op: Operator,
+        message: QueueMessage,
+        offset: int,
+        partition_id: int,
+        split_id: str,
+    ) -> None:
+        """Process a single message using the partition's operator.
+
+        Args:
+            op: The Operator for this partition
+            message: The queue message
+            offset: The message offset
+            partition_id: The partition being processed
+            split_id: The deterministic split ID for this message
+        """
+        from solstice.core.models import Split, SplitPayload
+
+        assert self.output_queue is not None
+
+        payload: Optional[SplitPayload] = None
+        is_source_message = not message.payload_key
+
+        if is_source_message:
+            # Source message: data_range is in metadata
+            data_range = message.metadata.get("data_range", {})
+            split = Split(
+                split_id=message.split_id,
+                stage_id=self.stage_id,
+                data_range=data_range,
+                parent_split_ids=[],
+            )
+        else:
+            # Regular message: get payload from store
+            payload = self.payload_store.get(message.payload_key)
+            if payload is None:
+                raise RuntimeError(f"Payload not found for key: {message.payload_key}")
+
+            split = Split(
+                split_id=message.split_id,
+                stage_id=self.stage_id,
+                data_range={"message_id": message.message_id},
+                parent_split_ids=[message.split_id],
+            )
+
+        # Process with partition's operator
+        dequeue_time = time.time()
+        output_payload = op.process_split(split, payload)
+        complete_time = time.time()
+        processing_time = complete_time - dequeue_time
+
+        # Update metrics
+        input_records = len(payload) if payload else 0
+        output_records = len(output_payload) if output_payload else 0
+        op.total_input_records += input_records
+        op.total_output_records += output_records
+        op.total_processing_time += processing_time
+
+        # Produce output if any
+        payload_key = ""
+        if output_payload:
+            # Use deterministic split_id as payload_key
+            payload_key = split_id
+
+            # Store in PayloadStore (cache, not persistence layer)
+            self.payload_store.store(payload_key, output_payload)
+
+            output_message = QueueMessage(
+                message_id=split_id,
+                split_id=split_id,  # Deterministic split_id for downstream dedup
+                payload_key=payload_key,
+                metadata={
+                    "source_stage": self.stage_id,
+                    "parent_message_id": message.message_id,
+                    "partition": partition_id,
+                    "offset": offset,
+                },
+            )
+
+            # Produce to output queue (at-least-once)
+            self.output_queue.produce(
+                self.output_topic,
+                output_message.to_bytes(),
+                partition=partition_id,
+            )
+
+        # Emit lineage if configured
+        if self._should_track_lineage():
+            input_bytes = payload.data.nbytes if payload and hasattr(payload.data, "nbytes") else 0
+            output_bytes = (
+                output_payload.data.nbytes
+                if output_payload and hasattr(output_payload.data, "nbytes")
+                else 0
+            )
+            parent_ids = [] if is_source_message else [message.split_id]
+
+            await self._emit_split_lineage(
+                output_split_id=split_id,
+                parent_split_ids=parent_ids,
+                partition_id=partition_id,
+                enqueue_time=message.timestamp,
+                dequeue_time=dequeue_time,
+                complete_time=complete_time,
+                input_records=input_records,
+                output_records=output_records,
+                input_bytes=input_bytes,
+                output_bytes=output_bytes,
+                payload_key=payload_key,
+            )
+
+        # Emit metrics periodically
+        await self._emit_worker_metrics()
+
+    async def _cleanup(self) -> None:
+        """Clean up resources."""
+        # Close all partition operators
+        for pop in self._partition_operators.values():
+            try:
+                pop.close()
+            except Exception as e:
+                self.logger.warning(f"Error closing partition operator: {e}")
+        self._partition_operators.clear()
+
+        # Stop state producer
+        if self._state_producer:
+            try:
+                await self._state_producer.stop()
+            except Exception as e:
+                self.logger.warning(f"Error stopping state producer: {e}")
+
+        # Cleanup queue connections
+        if self.upstream_queue:
+            self.upstream_queue.stop()
+        if self.output_queue:
+            self.output_queue.stop()
+
+    # === Partition Rebalancing ===
+
+    def update_partitions(self, partitions: List[int]) -> None:
+        """Update the partition assignment for this worker.
+
+        Called by master when partition rebalance occurs (e.g., scale up/down).
+        """
+        old_partitions = set(self.assigned_partitions)
+        new_partitions = set(partitions)
+
+        added = new_partitions - old_partitions
+        removed = old_partitions - new_partitions
+
+        self.assigned_partitions = list(partitions)
+        self._partition_update_event.set()
+
+        self.logger.info(
+            f"Worker {self.worker_id} partition update: "
+            f"added={list(added)}, removed={list(removed)}, "
+            f"now handling {partitions}"
+        )
+
+    async def _handle_partition_update(self) -> None:
+        """Handle partition update during runtime."""
+        current_partitions = set(self._partition_operators.keys())
+        target_partitions = set(self.assigned_partitions)
+
+        # Remove partitions no longer assigned
+        for partition_id in current_partitions - target_partitions:
+            pop = self._partition_operators.pop(partition_id, None)
+            if pop:
+                if pop.task and not pop.task.done():
+                    pop.task.cancel()
+                    try:
+                        await pop.task
+                    except asyncio.CancelledError:
+                        pass
+                pop.close()
+                self.logger.info(f"Removed partition {partition_id}")
+
+        # Add newly assigned partitions
+        for partition_id in target_partitions - current_partitions:
+            pop = self._create_partition_operator(partition_id)
+            pop.task = asyncio.create_task(
+                self._process_partition(partition_id),
+                name=f"partition-{partition_id}",
+            )
+            self.logger.info(f"Added partition {partition_id}")
+
+    # === Status and Metrics ===
+
+    def notify_upstream_finished(self) -> None:
+        """Called by master when upstream stage(s) have finished."""
+        self._upstream_finished = True
+        self.logger.info(f"Worker {self.worker_id} notified: upstream finished")
+
+    def get_status(self) -> Dict[str, Any]:
+        """Get current worker status including metrics.
+
+        Returns a dict with:
+        - Identity: worker_id, stage_id, pid
+        - State: running, upstream_finished
+        - Partitions: assigned_partitions, partition_count
+        - Counts: processed_count, error_count
+        - Metrics: input_records, output_records, processing_time_s
+        """
+        import os
+
+        operators = self._partition_operators.values()
+
+        return {
+            # Identity
+            "worker_id": self.worker_id,
+            "stage_id": self.stage_id,
+            "pid": os.getpid(),
+            # State
+            "running": self._running,
+            "upstream_finished": self._upstream_finished,
+            # Partitions
+            "assigned_partitions": self.assigned_partitions,
+            "partition_count": len(self._partition_operators),
+            # Counts
+            "processed_count": sum(op.processed_count for op in operators),
+            "error_count": sum(op.error_count for op in operators),
+            # Metrics
+            "input_records": sum(op.total_input_records for op in operators),
+            "output_records": sum(op.total_output_records for op in operators),
+            "processing_time_s": sum(op.total_processing_time for op in operators),
+        }
+
+    def stop(self) -> None:
+        """Stop the worker."""
+        self._running = False
+        self.logger.info(f"Worker {self.worker_id} stopping")
+
+    # === Operator Method Dispatch ===
+
+    def invoke_operator(
+        self, method_name: str, *args, partition_id: Optional[int] = None, **kwargs
+    ) -> Any:
+        """Invoke an operator method by name.
+
+        If partition_id is specified, invokes on that partition's operator.
+        Otherwise, invokes on the first partition's operator.
+
+        Only methods marked with @master_callable decorator can be invoked.
+        """
+        from solstice.core.operator import is_master_callable
+
+        # Select operator
+        if partition_id is not None:
+            operator = self._partition_operators.get(partition_id)
+            if operator is None:
+                return None
+        else:
+            # Use first partition's operator
+            if not self._partition_operators:
+                return None
+            operator = next(iter(self._partition_operators.values()))
+
+        method = getattr(operator, method_name, None)
+        if method is None:
+            return None
+
+        if not is_master_callable(method):
+            raise ValueError(
+                f"Method '{method_name}' is not marked @master_callable. "
+                f"Add the decorator to allow remote invocation."
+            )
+
+        return method(*args, **kwargs)
+
+    # === State Producer and Events ===
 
     async def _init_state_producer(self) -> None:
         """Initialize state producer for metrics push."""
@@ -222,8 +650,6 @@ class StageWorker:
             return
 
         try:
-            from solstice.webui.state.producer import StateProducer
-
             state_queue = await self._create_queue_from_endpoint(self.state_endpoint)
             self._state_producer = StateProducer(
                 job_id=self.job_id,
@@ -262,16 +688,22 @@ class StageWorker:
         try:
             from solstice.webui.state.messages import worker_stopped_message
 
+            total_processed = sum(p.processed_count for p in self._partition_operators.values())
+            total_errors = sum(p.error_count for p in self._partition_operators.values())
+            total_input = sum(p.total_input_records for p in self._partition_operators.values())
+            total_output = sum(p.total_output_records for p in self._partition_operators.values())
+            total_time = sum(p.total_processing_time for p in self._partition_operators.values())
+
             msg = worker_stopped_message(
                 job_id=self.job_id,
                 stage_id=self.stage_id,
                 worker_id=self.worker_id,
                 reason=reason,
-                processed_count=self._processed_count,
-                error_count=self._error_count,
-                input_records=self._total_input_records,
-                output_records=self._total_output_records,
-                processing_time=self._total_processing_time,
+                processed_count=total_processed,
+                error_count=total_errors,
+                input_records=total_input,
+                output_records=total_output,
+                processing_time=total_time,
             )
             await self._state_producer.produce(msg)
         except Exception as e:
@@ -285,14 +717,19 @@ class StageWorker:
         try:
             from solstice.webui.state.messages import worker_metrics_message
 
+            total_processed = sum(p.processed_count for p in self._partition_operators.values())
+            total_input = sum(p.total_input_records for p in self._partition_operators.values())
+            total_output = sum(p.total_output_records for p in self._partition_operators.values())
+            total_time = sum(p.total_processing_time for p in self._partition_operators.values())
+
             msg = worker_metrics_message(
                 job_id=self.job_id,
                 stage_id=self.stage_id,
                 worker_id=self.worker_id,
-                input_records=self._total_input_records,
-                output_records=self._total_output_records,
-                processing_time=self._total_processing_time,
-                processed_count=self._processed_count,
+                input_records=total_input,
+                output_records=total_output,
+                processing_time=total_time,
+                processed_count=total_processed,
                 assigned_partitions=self.assigned_partitions,
                 is_running=self._running,
             )
@@ -321,476 +758,8 @@ class StageWorker:
         except Exception as e:
             self.logger.debug(f"Failed to emit exception: {e}")
 
-    def notify_upstream_finished(self) -> None:
-        """Called by master when upstream stage(s) have finished."""
-        self._upstream_finished = True
-        self.logger.info(f"Worker {self.worker_id} notified: upstream finished")
-
-    def get_status(self) -> Dict[str, Any]:
-        """Get current worker status. Used for health checks and monitoring."""
-        import os
-
-        return {
-            "worker_id": self.worker_id,
-            "stage_id": self.stage_id,
-            "running": self._running,
-            "processed_count": self._processed_count,
-            "error_count": self._error_count,
-            "upstream_finished": self._upstream_finished,
-            "assigned_partitions": self.assigned_partitions,
-            "pid": os.getpid(),
-        }
-
-    async def _process_from_upstream(self) -> None:
-        """Process messages from upstream queue from all assigned partitions.
-
-        Completion criteria:
-        - When EOF markers have been received for ALL assigned partitions
-        - EOF markers are sent by upstream stage when it completes
-
-        This is more reliable than polling-based completion detection because:
-        1. No race conditions - EOF is guaranteed to come after all data
-        2. No need for offset queries - just track EOF receipt
-        3. Faster completion - no need for multiple empty polls
-        """
-        # These must be initialized by run() before calling this method
-        assert self.upstream_queue is not None, "upstream_queue not initialized"
-        assert self.output_queue is not None, "output_queue not initialized"
-        assert self.upstream_topic is not None, "upstream_topic not set"
-
-        last_committed_offsets: Dict[int, int] = {}  # Track offsets per partition
-        eof_received: set = set()  # Track which partitions have received EOF
-        current_partition_idx = 0  # Round-robin index for partition polling
-        active_partitions = list(self.assigned_partitions)  # Local copy
-
-        # Track consecutive empty fetches per partition
-        # Used to detect end-of-partition after recovery when EOF was already consumed
-        empty_fetch_count: Dict[int, int] = {p: 0 for p in active_partitions}
-        MAX_EMPTY_FETCHES_WHEN_UPSTREAM_DONE = 10
-
-        self.logger.info(
-            f"Worker {self.worker_id} starting to consume from {self.upstream_topic} "
-            f"partitions {active_partitions} with consumer group {self.consumer_group}"
-        )
-
-        while self._running:
-            # Check if partitions were updated by master
-            if self._partitions_updated:
-                self._partitions_updated = False
-                old_partitions = set(active_partitions)
-                new_partitions = set(self.assigned_partitions)
-                active_partitions = list(self.assigned_partitions)
-
-                # Reset index to avoid out-of-bounds
-                current_partition_idx = 0
-
-                # Clean up offset tracking for removed partitions
-                removed = old_partitions - new_partitions
-                for p in removed:
-                    if p in last_committed_offsets:
-                        try:
-                            self.upstream_queue.commit_offset(
-                                self.consumer_group,
-                                self.upstream_topic,
-                                last_committed_offsets[p],
-                                partition=p,
-                            )
-                        except Exception as e:
-                            self.logger.warning(
-                                f"Failed to commit offset for removed partition {p}: {e}"
-                            )
-                        del last_committed_offsets[p]
-                    eof_received.discard(p)
-
-                self.logger.info(
-                    f"Worker {self.worker_id} switched to partitions {active_partitions}"
-                )
-
-            # Safety check: ensure we have partitions
-            if not active_partitions:
-                if self._upstream_finished:
-                    self.logger.info(
-                        f"Worker {self.worker_id} finished: no partitions and upstream done"
-                    )
-                    break
-                await asyncio.sleep(0.5)
-                continue
-
-            # Check if all partitions have received EOF
-            if eof_received >= set(active_partitions):
-                self.logger.info(
-                    f"Worker {self.worker_id} finished: received EOF from all "
-                    f"{len(active_partitions)} partitions"
-                )
-                break
-
-            # Round-robin across assigned partitions (skip EOF'd partitions)
-            partitions_to_poll = [p for p in active_partitions if p not in eof_received]
-            if not partitions_to_poll:
-                # All partitions have EOF, exit
-                break
-
-            partition = partitions_to_poll[current_partition_idx % len(partitions_to_poll)]
-            current_partition_idx = (current_partition_idx + 1) % len(partitions_to_poll)
-
-            # Fetch batch from current partition
-            # IMPORTANT: Must use consumer_group to share offset state with commit_offset
-            records = self.upstream_queue.fetch(
-                self.upstream_topic,
-                max_records=self.config.batch_size,
-                timeout_ms=1000,
-                partition=partition,
-                group_id=self.consumer_group,
-            )
-
-            if not records:
-                # Track empty fetches to detect end-of-partition after recovery
-                # When worker recovers from a crash, it may resume at an offset past the EOF
-                # (because EOF was processed but worker crashed before completion)
-                if partition not in empty_fetch_count:
-                    empty_fetch_count[partition] = 0
-                empty_fetch_count[partition] += 1
-
-                # If upstream is finished and we've had many consecutive empty fetches,
-                # assume this partition is done (EOF was already consumed before recovery)
-                if (
-                    self._upstream_finished
-                    and empty_fetch_count[partition] >= MAX_EMPTY_FETCHES_WHEN_UPSTREAM_DONE
-                ):
-                    eof_received.add(partition)
-                    self.logger.info(
-                        f"Worker {self.worker_id} marking partition {partition} as done "
-                        f"(upstream finished, {empty_fetch_count[partition]} empty fetches, "
-                        f"likely resumed past EOF)"
-                    )
-                else:
-                    await asyncio.sleep(0.05)
-                continue
-
-            # Reset empty fetch count on successful fetch
-            empty_fetch_count[partition] = 0
-
-            # Debug: Log first batch fetched
-            if self._processed_count == 0 and records:
-                self.logger.info(
-                    f"Worker {self.worker_id} first fetch: {len(records)} records, "
-                    f"offset range [{records[0].offset}-{records[-1].offset}]"
-                )
-
-            # Process each record with frequent commits for exactly-once semantics.
-            # Commit every N messages (config.commit_batch_size) to balance performance vs duplicate risk.
-            commit_batch_size = self.config.commit_batch_size
-            messages_since_commit = 0
-
-            for record in records:
-                try:
-                    message = QueueMessage.from_bytes(record.value)
-
-                    # Check for EOF marker
-                    if message.is_eof():
-                        eof_received.add(partition)
-                        self.logger.info(
-                            f"Worker {self.worker_id} received EOF for partition {partition} "
-                            f"({len(eof_received)}/{len(active_partitions)} complete)"
-                        )
-                        # Commit offset for EOF marker immediately
-                        eof_offset = record.offset + 1
-                        self.upstream_queue.commit_offset(
-                            self.consumer_group,
-                            self.upstream_topic,
-                            eof_offset,
-                            partition=partition,
-                        )
-                        # Update last_committed_offsets to prevent final commit from rolling back
-                        last_committed_offsets[partition] = eof_offset
-                        continue
-
-                    await self._process_message(message, partition_id=partition)
-                    self._processed_count += 1
-
-                except Exception as e:
-                    import traceback
-
-                    self.logger.error(
-                        f"Error processing message at offset {record.offset}: {type(e).__name__}: {e}"
-                    )
-                    self.logger.debug(f"Traceback: {traceback.format_exc()}")
-                    self._error_count += 1
-
-                # Track offset for this partition
-                current_offset = record.offset + 1
-                last_committed_offsets[partition] = current_offset
-                messages_since_commit += 1
-
-                # Commit frequently to minimize duplicate window
-                if messages_since_commit >= commit_batch_size:
-                    self.upstream_queue.commit_offset(
-                        self.consumer_group,
-                        self.upstream_topic,
-                        current_offset,
-                        partition=partition,
-                    )
-                    messages_since_commit = 0
-
-            # Final commit for any remaining messages in this batch
-            if messages_since_commit > 0:
-                for p, offset in last_committed_offsets.items():
-                    self.upstream_queue.commit_offset(
-                        self.consumer_group,
-                        self.upstream_topic,
-                        offset,
-                        partition=p,
-                    )
-            self._last_commit_time = time.time()
-
-        # Final commit for all assigned partitions
-        if self.upstream_queue and last_committed_offsets:
-            for p, offset in last_committed_offsets.items():
-                self.upstream_queue.commit_offset(
-                    self.consumer_group,
-                    self.upstream_topic,
-                    offset,
-                    partition=p,
-                )
-
-    async def _process_message(self, message: QueueMessage, partition_id: int = -1) -> None:
-        """Process a single message.
-
-        Handles two types of messages:
-        1. Source messages: payload_key is empty, data_range is in metadata
-           - Create split from metadata and call operator.process_split(split, None)
-        2. Regular messages: payload_key points to SplitPayloadStore
-           - Get payload from store and call operator.process_split(split, payload)
-        """
-        from solstice.core.models import Split, SplitPayload
-
-        # Must be initialized by run() before this is called
-        assert self.output_queue is not None, "output_queue not initialized"
-
-        payload: Optional[SplitPayload] = None
-        is_source_message = not message.payload_key
-
-        if is_source_message:
-            # Source message: data_range is in metadata
-            data_range = message.metadata.get("data_range", {})
-            split = Split(
-                split_id=message.split_id,
-                stage_id=self.stage_id,
-                data_range=data_range,
-                parent_split_ids=[],
-            )
-            # payload is None for source operators
-        else:
-            # Regular message: get payload from store
-            payload = self.payload_store.get(message.payload_key)
-            if payload is None:
-                raise RuntimeError(f"Payload not found for key: {message.payload_key}")
-
-            split = Split(
-                split_id=message.split_id,
-                stage_id=self.stage_id,
-                data_range={"message_id": message.message_id},
-                parent_split_ids=[message.split_id],
-            )
-
-        # Process with operator
-        dequeue_time = time.time()
-        output_payload = self.operator.process_split(split, payload)
-        complete_time = time.time()
-        processing_time = complete_time - dequeue_time
-
-        # Update metrics
-        input_records = len(payload) if payload else 0
-        output_records = len(output_payload) if output_payload else 0
-        self._total_input_records += input_records
-        self._total_output_records += output_records
-        self._total_processing_time += processing_time
-
-        # Calculate payload sizes for lineage
-        input_bytes = 0
-        output_bytes = 0
-        if payload:
-            # Estimate size from Arrow table
-            input_bytes = payload.data.nbytes if hasattr(payload.data, "nbytes") else 0
-        if output_payload:
-            output_bytes = (
-                output_payload.data.nbytes if hasattr(output_payload.data, "nbytes") else 0
-            )
-
-        payload_key = ""
-        if output_payload:
-            # Generate unique key for this payload
-            payload_key = f"{self.worker_id}_{self._processed_count}_{split.split_id}"
-
-            # Store in SplitPayloadStore
-            self.payload_store.store(payload_key, output_payload)
-
-            output_message = QueueMessage(
-                message_id=f"{self.worker_id}_{self._processed_count}",
-                split_id=f"{self.stage_id}_{message.split_id}",
-                payload_key=payload_key,
-                metadata={
-                    "source_stage": self.stage_id,
-                    "parent_message_id": message.message_id,
-                },
-            )
-
-            # Produce to output queue
-            offset = self.output_queue.produce(self.output_topic, output_message.to_bytes())
-            self.logger.debug(f"Produced output for {message.split_id} at offset {offset}")
-        else:
-            self.logger.debug(f"Operator returned None for {message.split_id}, no output produced")
-
-        # Emit lineage tracking (gated by sample rate: 0=off, 1=full, 0.x=sampling)
-        if self._should_track_lineage():
-            # The output split ID that downstream stages will use as parent
-            # This must match the split_id in output_message
-            output_split_id = f"{self.stage_id}_{message.split_id}"
-
-            # For source operators: no parents
-            # For other operators: input message's split_id is the parent
-            if is_source_message:
-                parent_ids: list[str] = []  # Source has no parents
-            else:
-                parent_ids = [message.split_id]  # Input split is the parent
-
-            await self._emit_split_lineage(
-                output_split_id=output_split_id,
-                parent_split_ids=parent_ids,
-                partition_id=partition_id,
-                enqueue_time=message.timestamp,
-                dequeue_time=dequeue_time,
-                complete_time=complete_time,
-                input_records=input_records,
-                output_records=output_records,
-                input_bytes=input_bytes,
-                output_bytes=output_bytes,
-                payload_key=payload_key,
-            )
-
-        # Emit metrics periodically (rate limited by StateProducer)
-        await self._emit_worker_metrics()
-
-        # Delete input payload if it was from store (not source message)
-        # FIXME: Disable payload deletion to prevent race conditions in distributed execution
-        # Rely on Ray's object store eviction or end-of-job cleanup
-        # if not is_source_message and message.payload_key:
-        #     self.payload_store.delete(message.payload_key)
-
-    def stop(self) -> None:
-        """Stop the worker."""
-        self._running = False
-        self.logger.info(f"Worker {self.worker_id} stopping")
-
-        try:
-            self.operator.close()
-        except Exception as e:
-            self.logger.error(f"Error closing operator: {e}")
-
-    def update_partitions(self, partitions: List[int]) -> None:
-        """Update the partition assignment for this worker.
-
-        Called by master when partition rebalance occurs (e.g., scale up/down).
-        Sets a flag that the processing loop will detect and handle.
-        """
-        old_partitions = set(self.assigned_partitions)
-        new_partitions = set(partitions)
-
-        added = new_partitions - old_partitions
-        removed = old_partitions - new_partitions
-
-        self.assigned_partitions = partitions
-        self._partitions_updated = True  # Signal to processing loop
-
-        self.logger.info(
-            f"Worker {self.worker_id} partition update: "
-            f"added={list(added)}, removed={list(removed)}, "
-            f"now handling {partitions}"
-        )
-
-    def get_stats(self) -> Dict[str, Any]:
-        """Get worker statistics."""
-        return {
-            "worker_id": self.worker_id,
-            "stage_id": self.stage_id,
-            "running": self._running,
-            "processed_count": self._processed_count,
-            "error_count": self._error_count,
-        }
-
-    def get_metrics(self):
-        """Get worker metrics for WebUI.
-
-        Returns:
-            WorkerMetrics dataclass with current metrics
-        """
-        from solstice.core.models import WorkerMetrics
-
-        return WorkerMetrics(
-            worker_id=self.worker_id,
-            stage_id=self.stage_id,
-            input_records=self._total_input_records,
-            output_records=self._total_output_records,
-            processing_time=self._total_processing_time,
-        )
-
-    # === Operator Method Dispatch ===
-    #
-    # Generic mechanism for masters to call operator methods via worker.
-    # Instead of adding proxy methods for each operator feature, we provide
-    # a single dispatch method that forwards calls to the operator.
-    #
-    # Security: Only methods decorated with @master_callable can be invoked.
-    # See solstice.core.operator.master_callable for the decorator.
-
-    def invoke_operator(self, method_name: str, *args, **kwargs) -> Any:
-        """Invoke an operator method by name (generic dispatch).
-
-        Only methods marked with @master_callable decorator can be invoked.
-        This provides extensibility without modifying StageWorker for each
-        new operator feature.
-
-        Args:
-            method_name: Name of the operator method to call
-            *args: Positional arguments to pass
-            **kwargs: Keyword arguments to pass
-
-        Returns:
-            Result from the operator method, or None if method doesn't exist
-
-        Raises:
-            ValueError: If method exists but is not marked @master_callable
-
-        Example:
-            # In master:
-            changes = ray.get(worker.invoke_operator.remote("get_iteration_changes"))
-
-            # In operator (must be decorated):
-            @master_callable
-            def get_iteration_changes(self) -> int:
-                return self._changes
-        """
-        from solstice.core.operator import is_master_callable
-
-        method = getattr(self.operator, method_name, None)
-        if method is None:
-            return None
-
-        if not is_master_callable(method):
-            raise ValueError(
-                f"Method '{method_name}' is not marked @master_callable. "
-                f"Add the decorator to allow remote invocation."
-            )
-
-        return method(*args, **kwargs)
-
     def _should_track_lineage(self) -> bool:
-        """Check if this split should be tracked based on sample rate.
-
-        - rate=0.0: never track (disabled)
-        - rate=1.0: always track (full)
-        - rate=0.x: probabilistic sampling
-        """
+        """Check if this split should be tracked based on sample rate."""
         rate = self._lineage_sample_rate
         if rate <= 0.0:
             return False
@@ -836,7 +805,7 @@ class StageWorker:
                 input_bytes=input_bytes,
                 output_bytes=output_bytes,
                 payload_store_key=payload_key,
-                payload_storage_path=None,  # TODO: Add external storage path if needed
+                payload_storage_path=None,
             )
             await self._state_producer.produce(msg)
         except Exception as e:

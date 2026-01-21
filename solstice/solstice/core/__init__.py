@@ -4,9 +4,12 @@ from solstice.core.job import Job, JobConfig
 from solstice.core.operator import (
     Operator,
     OperatorConfig,
+    SemanticGuarantee,
     master_callable,
     is_master_callable,
 )
+from solstice.core.source_operator import SourceOperator
+from solstice.core.sink_operator import SinkOperator
 from solstice.core.stage import Stage
 from solstice.core.stage_config import (
     StageConfig,
@@ -17,6 +20,7 @@ from solstice.core.stage_config import (
     QueueMessage,
     StageStatus,
     MessageType,
+    make_split_id,
 )
 from solstice.core.stage_master import StageMaster
 from solstice.core.stage_worker import StageWorker
@@ -34,6 +38,9 @@ __all__ = [
     # Operator
     "Operator",
     "OperatorConfig",
+    "SourceOperator",
+    "SinkOperator",
+    "SemanticGuarantee",
     "master_callable",
     "is_master_callable",
     # Queue
@@ -42,6 +49,7 @@ __all__ = [
     "create_queue_endpoint",
     "QueueMessage",
     "MessageType",
+    "make_split_id",
     # Status
     "StageStatus",
     # Failure handling

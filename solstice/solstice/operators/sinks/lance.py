@@ -24,7 +24,8 @@ import pyarrow as pa
 from lance.dataset import write_dataset
 
 from solstice.core.models import Split, SplitPayload
-from solstice.core.operator import SinkOperator, OperatorConfig
+from solstice.core.operator import OperatorConfig
+from solstice.core.sink_operator import SinkOperator
 
 
 @dataclass

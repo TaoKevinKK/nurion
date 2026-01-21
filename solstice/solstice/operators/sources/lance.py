@@ -22,7 +22,8 @@ from typing import TYPE_CHECKING, Iterable, Iterator, Optional
 import lance
 
 from solstice.core.models import Split, SplitPayload
-from solstice.core.operator import SourceOperator, OperatorConfig
+from solstice.core.operator import OperatorConfig
+from solstice.core.source_operator import SourceOperator
 from solstice.operators.sources.source import SourceMaster, SourceConfig
 
 if TYPE_CHECKING:

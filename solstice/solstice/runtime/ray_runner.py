@@ -354,6 +354,7 @@ class RayJobRunner:
             memory_mb=int(worker_res.get("memory", 0) / (1024**2)),
             lineage_sample_rate=self.job.config.webui.lineage_sample_rate,
             shared_broker_endpoint=self._shared_broker_endpoint,
+            semantic_guarantee=self.job.config.semantic_guarantee,
         )
 
     def _stage_info(self, stage: "Stage") -> Dict[str, Any]:

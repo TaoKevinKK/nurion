@@ -218,6 +218,7 @@ class WorkerManager:
             state_endpoint=self._state_endpoint,
             state_topic=self._state_topic,
             lineage_sample_rate=self._lineage_sample_rate,
+            semantic_guarantee=self._config.semantic_guarantee,
         )
 
         self._workers[worker_id] = worker

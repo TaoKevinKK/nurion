@@ -27,7 +27,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from solstice.core.models import Split, SplitPayload
-from solstice.core.operator import SinkOperator, OperatorConfig
+from solstice.core.operator import OperatorConfig
+from solstice.core.sink_operator import SinkOperator
 
 
 @dataclass

@@ -21,7 +21,8 @@ from typing import Optional
 from pyiceberg.catalog import load_catalog
 
 from solstice.core.models import Split, SplitPayload
-from solstice.core.operator import SourceOperator, OperatorConfig
+from solstice.core.operator import OperatorConfig
+from solstice.core.source_operator import SourceOperator
 
 
 @dataclass
