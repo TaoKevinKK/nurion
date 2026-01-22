@@ -2,11 +2,34 @@
 
 Track implementation status of deduplication operators and fault tolerance features.
 
-> **Last Updated**: 2026-01-13
+> **Last Updated**: 2026-01-21
 
 ---
 
 ## ✅ Completed
+
+### Exactly-Once Semantics (NEW - 2026-01-21)
+
+- [x] **SemanticGuarantee Enum** - `core/operator.py`
+  - `AT_LEAST_ONCE` (default): No dedup overhead
+  - `EXACTLY_ONCE`: Offset-based deduplication
+- [x] **Offset-based Deduplication** - `core/operator.py`
+  - `last_offset` tracking per partition
+  - `is_duplicate(offset)`: Skip if `offset <= last_offset`
+  - Atomic save of offset + business state to SlateDB
+- [x] **Config Propagation Chain**
+  - `JobConfig.semantic_guarantee` → `StageConfig` → `WorkerManager` → `StageWorker` → `Operator`
+  - Fixed bug where config was never passed to workers
+- [x] **Fault Injection Framework** - `testing/fault_injection.py`
+  - `FaultInjector` class for testing failure scenarios
+  - `check_fault()` hooks in critical paths
+  - Count-based and probability-based failure triggers
+- [x] **Integration Tests** - `tests/test_exactly_once_integration.py`
+  - Config propagation tests
+  - Fault injection tests
+  - State recovery tests
+
+See `design-docs/exactly-once-semantics.md` for detailed design.
 
 ### Shuffle Framework
 
@@ -99,17 +122,16 @@ Track implementation status of deduplication operators and fault tolerance featu
 
 ### High Priority
 
-- [ ] **Checkpoint Recovery (NOT IMPLEMENTED)**
-  - Current status: Scaffolding exists but doesn't work
-  - `FsspecCheckpointStorage` can read/write files
-  - `recover_from_checkpoint()` loads checkpoint
-  - ❌ No code saves checkpoints during execution
-  - ❌ Recovered offsets not passed to workers
-  - ❌ Workers don't seek to recovered offset
+- [ ] **Full Pipeline Checkpoint Recovery**
+  - Current status: Exactly-once within a run works via offset tracking
+  - Cross-run recovery still needs work:
+    - ❌ No checkpoint file saving during execution
+    - ❌ Cross-stage offset coordination
+  - Note: Operator-level state recovery via SlateDB now works
   
   **Options:**
-  1. Implement fully (significant work)
-  2. Remove scaffolding, implement later when needed
+  1. Implement checkpoint barriers (Flink-style)
+  2. Rely on idempotent sinks + replay from source
 
 ### Medium Priority
 
@@ -218,7 +240,13 @@ Track implementation status of deduplication operators and fault tolerance featu
 ## References
 
 - Design Docs: `design-docs/`
+  - `design-docs/exactly-once-semantics.md` - Exactly-once design
+  - `design-docs/checkpoint-and-recovery.md` - Checkpoint design
 - Operators: `solstice/operators/`
 - State: `solstice/state/`
 - Checkpoint: `solstice/checkpoint/`
-- Tests: `tests/test_*_operator.py`, `tests/test_connected_components.py`
+- Testing: `solstice/testing/fault_injection.py` - Fault injection framework
+- Tests: 
+  - `tests/test_*_operator.py`
+  - `tests/test_connected_components.py`
+  - `tests/test_exactly_once_integration.py` - Exactly-once tests
