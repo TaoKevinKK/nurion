@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional, Set
 
@@ -41,11 +42,20 @@ class LanceSinkConfig(OperatorConfig):
     buffer_size: int = 1000
     """Number of records to buffer before flushing."""
 
-    blob_columns: List[str] = field(default_factory=lambda: ["slice_binary"])
+    blob_columns: List[str] = field(default_factory=lambda: [])
     """Columns to store as Lance blobs (large binary with blob encoding)."""
 
     storage_options: Optional[Dict[str, str]] = None
     """Storage options for S3/cloud backends (e.g., aws_access_key_id, endpoint_url)."""
+
+    write_retry_attempts: int = 5
+    """Number of times to retry a failed write."""
+
+    write_retry_backoff_s: float = 0.5
+    """Base backoff in seconds between retries."""
+
+    write_retry_max_backoff_s: float = 10.0
+    """Maximum backoff in seconds between retries."""
 
 
 class LanceSink(SinkOperator):
@@ -60,6 +70,11 @@ class LanceSink(SinkOperator):
         self.mode = config.mode
         self.buffer_size = config.buffer_size
         self.blob_columns: Set[str] = set(config.blob_columns)
+        self.write_retry_attempts = max(1, config.write_retry_attempts)
+        self.write_retry_backoff_s = max(0.0, config.write_retry_backoff_s)
+        self.write_retry_max_backoff_s = max(
+            self.write_retry_backoff_s, config.write_retry_max_backoff_s
+        )
 
         # Auto-configure storage options for S3 paths
         if config.storage_options:
@@ -130,12 +145,33 @@ class LanceSink(SinkOperator):
 
             table = pa.table(dict(zip(table.column_names, new_columns)), schema=new_schema)
 
-        write_dataset(
-            table,
-            self.table_path,
-            mode=self.mode if self.table is None else "append",
-            storage_options=self.storage_options,
-        )
+        attempt = 0
+        while True:
+            try:
+                write_dataset(
+                    table,
+                    self.table_path,
+                    mode=self.mode if self.table is None else "append",
+                    storage_options=self.storage_options,
+                )
+                break
+            except Exception as e:
+                attempt += 1
+                if attempt >= self.write_retry_attempts:
+                    self.logger.error("Lance write failed after %s attempts: %s", attempt, e)
+                    raise
+                backoff = min(
+                    self.write_retry_backoff_s * (2 ** (attempt - 1)),
+                    self.write_retry_max_backoff_s,
+                )
+                self.logger.warning(
+                    "Lance write failed (attempt %s/%s): %s. Retrying in %.2fs.",
+                    attempt,
+                    self.write_retry_attempts,
+                    e,
+                    backoff,
+                )
+                time.sleep(backoff)
         if self.table is None:
             self.mode = "append"
 

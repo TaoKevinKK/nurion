@@ -192,9 +192,12 @@ class StageWorker:
 
             # Run all partition loops concurrently
             await self._run_partition_loops()
+            self.logger.info(f"Worker {self.worker_id} partition loops completed")
 
             # Emit completion
+            self.logger.info(f"Worker {self.worker_id} emitting stopped event")
             await self._emit_worker_stopped(reason="completed")
+            self.logger.info(f"Worker {self.worker_id} stopped event emitted")
 
             # Aggregate stats from all partitions
             total_processed = sum(p.processed_count for p in self._partition_operators.values())
@@ -259,7 +262,15 @@ class StageWorker:
                 pop.task is None or pop.task.done() for pop in self._partition_operators.values()
             )
             if all_done:
+                self.logger.info(f"Worker {self.worker_id} all partitions done, exiting loop")
                 break
+
+            # Debug: log task states periodically
+            task_states = {
+                pid: ("done" if pop.task and pop.task.done() else "running" if pop.task else "none")
+                for pid, pop in self._partition_operators.items()
+            }
+            self.logger.debug(f"Worker {self.worker_id} task states: {task_states}")
 
     async def _process_partition(self, partition_id: int) -> None:
         """Process messages from a single partition.
@@ -435,6 +446,12 @@ class StageWorker:
         # Produce output if any
         payload_key = ""
         if output_payload:
+            routing_key = partition_id
+            if is_source_message:
+                raw_split_index = message.metadata.get("split_index")
+                if isinstance(raw_split_index, int):
+                    routing_key = raw_split_index
+            output_partition = self._get_output_partition(routing_key)
             # Use deterministic split_id as payload_key
             payload_key = split_id
 
@@ -457,7 +474,7 @@ class StageWorker:
             self.output_queue.produce(
                 self.output_topic,
                 output_message.to_bytes(),
-                partition=partition_id,
+                partition=output_partition,
             )
 
         # Emit lineage if configured
@@ -486,6 +503,21 @@ class StageWorker:
 
         # Emit metrics periodically
         await self._emit_worker_metrics()
+
+    def _get_output_partition(self, routing_key: int) -> int:
+        """Map a routing key to a valid output partition."""
+        partition_count = self._get_output_partition_count()
+        if partition_count <= 1:
+            return 0
+        return routing_key % partition_count
+
+    def _get_output_partition_count(self) -> int:
+        """Compute output partition count to avoid out-of-range publishes."""
+        if self.config.partition_count is not None:
+            return max(1, self.config.partition_count)
+        if self.config.max_workers <= 1:
+            return 1
+        return self.config.max_workers
 
     async def _cleanup(self) -> None:
         """Clean up resources."""

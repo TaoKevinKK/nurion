@@ -177,8 +177,12 @@ class SourceMaster(StageMaster):
                 port=0,
                 storage_url="memory://",
             )
-            client.create_topic(self._source_topic)
-            self.logger.info(f"Created Memory source queue for {self.stage_id}")
+            # Create source queue with partitions matching source parallelism
+            source_partitions = self.config.max_workers
+            client.create_topic(self._source_topic, partitions=source_partitions)
+            self.logger.info(
+                f"Created Memory source queue for {self.stage_id} with {source_partitions} partition(s)"
+            )
             return client
         else:
             # TANSU: Connect to shared broker (required)
@@ -200,9 +204,12 @@ class SourceMaster(StageMaster):
                 storage_url=endpoint.storage_url,
             )
 
-            tansu_client.create_topic(self._source_topic)
+            # Create source queue with partitions matching source parallelism
+            source_partitions = self.config.max_workers
+            tansu_client.create_topic(self._source_topic, partitions=source_partitions)
             self.logger.info(
-                f"Connected to shared broker at {broker_url} for source {self.stage_id}"
+                f"Connected to shared broker at {broker_url} for source {self.stage_id} "
+                f"with {source_partitions} partition(s)"
             )
             return tansu_client
 
@@ -251,9 +258,12 @@ class SourceMaster(StageMaster):
         # Get partition count for worker assignment
         partition_count = await self._partition_manager.get_upstream_partition_count()
 
-        # Spawn workers
+        # Spawn workers (min workers are required, so is_min_worker=True)
         for i in range(self.config.min_workers):
-            await self._worker_manager.spawn_worker(partition_count=partition_count)
+            await self._worker_manager.spawn_worker(
+                partition_count=partition_count,
+                is_min_worker=True,
+            )
 
         self.logger.info(
             f"Source {self.stage_id} started: {self._splits_produced} splits, "
@@ -262,7 +272,7 @@ class SourceMaster(StageMaster):
 
         # Notify workers that all splits have been produced (source queue is complete)
         # Workers can exit once they've consumed all splits from the source queue
-        self._notify_splits_complete()
+        await self._notify_splits_complete()
 
     async def _produce_splits(self) -> None:
         """Generate splits and write to source queue with backpressure awareness."""
@@ -308,14 +318,14 @@ class SourceMaster(StageMaster):
 
         self.logger.info(f"Source {self.stage_id} produced {self._splits_produced} splits to queue")
 
-        # Send EOF marker to source queue (single partition for source)
+        # Send EOF marker to all partitions of source queue
         # This signals workers that no more splits will be produced
         await self._send_source_eof()
 
     async def _send_source_eof(self) -> None:
-        """Send EOF marker to source queue.
+        """Send EOF marker to all partitions of source queue.
 
-        Source queue is single-partition, so we only send one EOF.
+        Each partition needs an EOF so all source workers can terminate.
         """
         if not self._source_client:
             return
@@ -323,13 +333,18 @@ class SourceMaster(StageMaster):
         try:
             from solstice.core.stage_master import QueueMessage
 
-            eof_message = QueueMessage.create_eof(partition=0)
-            self._source_client.produce(
-                self._source_topic,
-                eof_message.to_bytes(),
-                partition=0,
+            # Send EOF to each partition
+            source_partitions = self.config.max_workers
+            for partition in range(source_partitions):
+                eof_message = QueueMessage.create_eof(partition=partition)
+                self._source_client.produce(
+                    self._source_topic,
+                    eof_message.to_bytes(),
+                    partition=partition,
+                )
+            self.logger.info(
+                f"Source {self.stage_id} sent EOF marker to {source_partitions} partition(s)"
             )
-            self.logger.info(f"Source {self.stage_id} sent EOF marker to source queue")
         except Exception as e:
             self.logger.warning(f"Failed to send EOF to source queue: {e}")
 
@@ -373,7 +388,7 @@ class SourceMaster(StageMaster):
 
         return False
 
-    def _notify_splits_complete(self) -> None:
+    async def _notify_splits_complete(self) -> None:
         """Notify workers that all splits have been produced.
 
         This allows workers to exit once they've consumed all splits.
@@ -384,13 +399,15 @@ class SourceMaster(StageMaster):
         # Use WorkerManager's method to notify workers AND set the flag
         # This ensures recovered workers will also be notified
         if self._worker_manager:
-            self._worker_manager.notify_upstream_finished()
+            await self._worker_manager.notify_upstream_finished()
 
     async def _produce_split(self, split: Split) -> None:
         """Produce a split to the source queue.
 
         The split metadata is serialized and written to the queue.
         Workers will consume this and use the SourceOperator to read actual data.
+
+        Splits are distributed across partitions using round-robin to balance load.
         """
         # Create message with split metadata
         message = QueueMessage(
@@ -404,10 +421,18 @@ class SourceMaster(StageMaster):
             },
         )
 
+        # Distribute splits across partitions using round-robin
+        source_partitions = self.config.max_workers
+        partition = self._splits_produced % source_partitions
+
         # Produce to source queue
         assert self._source_client is not None, "Source client not initialized"
-        offset = self._source_client.produce(self._source_topic, message.to_bytes())
-        self.logger.debug(f"Produced split {split.split_id} at offset {offset}")
+        offset = self._source_client.produce(
+            self._source_topic, message.to_bytes(), partition=partition
+        )
+        self.logger.debug(
+            f"Produced split {split.split_id} to partition {partition} at offset {offset}"
+        )
 
     @abstractmethod
     def plan_splits(self) -> Iterator[Split]:

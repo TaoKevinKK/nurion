@@ -519,13 +519,13 @@ class StageMaster:
     # Public Interface (for RayJobRunner and WebUI)
     # =========================================================================
 
-    def notify_upstream_finished(self) -> None:
+    async def notify_upstream_finished(self) -> None:
         """Notify this stage that all upstream stages have finished."""
         self._upstream_finished = True
         self.logger.info(f"Stage {self.stage_id} notified: upstream finished")
 
         if self._worker_manager:
-            self._worker_manager.notify_upstream_finished()
+            await self._worker_manager.notify_upstream_finished()
 
     def get_output_queue(self) -> Optional[QueueClient]:
         """Get the output queue for downstream stages."""

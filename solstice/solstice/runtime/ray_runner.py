@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from solstice.core.stage import Stage
     from solstice.webui.job_webui import JobWebUI
     from solstice.webui.storage import JobStorage
+    from solstice.webui.runtime_server import EmbeddedWebUIServer
 from solstice.core.stage_master import (
     StageMaster,
     StageConfig,
@@ -116,6 +117,7 @@ class RayJobRunner:
 
         # WebUI
         self._webui: Optional["JobWebUI"] = None
+        self._webui_server: Optional["EmbeddedWebUIServer"] = None
         self._webui_port: Optional[int] = None
         self._webui_storage: Optional["JobStorage"] = None
         self._webui_attempt_id: Optional[str] = None
@@ -161,8 +163,11 @@ class RayJobRunner:
         if self.queue_type != QueueType.TANSU:
             return  # Memory queue doesn't need shared broker
 
+        from solstice.utils.network import get_node_ip
+
         self._shared_broker = TansuBrokerManager(
             storage_url=self.tansu_storage_url or "memory://tansu/",
+            host=get_node_ip(),  # Use actual IP instead of 127.0.0.1 for cross-node access
         )
         self._shared_broker.start()
 
@@ -355,6 +360,7 @@ class RayJobRunner:
             lineage_sample_rate=self.job.config.webui.lineage_sample_rate,
             shared_broker_endpoint=self._shared_broker_endpoint,
             semantic_guarantee=self.job.config.semantic_guarantee,
+            partition_count=stage.output_partitions,  # None = auto based on max_workers
         )
 
     def _stage_info(self, stage: "Stage") -> Dict[str, Any]:
@@ -415,7 +421,7 @@ class RayJobRunner:
 
         return result
 
-    def _notify_downstream_stages(self, finished_stage_id: str, all_finished: set) -> None:
+    async def _notify_downstream_stages(self, finished_stage_id: str, all_finished: set) -> None:
         """Notify downstream stages that an upstream has finished.
 
         A downstream stage is notified when ALL its upstreams have finished.
@@ -426,7 +432,7 @@ class RayJobRunner:
                 # Check if ALL upstreams of this stage are finished
                 all_upstreams_done = all(up_id in all_finished for up_id in upstream_ids)
                 if all_upstreams_done and stage_id in self._masters:
-                    self._masters[stage_id].notify_upstream_finished()
+                    await self._masters[stage_id].notify_upstream_finished()
                     self.logger.info(f"Notified stage {stage_id}: all upstreams finished")
 
     async def run(self, timeout: Optional[float] = None) -> JobStatus:
@@ -454,16 +460,23 @@ class RayJobRunner:
                     await master.start()
 
             # Create tasks for all master run loops
+            self.logger.info(f"Creating run tasks for {len(self._masters)} masters")
             for stage_id, master in self._masters.items():
                 if stage_id not in self._master_tasks:
+                    self.logger.info(f"Creating run task for master {stage_id}")
                     task = asyncio.create_task(
                         master.run(),
                         name=f"master_{stage_id}",
                     )
                     self._master_tasks[stage_id] = task
+            self.logger.info(f"Created {len(self._master_tasks)} master run tasks")
 
             # Start autoscaler if configured
             self._start_autoscaler()
+
+            # Give asyncio tasks a chance to start executing
+            await asyncio.sleep(0)
+            self.logger.info("Entering main run loop")
 
             # Track which stages have finished (for upstream completion notification)
             finished_stages = set()
@@ -492,7 +505,7 @@ class RayJobRunner:
                     finished_stages.add(stage_id)
 
                     # Notify downstream stages that this upstream has finished
-                    self._notify_downstream_stages(stage_id, finished_stages)
+                    await self._notify_downstream_stages(stage_id, finished_stages)
 
                 if not self._master_tasks:
                     break
@@ -707,28 +720,15 @@ class RayJobRunner:
     async def _initialize_webui(self) -> None:
         """Initialize WebUI components.
 
-        - Ensures Portal is running (starts if needed)
         - Creates JobWebUI instance using pre-created storage
-        - Starts collectors
+        - Starts collectors and embedded WebUI server
 
         Note: Storage is created earlier in _create_webui_storage() to be
         shared with StatePushManager.
         """
         try:
             from solstice.webui.job_webui import JobWebUI
-            from solstice.webui.portal import portal_exists, start_portal
-
-            # Ensure Portal is running
-            if not portal_exists():
-                self.logger.info("Starting Solstice Portal...")
-                start_portal(
-                    storage_path=self.job.config.webui.storage_path,
-                    port=self.job.config.webui.port,
-                )
-            else:
-                self.logger.info("Portal already running")
-
-            self._webui_port = self.job.config.webui.port
+            from solstice.webui.runtime_server import EmbeddedWebUIServer
 
             # Create JobWebUI using pre-created storage
             # Pass state_manager for Prometheus export (push-based metrics)
@@ -745,18 +745,43 @@ class RayJobRunner:
             # Start WebUI
             await self._webui.start()
 
+            # Start embedded WebUI server (runtime mode)
+            self._webui_server = EmbeddedWebUIServer(
+                job_id=self.job.job_id,
+                storage=self._webui_storage,
+                host="0.0.0.0",
+                port_base=self.job.config.webui.port,
+            )
+            self._webui_port = self._webui_server.start()
+
+            from solstice.utils.network import get_node_ip
+
+            host = get_node_ip()
             self.logger.info(
-                f"WebUI available at Ray Serve port {self._webui_port}, "
-                f"path: /solstice/jobs/{self.job.job_id}/"
+                f"WebUI available at http://{host}:{self._webui_port}/jobs/{self.job.job_id}/"
             )
 
         except Exception as e:
             self.logger.error(f"Failed to initialize WebUI: {e}")
             # Don't fail the job if WebUI fails
             self._webui = None
+            if self._webui_server:
+                try:
+                    self._webui_server.stop()
+                except Exception:
+                    pass
+                self._webui_server = None
+            self._webui_port = None
 
     async def _stop_webui(self) -> None:
         """Stop WebUI components."""
+        if self._webui_server:
+            try:
+                self._webui_server.stop()
+            except Exception as e:
+                self.logger.warning(f"Error stopping WebUI server: {e}")
+            self._webui_server = None
+            self._webui_port = None
         if self._webui:
             try:
                 await self._webui.stop()
@@ -770,7 +795,7 @@ class RayJobRunner:
         """Get WebUI port if available.
 
         Returns:
-            Ray Serve port where WebUI is accessible, or None
+            Embedded WebUI port where WebUI is accessible, or None
         """
         return self._webui_port
 
@@ -779,10 +804,10 @@ class RayJobRunner:
         """Get WebUI path if available.
 
         Returns:
-            WebUI path (e.g., "/solstice/jobs/{job_id}/"), or None
+            WebUI path (e.g., "/jobs/{job_id}/"), or None
         """
         if self._webui_port:
-            return f"/solstice/jobs/{self.job.job_id}/"
+            return f"/jobs/{self.job.job_id}/"
         return None
 
 

@@ -27,7 +27,7 @@ from fastapi import Request
 from ray import serve
 
 from solstice.webui.app import create_webui_app
-from solstice.webui.storage.portal_storage import PortalStorage
+from solstice.webui.storage.slatedb_storage import PortalStorage
 from solstice.utils.logging import create_ray_logger
 
 

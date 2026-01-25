@@ -1,0 +1,27 @@
+{
+  "manifest_poll_interval": "1s",
+  "manifest_update_timeout": "30s",
+  "l0_sst_size_bytes": 268435456,
+  "l0_max_ssts": 8,
+  "max_unflushed_bytes": 268435456,
+  "compactor_options": {
+    "poll_interval": "2s",
+    "manifest_update_timeout": "30s",
+    "max_sst_size": 268435456,
+    "max_concurrent_compactions": 2
+  },
+  "garbage_collector_options": {
+    "wal_options": {
+      "interval": "60s",
+      "min_age": "5m"
+    },
+    "compacted_options": {
+      "interval": "300s",
+      "min_age": "30m"
+    },
+    "manifest_options": {
+      "interval": "300s",
+      "min_age": "30m"
+    }
+  }
+}

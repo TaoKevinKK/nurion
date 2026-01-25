@@ -54,6 +54,9 @@ class LanceTableSourceConfig(OperatorConfig):
     split_size: int = 1024
     """Number of rows per split."""
 
+    max_rows: Optional[int] = None
+    """Maximum total rows to read. None = no limit (read all rows)."""
+
 
 def _get_lance_storage_options(uri: str) -> Optional[dict]:
     """Get storage options for S3 URIs."""
@@ -137,6 +140,7 @@ class LanceSourceMaster(SourceMaster):
         self.filter: Optional[str] = operator_cfg.filter
         self.columns: Optional[Iterable[str]] = operator_cfg.columns
         self.split_size: int = operator_cfg.split_size
+        self.max_rows: Optional[int] = operator_cfg.max_rows
         self.storage_options = _get_lance_storage_options(self.dataset_uri)
 
         # Load dataset for split planning
@@ -148,14 +152,33 @@ class LanceSourceMaster(SourceMaster):
 
         Generates one split per (fragment, offset) pair, ensuring
         deterministic split ordering based on fragment_id.
+
+        If max_rows is set, stops generating splits once the limit is reached.
         """
         # Sort fragments by fragment_id for deterministic ordering
         sorted_fragments = sorted(self.dataset.get_fragments(), key=lambda x: x.fragment_id)
 
         split_idx = 0
+        total_rows_planned = 0
+
         for frag in sorted_fragments:
             row_count = frag.count_rows()
             for offset in range(0, row_count, self.split_size):
+                # Calculate actual rows in this split
+                rows_in_split = min(self.split_size, row_count - offset)
+
+                # Check if we've reached max_rows limit
+                if self.max_rows is not None:
+                    remaining = self.max_rows - total_rows_planned
+                    if remaining <= 0:
+                        self.logger.info(
+                            f"Planned {split_idx} splits ({total_rows_planned} rows, "
+                            f"limited by max_rows={self.max_rows}) from {len(sorted_fragments)} fragments"
+                        )
+                        return
+                    # Adjust limit for this split if it would exceed max_rows
+                    rows_in_split = min(rows_in_split, remaining)
+
                 yield Split(
                     split_id=f"{self.stage.stage_id}_split_{split_idx}",
                     stage_id=self.stage.stage_id,
@@ -164,10 +187,19 @@ class LanceSourceMaster(SourceMaster):
                         "columns": list(self.columns) if self.columns else None,
                         "fragment_id": frag.fragment_id,
                         "offset": offset,
-                        "limit": self.split_size,
+                        "limit": rows_in_split,
                     },
                 )
                 split_idx += 1
+                total_rows_planned += rows_in_split
+
+                # Check again after yielding (in case this was the last one)
+                if self.max_rows is not None and total_rows_planned >= self.max_rows:
+                    self.logger.info(
+                        f"Planned {split_idx} splits ({total_rows_planned} rows, "
+                        f"limited by max_rows={self.max_rows}) from {len(sorted_fragments)} fragments"
+                    )
+                    return
 
         self.logger.info(f"Planned {split_idx} splits from {len(sorted_fragments)} fragments")
 

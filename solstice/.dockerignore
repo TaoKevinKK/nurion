@@ -1,0 +1,55 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.egg-info
+.eggs
+dist
+build
+*.egg
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Virtual environments
+.venv
+venv
+ENV
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# Test data
+tests/
+testdata/
+
+# Documentation (keep design-docs for reference)
+todo/
+
+# Large files
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.lance
+*.parquet
+
+# Build artifacts (will be rebuilt)
+java/*/target/
+tansu-py/target/
+raydp/jars/
+
+# Rust build cache (will be rebuilt)
+tansu-py/target/
+
+# Temporary files
+*.log
+*.tmp
+.DS_Store

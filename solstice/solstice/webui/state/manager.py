@@ -625,6 +625,22 @@ class JobStateManager:
                         state.input_records = metrics["input_records"]
                         state.output_records = metrics["output_records"]
 
+    def _snapshot_to_storage_blocking(
+        self,
+        now: float,
+        job_archive: Dict[str, Any],
+        stage_snapshots: List[tuple[str, Dict[str, Any]]],
+        worker_snapshots: List[tuple[str, Dict[str, Any]]],
+    ) -> None:
+        """Write snapshot data to storage in a blocking context."""
+        self.storage.store_job_archive(job_archive)
+
+        for stage_id, stage_payload in stage_snapshots:
+            self.storage.store_metrics_snapshot(stage_id, now, stage_payload)
+
+        for worker_id, worker_payload in worker_snapshots:
+            self.storage.store_worker_history(worker_id, worker_payload)
+
     async def _snapshot_to_storage(self) -> None:
         """Snapshot current state to SlateDB.
 
@@ -650,19 +666,23 @@ class JobStateManager:
                 "dag_edges": self._job_state.dag_edges,
                 "stages": job_info.get("stages", []),
             }
-            self.storage.store_job_archive(job_archive)
 
-            # Store metrics snapshot for each stage
-            for stage_id, stage_state in self._stage_states.items():
-                self.storage.store_metrics_snapshot(
-                    stage_id,
-                    now,
-                    stage_state.to_dict(),
-                )
+            stage_snapshots = [
+                (stage_id, stage_state.to_dict())
+                for stage_id, stage_state in self._stage_states.items()
+            ]
+            worker_snapshots = [
+                (worker_id, worker_state.to_dict())
+                for worker_id, worker_state in self._worker_states.items()
+            ]
 
-            # Store worker history
-            for worker_id, worker_state in self._worker_states.items():
-                self.storage.store_worker_history(worker_id, worker_state.to_dict())
+            await asyncio.to_thread(
+                self._snapshot_to_storage_blocking,
+                now,
+                job_archive,
+                stage_snapshots,
+                worker_snapshots,
+            )
 
             self.logger.debug(f"Snapshot stored at {now}")
 

@@ -38,7 +38,7 @@ class WebUIConfig:
         prometheus_pushgateway: Optional Prometheus Pushgateway URL
         metrics_snapshot_interval_s: Interval between SlateDB metrics snapshots
         archive_on_completion: Whether to archive job data when complete
-        port: Ray Serve port (default 8000)
+        port: Embedded WebUI base port (increment until free)
         lineage_sample_rate: Split-level lineage tracking rate (0.0=off, 1.0=full, 0.x=sampling)
     """
 
@@ -48,7 +48,7 @@ class WebUIConfig:
     prometheus_pushgateway: Optional[str] = None
     metrics_snapshot_interval_s: float = 30.0
     archive_on_completion: bool = True
-    port: int = 8000
+    port: int = 5000
     lineage_sample_rate: float = 0.0  # 0=off, 1=full, 0.x=sampling
 
 

@@ -124,7 +124,7 @@ def main(job_id: str, wait_time: int):
         enabled=True,
         storage_path=webui_storage,
         prometheus_enabled=False,  # Disable for demo
-        port=8000,
+        port=5000,
         lineage_sample_rate=1.0,  # Full lineage tracking
     )
     

@@ -15,9 +15,90 @@
 """SlateDB storage backend for WebUI data persistence."""
 
 import json
-from typing import Any, Dict, List, Optional
+import os
+import tempfile
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 from solstice.utils.logging import create_ray_logger
+
+
+def _parse_s3_path(path: str) -> Tuple[str, str]:
+    """Parse s3://bucket/prefix into (bucket, prefix)."""
+    without_scheme = path[5:]
+    bucket, _, prefix = without_scheme.partition("/")
+    return bucket, prefix
+
+
+def _write_s3_env_file(bucket: str) -> str:
+    """Write a .env file for SlateDB S3 config and return its path."""
+    # SlateDB uses object_store::AmazonS3Builder::from_env which only
+    # reads AWS_* uppercase variables.
+    lines = ["CLOUD_PROVIDER=aws", f"AWS_BUCKET={bucket}"]
+
+    access_key = os.getenv("AWS_ACCESS_KEY_ID")
+    secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
+    session_token = os.getenv("AWS_SESSION_TOKEN")
+    region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+    default_region = os.getenv("AWS_DEFAULT_REGION")
+    endpoint = os.getenv("AWS_ENDPOINT_URL")
+    imds_disabled = os.getenv("AWS_EC2_METADATA_DISABLED")
+    shared_credentials = os.getenv("AWS_SHARED_CREDENTIALS_FILE")
+    profile = os.getenv("AWS_PROFILE")
+
+    if access_key:
+        lines.append(f"AWS_ACCESS_KEY_ID={access_key}")
+    if secret_key:
+        lines.append(f"AWS_SECRET_ACCESS_KEY={secret_key}")
+    if session_token:
+        lines.append(f"AWS_SESSION_TOKEN={session_token}")
+    if region:
+        lines.append(f"AWS_REGION={region}")
+    if default_region:
+        lines.append(f"AWS_DEFAULT_REGION={default_region}")
+    if endpoint:
+        lines.append(f"AWS_ENDPOINT_URL={endpoint}")
+    if imds_disabled:
+        lines.append(f"AWS_EC2_METADATA_DISABLED={imds_disabled}")
+    if shared_credentials:
+        lines.append(f"AWS_SHARED_CREDENTIALS_FILE={shared_credentials}")
+    if profile:
+        lines.append(f"AWS_PROFILE={profile}")
+
+    env_file = tempfile.NamedTemporaryFile(
+        mode="w",
+        delete=False,
+        prefix="slatedb_s3_",
+        suffix=".env",
+    )
+    env_file.write("\n".join(lines) + "\n")
+    env_file.flush()
+    env_file.close()
+    return env_file.name
+
+
+def _get_settings_path() -> Optional[str]:
+    """Resolve SlateDB settings file path if configured."""
+    override = os.getenv("SOLSTICE_SLATEDB_SETTINGS")
+    if override:
+        return override
+    default_path = Path(__file__).with_name("slatedb_settings.json")
+    if default_path.exists():
+        return str(default_path)
+    return None
+
+
+def _create_slatedb_reader(path: str):
+    """Create a SlateDBReader for the given path."""
+    from slatedb import SlateDBReader
+
+    if path.startswith("s3://"):
+        bucket, prefix = _parse_s3_path(path)
+        env_file = _write_s3_env_file(bucket)
+        db_path = prefix or "slatedb"
+        return SlateDBReader(db_path, env_file=env_file)
+    return SlateDBReader("db", url=f"file://{path}/")
 
 
 class JobStorage:
@@ -43,32 +124,44 @@ class JobStorage:
     See also: PortalStorage for read-only access across all jobs.
     """
 
-    def __init__(self, path: str = "/tmp/solstice-webui/"):
+    def __init__(
+        self,
+        path: str = "/tmp/solstice-webui/",
+        db: Any | None = None,
+        job_id: Optional[str] = None,
+    ):
         """Initialize SlateDB storage.
 
         Args:
             path: Storage path (local or S3)
                 - Local: /tmp/solstice-webui/
                 - S3: s3://bucket/path/
+            db: Optional pre-created DB handle (reader or writer)
+            job_id: Optional job_id override for read-only usage
         """
-        from pathlib import Path
-
         self.path = path
         self.logger = create_ray_logger("JobStorage")
+        self._job_id_override = job_id
+        self._read_only = db is not None
+
+        if db is not None:
+            self.db = db
+            self.logger.info(f"Initialized read-only storage at {path}")
+            return
 
         from slatedb import SlateDB
 
-        # Configure SlateDB based on path
         if path.startswith("s3://"):
-            # S3 storage - use the path directly as URL
-            self.db = SlateDB("db", url=path)
+            bucket, prefix = _parse_s3_path(path)
+            env_file = _write_s3_env_file(bucket)
+            db_path = prefix or "slatedb"
+            settings_path = _get_settings_path()
+            self.db = SlateDB(db_path, env_file=env_file, settings=settings_path)
         else:
-            # Local filesystem storage
-            # Ensure directory exists
             Path(path).mkdir(parents=True, exist_ok=True)
-            # Use file:// URL for local storage
             url = f"file://{path}/"
-            self.db = SlateDB("db", url=url)
+            settings_path = _get_settings_path()
+            self.db = SlateDB("db", url=url, settings=settings_path)
         self.logger.info(f"Initialized SlateDB storage at {path}")
 
     # === Job Configuration ===
@@ -89,14 +182,84 @@ class JobStorage:
         self.db.flush()
         self.logger.debug("Stored job configuration")
 
-    def get_configuration(self) -> Optional[Dict[str, Any]]:
-        """Retrieve job configuration from this storage."""
+    def _get_configuration_data(self) -> Optional[Dict[str, Any]]:
+        """Retrieve raw configuration from this storage."""
         key = "config"
         data = self.db.get(key.encode())
         if data:
             result: Dict[str, Any] = json.loads(data.decode())
             return result
         return None
+
+    def _get_job_archive_data(self) -> Optional[Dict[str, Any]]:
+        """Retrieve raw job archive from this storage."""
+        key = "job"
+        data = self.db.get(key.encode())
+        if data:
+            result: Dict[str, Any] = json.loads(data.decode())
+            return result
+        return None
+
+    def _resolve_job_id(self) -> Optional[str]:
+        """Best-effort job_id resolution from stored data."""
+        if self._job_id_override:
+            return self._job_id_override
+        job_data = self._get_job_archive_data()
+        if job_data:
+            return job_data.get("job_id")
+        config_data = self._get_configuration_data()
+        if config_data:
+            return config_data.get("job_config", {}).get("job_id")
+        return None
+
+    def _matches_job_id(self, job_id: Optional[str]) -> bool:
+        if job_id is None:
+            return True
+        return self._resolve_job_id() == job_id
+
+    def get_configuration(self, job_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Retrieve job configuration from this storage."""
+        if not self._matches_job_id(job_id):
+            return None
+        config_data = self._get_configuration_data()
+        if config_data:
+            return config_data
+        job_archive = self._get_job_archive_data()
+        if not job_archive:
+            return None
+        return self._extract_config_from_archive(job_archive)
+
+    def _extract_config_from_archive(self, job_archive: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract configuration from job archive data."""
+        result: Dict[str, Any] = {
+            "job_config": job_archive.get("config", {}),
+            "stage_configs": {},
+            "environment": {},
+        }
+
+        for stage in job_archive.get("stages", []):
+            stage_id = stage.get("stage_id", "")
+            if stage_id:
+                result["stage_configs"][stage_id] = {
+                    "operator_type": stage.get("operator_type", "N/A"),
+                    "min_parallelism": stage.get("min_parallelism", 1),
+                    "max_parallelism": stage.get("max_parallelism", 1),
+                    "num_cpus": stage.get("num_cpus", 0),
+                    "num_gpus": stage.get("num_gpus", 0),
+                    "memory_mb": stage.get("memory_mb", 0),
+                }
+
+        return result
+
+    def flush(self) -> None:
+        """Flush pending writes to storage."""
+        self.db.flush()
+
+    def close(self) -> None:
+        """Close underlying DB handle if supported."""
+        close_fn = getattr(self.db, "close", None)
+        if callable(close_fn):
+            close_fn()
 
     # === Job Archive ===
 
@@ -112,14 +275,25 @@ class JobStorage:
         job_id = archive_data.get("job_id", "unknown")
         self.logger.info(f"Archived job {job_id} with status {status}")
 
-    def get_job_archive(self) -> Optional[Dict[str, Any]]:
+    def get_job_archive(self, job_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Retrieve archived job data from this storage."""
-        key = "job"
-        data = self.db.get(key.encode())
-        if data:
-            result: Dict[str, Any] = json.loads(data.decode())
-            return result
-        return None
+        if not self._matches_job_id(job_id):
+            return None
+        return self._get_job_archive_data()
+
+    def list_jobs(
+        self,
+        status: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List jobs for this storage (single job)."""
+        job_data = self._get_job_archive_data()
+        if not job_data:
+            return []
+        if status and job_data.get("status") != status:
+            return []
+        return [job_data][offset : offset + limit]
 
     def _scan_prefix(self, prefix: bytes, limit: int = 1000) -> List[tuple]:
         """Scan keys with prefix using SlateDB scan API.
@@ -155,11 +329,14 @@ class JobStorage:
 
     def get_metrics_history(
         self,
+        job_id: Optional[str],
         stage_id: str,
         start_time: float,
         end_time: float,
     ) -> List[Dict[str, Any]]:
         """Query metrics history for a stage."""
+        if not self._matches_job_id(job_id):
+            return []
         prefix = f"metrics:{stage_id}:"
         results = self._scan_prefix(prefix.encode())
 
@@ -217,10 +394,13 @@ class JobStorage:
 
     def list_exceptions(
         self,
+        job_id: Optional[str],
         limit: int = 100,
         offset: int = 0,
     ) -> List[Dict[str, Any]]:
         """List exceptions in this storage."""
+        if not self._matches_job_id(job_id):
+            return []
         prefix = b"exception:"
         results = self._scan_prefix(prefix, limit=limit + offset)
         # Apply offset
@@ -277,8 +457,10 @@ class JobStorage:
 
         self.logger.debug(f"Stored lineage with indexes for split {split_id}")
 
-    def get_split_lineage(self, split_id: str) -> Optional[Dict[str, Any]]:
+    def get_split_lineage(self, job_id: Optional[str], split_id: str) -> Optional[Dict[str, Any]]:
         """Get split lineage data."""
+        if not self._matches_job_id(job_id):
+            return None
         key = f"lineage:{split_id}"
         data = self.db.get(key.encode())
         if data:
@@ -313,7 +495,7 @@ class JobStorage:
             )
 
             # Add edges from parents
-            for parent_id in lineage.get("parent_ids", []):
+            for parent_id in lineage.get("parent_split_ids", []):
                 edges.append(
                     {
                         "source": parent_id,
@@ -325,6 +507,186 @@ class JobStorage:
             "nodes": nodes,
             "edges": edges,
         }
+
+    def list_splits_by_stage(
+        self,
+        job_id: Optional[str],
+        stage_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List splits for a stage."""
+        if not self._matches_job_id(job_id):
+            return []
+        prefix = f"lineage_by_stage:{stage_id}:".encode()
+        splits: List[Dict[str, Any]] = []
+        for _, split_id_bytes in self.db.scan(prefix):
+            split_id = split_id_bytes.decode()
+            lineage_data = self.db.get(f"lineage:{split_id}".encode())
+            if lineage_data:
+                splits.append(json.loads(lineage_data.decode()))
+            if len(splits) >= offset + limit:
+                break
+
+        splits = sorted(splits, key=lambda x: x.get("timestamp", 0), reverse=True)
+        return splits[offset : offset + limit]
+
+    def get_lineage_overview(self, job_id: Optional[str] = None) -> Dict[str, Any]:
+        """Get stage-level lineage overview with aggregated statistics.
+
+        Returns:
+            Dict with 'stages', 'edges', and 'dag_edges'
+        """
+        if not self._matches_job_id(job_id):
+            return {"stages": [], "edges": [], "dag_edges": {}}
+        job_data = self._get_job_archive_data()
+        if not job_data:
+            return {"stages": [], "edges": [], "dag_edges": {}}
+
+        dag_edges = job_data.get("dag_edges", {})
+        stages_list = job_data.get("stages", [])
+        stage_order = [s.get("stage_id") for s in stages_list]
+
+        # Collect all lineage records grouped by stage
+        stage_splits: Dict[str, List[Dict[str, Any]]] = {}
+        for _, value in self.db.scan(b"lineage:"):
+            lineage = json.loads(value.decode())
+            stage_id = lineage.get("stage_id", "")
+            if stage_id not in stage_splits:
+                stage_splits[stage_id] = []
+            stage_splits[stage_id].append(lineage)
+
+        # Calculate edge statistics
+        edges = []
+        for from_stage, to_stages in dag_edges.items():
+            for to_stage in to_stages:
+                to_splits = stage_splits.get(to_stage, [])
+                if not to_splits:
+                    edges.append(
+                        {
+                            "from_stage": from_stage,
+                            "to_stage": to_stage,
+                            "splits_count": 0,
+                            "total_rows": 0,
+                            "total_bytes": 0,
+                        }
+                    )
+                    continue
+
+                total_rows = sum(s.get("output_records", 0) for s in to_splits)
+                total_bytes = sum(s.get("output_bytes", 0) for s in to_splits)
+                rows_list = [s.get("output_records", 0) for s in to_splits]
+                bytes_list = [s.get("output_bytes", 0) for s in to_splits]
+                proc_times = [s.get("processing_time_ms", 0) for s in to_splits]
+
+                edges.append(
+                    {
+                        "from_stage": from_stage,
+                        "to_stage": to_stage,
+                        "splits_count": len(to_splits),
+                        "total_rows": total_rows,
+                        "total_bytes": total_bytes,
+                        "min_rows": min(rows_list) if rows_list else 0,
+                        "max_rows": max(rows_list) if rows_list else 0,
+                        "min_bytes": min(bytes_list) if bytes_list else 0,
+                        "max_bytes": max(bytes_list) if bytes_list else 0,
+                        "min_processing_ms": min(proc_times) if proc_times else 0,
+                        "max_processing_ms": max(proc_times) if proc_times else 0,
+                        "avg_processing_ms": sum(proc_times) / len(proc_times) if proc_times else 0,
+                    }
+                )
+
+        # Stage stats
+        stage_stats = []
+        for stage_id in stage_order:
+            splits = stage_splits.get(stage_id, [])
+            if not splits:
+                stage_stats.append(
+                    {
+                        "stage_id": stage_id,
+                        "splits_count": 0,
+                        "total_output_rows": 0,
+                        "total_output_bytes": 0,
+                    }
+                )
+                continue
+
+            total_rows = sum(s.get("output_records", 0) for s in splits)
+            total_bytes = sum(s.get("output_bytes", 0) for s in splits)
+
+            stage_stats.append(
+                {
+                    "stage_id": stage_id,
+                    "splits_count": len(splits),
+                    "total_output_rows": total_rows,
+                    "total_output_bytes": total_bytes,
+                }
+            )
+
+        return {"stages": stage_stats, "edges": edges, "dag_edges": dag_edges}
+
+    def get_split_trace(self, job_id: Optional[str], split_id: str) -> Dict[str, Any]:
+        """Get complete lineage trace for a split (both upstream and downstream).
+
+        Returns:
+            Dict with 'splits' (ordered by stage), 'edges', and 'root_split_id'
+        """
+        if not self._matches_job_id(job_id):
+            return {"splits": [], "edges": [], "root_split_id": split_id}
+
+        visited: set = set()
+        splits: list = []
+        edges: list = []
+
+        def collect_upstream(current_id: str) -> None:
+            if current_id in visited:
+                return
+            visited.add(current_id)
+
+            lineage_data = self.db.get(f"lineage:{current_id}".encode())
+            if not lineage_data:
+                return
+
+            lineage = json.loads(lineage_data.decode())
+            splits.append(lineage)
+
+            for parent_id in lineage.get("parent_split_ids", []):
+                edges.append({"source": parent_id, "target": current_id})
+                collect_upstream(parent_id)
+
+        def collect_downstream(current_id: str) -> None:
+            if current_id in visited:
+                return
+            visited.add(current_id)
+
+            lineage_data = self.db.get(f"lineage:{current_id}".encode())
+            if not lineage_data:
+                return
+
+            lineage = json.loads(lineage_data.decode())
+            if current_id not in [s.get("split_id") for s in splits]:
+                splits.append(lineage)
+
+            for _, child_id_bytes in self.db.scan(f"lineage_by_parent:{current_id}:".encode()):
+                child_id = child_id_bytes.decode()
+                edges.append({"source": current_id, "target": child_id})
+                visited.discard(current_id)
+                collect_downstream(child_id)
+
+        collect_upstream(split_id)
+        visited.clear()
+        collect_downstream(split_id)
+
+        # Sort splits by stage order
+        job_data = self._get_job_archive_data()
+        stage_order = {}
+        if job_data:
+            for i, s in enumerate(job_data.get("stages", [])):
+                stage_order[s.get("stage_id")] = i
+
+        splits.sort(key=lambda x: stage_order.get(x.get("stage_id"), 999))
+
+        return {"splits": splits, "edges": edges, "root_split_id": split_id}
 
     # === Worker History ===
 
@@ -351,8 +713,10 @@ class JobStorage:
         self.db.put(key.encode(), json.dumps(worker_data).encode())
         self.logger.debug(f"Stored worker history for {worker_id}")
 
-    def get_worker_history(self, worker_id: str) -> Optional[Dict[str, Any]]:
+    def get_worker_history(self, job_id: Optional[str], worker_id: str) -> Optional[Dict[str, Any]]:
         """Get worker history."""
+        if not self._matches_job_id(job_id):
+            return None
         key = f"worker:{worker_id}"
         data = self.db.get(key.encode())
         if data:
@@ -362,12 +726,15 @@ class JobStorage:
 
     def list_workers(
         self,
+        job_id: Optional[str],
         stage_id: Optional[str] = None,
         status: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> List[Dict[str, Any]]:
         """List all workers with optional filtering."""
+        if not self._matches_job_id(job_id):
+            return []
         prefix = b"worker:"
         results = self._scan_prefix(prefix, limit=1000)  # Get all workers
         workers = [json.loads(value.decode()) for _, value in results]
@@ -400,11 +767,14 @@ class JobStorage:
 
     def list_worker_events(
         self,
+        job_id: Optional[str],
         worker_id: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> List[Dict[str, Any]]:
         """List worker events."""
+        if not self._matches_job_id(job_id):
+            return []
         if worker_id:
             prefix = f"worker_event:{worker_id}:"
         else:
@@ -451,3 +821,324 @@ class JobStorage:
 
         # Apply offset and limit
         return sorted_events[offset : offset + limit]
+
+
+class PortalStorage:
+    """Read-only storage for Portal to scan completed job archives."""
+
+    def __init__(self, base_path: str):
+        """Initialize portal storage.
+
+        Args:
+            base_path: Base storage path containing job directories.
+                       e.g., /tmp/solstice-webui/ or s3://bucket/solstice/
+        """
+        self.base_path = base_path.rstrip("/")
+        self.logger = create_ray_logger("PortalStorage")
+        self._is_s3 = base_path.startswith("s3://")
+        self._reader_cache: Dict[str, Tuple[str, JobStorage]] = {}
+        self._s3_bucket: Optional[str] = None
+        self._s3_prefix: str = ""
+        self._s3_base_prefix: str = ""
+        self._s3_client = None
+
+        if self._is_s3:
+            bucket, prefix = _parse_s3_path(self.base_path)
+            self._s3_bucket = bucket
+            self._s3_prefix = prefix.rstrip("/")
+            self._s3_base_prefix = f"{self._s3_prefix}/" if self._s3_prefix else ""
+
+        self.logger.info(f"PortalStorage initialized at {self.base_path}")
+
+    def _get_s3_client(self):
+        if self._s3_client:
+            return self._s3_client
+        import boto3
+
+        region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+        endpoint = os.getenv("AWS_ENDPOINT_URL")
+        self._s3_client = boto3.client(
+            "s3",
+            region_name=region,
+            endpoint_url=endpoint,
+        )
+        return self._s3_client
+
+    @contextmanager
+    def _open_storage_for_path(
+        self, job_id: str, attempt_path: str
+    ) -> Generator[JobStorage, None, None]:
+        cached = self._reader_cache.get(job_id)
+        if cached and cached[0] == attempt_path:
+            yield cached[1]
+            return
+
+        if cached:
+            try:
+                cached[1].close()
+            except Exception:
+                pass
+
+        db = _create_slatedb_reader(attempt_path)
+        storage = JobStorage(path=attempt_path, db=db, job_id=job_id)
+        self._reader_cache[job_id] = (attempt_path, storage)
+        yield storage
+
+    @contextmanager
+    def _open_job_storage(self, job_id: str) -> Generator[Optional[JobStorage], None, None]:
+        latest_attempt = self._get_latest_attempt_path(job_id)
+        if not latest_attempt:
+            yield None
+            return
+        with self._open_storage_for_path(job_id, str(latest_attempt)) as storage:
+            yield storage
+
+    def close(self) -> None:
+        """Close any cached readers."""
+        for _, reader in self._reader_cache.values():
+            try:
+                reader.close()
+            except Exception:
+                pass
+        self._reader_cache.clear()
+
+    def _list_s3_prefixes(self, prefix: str) -> List[str]:
+        if not self._s3_bucket:
+            return []
+        s3 = self._get_s3_client()
+        paginator = s3.get_paginator("list_objects_v2")
+        prefixes: List[str] = []
+        for page in paginator.paginate(Bucket=self._s3_bucket, Prefix=prefix, Delimiter="/"):
+            for item in page.get("CommonPrefixes", []):
+                prefixes.append(item["Prefix"])
+        return prefixes
+
+    def list_jobs(
+        self,
+        status: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List archived jobs by scanning job directories."""
+        if self._is_s3:
+            jobs = self._list_jobs_s3(status)
+        else:
+            jobs = self._list_jobs_local(status)
+
+        jobs.sort(key=lambda x: x.get("end_time") or 0, reverse=True)
+        return jobs[offset : offset + limit]
+
+    def _list_jobs_local(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List jobs from local filesystem."""
+        jobs = []
+        base_dir = Path(self.base_path)
+
+        if not base_dir.exists():
+            return []
+
+        for job_dir in base_dir.iterdir():
+            if not job_dir.is_dir():
+                continue
+
+            job_id = job_dir.name
+            attempts = sorted(job_dir.iterdir(), reverse=True)
+            if not attempts:
+                continue
+
+            latest_attempt = attempts[0]
+            if not latest_attempt.is_dir():
+                continue
+
+            try:
+                job_data = self._read_job_archive(str(latest_attempt), job_id)
+                if job_data and (status is None or job_data.get("status") == status):
+                    jobs.append(job_data)
+            except Exception as e:
+                self.logger.debug(f"Skipping job {job_id}: {e}")
+
+        return jobs
+
+    def _list_jobs_s3(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List jobs from S3 storage."""
+        jobs = []
+        job_prefixes = self._list_s3_prefixes(self._s3_base_prefix)
+
+        for job_prefix in job_prefixes:
+            job_id = job_prefix[len(self._s3_base_prefix) :].rstrip("/")
+            latest_attempt = self._get_latest_attempt_path(job_id)
+            if not latest_attempt:
+                continue
+            try:
+                job_data = self._read_job_archive(latest_attempt, job_id)
+                if job_data and (status is None or job_data.get("status") == status):
+                    jobs.append(job_data)
+            except Exception as e:
+                self.logger.debug(f"Skipping job {job_id}: {e}")
+
+        return jobs
+
+    def _read_job_archive(self, attempt_path: str, job_id: str) -> Optional[Dict[str, Any]]:
+        """Read job archive from an attempt directory using SlateDB."""
+        with self._open_storage_for_path(job_id, attempt_path) as storage:
+            return storage.get_job_archive(job_id)
+
+    def get_job_archive(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Get archived job data by job_id."""
+        if self._is_s3:
+            return self._get_job_archive_s3(job_id)
+        return self._get_job_archive_local(job_id)
+
+    def _get_job_archive_local(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Get job archive from local filesystem."""
+        job_dir = Path(self.base_path) / job_id
+
+        if not job_dir.exists():
+            return None
+
+        attempts = sorted(job_dir.iterdir(), reverse=True)
+        if not attempts:
+            return None
+
+        latest_attempt = attempts[0]
+        if not latest_attempt.is_dir():
+            return None
+
+        return self._read_job_archive(str(latest_attempt), job_id)
+
+    def _get_job_archive_s3(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Get job archive from S3."""
+        latest_attempt = self._get_latest_attempt_path(job_id)
+        if not latest_attempt:
+            return None
+        return self._read_job_archive(latest_attempt, job_id)
+
+    def _get_latest_attempt_path(self, job_id: str) -> Optional[str]:
+        """Get the path to the latest attempt directory for a job."""
+        if self._is_s3:
+            if not self._s3_bucket:
+                return None
+            job_prefix = f"{self._s3_base_prefix}{job_id}/"
+            attempts = self._list_s3_prefixes(job_prefix)
+            if not attempts:
+                return None
+            latest_attempt = sorted(attempts)[-1].rstrip("/")
+            return f"s3://{self._s3_bucket}/{latest_attempt}"
+
+        job_dir = Path(self.base_path) / job_id
+        if not job_dir.exists():
+            return None
+
+        attempts = sorted(job_dir.iterdir(), reverse=True)
+        if not attempts:
+            return None
+
+        latest_attempt = attempts[0]
+        if not latest_attempt.is_dir():
+            return None
+
+        return str(latest_attempt)
+
+    def get_configuration(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Get job configuration from storage."""
+        with self._open_job_storage(job_id) as storage:
+            if not storage:
+                return None
+            return storage.get_configuration(job_id)
+
+    def list_exceptions(
+        self,
+        job_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List exceptions for a job by scanning its SlateDB."""
+        with self._open_job_storage(job_id) as storage:
+            if not storage:
+                return []
+            return storage.list_exceptions(job_id, limit=limit, offset=offset)
+
+    def get_metrics_history(
+        self,
+        job_id: str,
+        stage_id: str,
+        start_time: float,
+        end_time: float,
+    ) -> List[Dict[str, Any]]:
+        """Get metrics history for a stage."""
+        with self._open_job_storage(job_id) as storage:
+            if not storage:
+                return []
+            return storage.get_metrics_history(job_id, stage_id, start_time, end_time)
+
+    def get_split_lineage(self, job_id: str, split_id: str) -> Optional[Dict[str, Any]]:
+        """Get lineage for a specific split."""
+        with self._open_job_storage(job_id) as storage:
+            if not storage:
+                return None
+            return storage.get_split_lineage(job_id, split_id)
+
+    def list_splits_by_stage(
+        self,
+        job_id: str,
+        stage_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List splits for a stage."""
+        with self._open_job_storage(job_id) as storage:
+            if not storage:
+                return []
+            return storage.list_splits_by_stage(job_id, stage_id, limit, offset)
+
+    def list_workers(
+        self,
+        job_id: str,
+        stage_id: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List all workers for a job."""
+        with self._open_job_storage(job_id) as storage:
+            if not storage:
+                return []
+            return storage.list_workers(job_id, stage_id=stage_id, limit=limit, offset=offset)
+
+    def get_worker_history(
+        self,
+        job_id: str,
+        worker_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Get worker history."""
+        with self._open_job_storage(job_id) as storage:
+            if not storage:
+                return None
+            return storage.get_worker_history(job_id, worker_id)
+
+    def get_lineage_overview(self, job_id: str) -> Dict[str, Any]:
+        """Get stage-level lineage overview with aggregated statistics."""
+        with self._open_job_storage(job_id) as storage:
+            if not storage:
+                return {"stages": [], "edges": [], "dag_edges": {}}
+            return storage.get_lineage_overview(job_id)
+
+    def get_split_trace(self, job_id: str, split_id: str) -> Dict[str, Any]:
+        """Get complete lineage trace for a split (both upstream and downstream)."""
+        with self._open_job_storage(job_id) as storage:
+            if not storage:
+                return {"splits": [], "edges": [], "root_split_id": split_id}
+            return storage.get_split_trace(job_id, split_id)
+
+    def list_worker_events(
+        self,
+        job_id: str,
+        worker_id: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List worker events for a job."""
+        with self._open_job_storage(job_id) as storage:
+            if not storage:
+                return []
+            return storage.list_worker_events(
+                job_id, worker_id=worker_id, limit=limit, offset=offset
+            )

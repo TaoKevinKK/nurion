@@ -6,7 +6,7 @@
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| **Portal Service** | ✅ Complete | Ray Serve deployment, `/solstice` route prefix |
+| **Portal Service** | ✅ Complete | Optional Ray Serve deployment, `/solstice` route prefix |
 | **Unified Read-Only Architecture** | ✅ Complete | Portal reads from SlateDB only |
 | **Push-Based Metrics** | ✅ Complete | Tansu-based state push from workers/masters |
 | **SlateDB Storage** | ✅ Complete | Job data persistence |
@@ -30,7 +30,7 @@ The Solstice Debug WebUI provides a web-based interface for monitoring, debuggin
 1. **Comprehensive Monitoring**: Track all aspects of job execution
 2. **Post-Mortem Analysis**: Archive jobs for later investigation
 3. **Multi-Job Support**: Monitor multiple jobs in the same Ray cluster
-4. **Zero New Ports**: Reuse Ray Serve port
+4. **Embedded Runtime Ports**: Start from 5000 and auto-increment
 5. **Easy Maintenance**: Simple tech stack (HTMX + Alpine.js + Pico CSS)
 6. **High Information Density**: Optimized for developers and data engineers
 
@@ -38,7 +38,7 @@ The Solstice Debug WebUI provides a web-based interface for monitoring, debuggin
 
 ### Unified Read-Only Architecture
 
-Portal and History Server share the **same read-only logic**. Both read from JobStorage (SlateDB).
+Runtime mode reads directly from the writer JobStorage. Portal/History are read-only.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -81,7 +81,7 @@ History Server (standalone):
 ### Multi-Job Routing
 
 ```
-Ray Serve (port 8000)
+Embedded WebUI (port 5000+)
 │
 ├── Portal (singleton, read-only)
 │   └── /solstice/                    ← Entry point

@@ -31,6 +31,7 @@ class Stage:
         stage_id: str,
         operator_config: OperatorConfig,
         parallelism: Union[int, Tuple[int, int]] = 1,
+        output_partitions: Optional[int] = None,
         worker_resources: Optional[Dict[str, float]] = None,
     ):
         """
@@ -44,6 +45,7 @@ class Stage:
             parallelism: Number of workers. Can be:
                 - int: Fixed number of workers (no auto-scaling)
                 - Tuple[int, int]: (min_workers, max_workers) for auto-scaling
+            output_partitions: Output queue partitions. None = auto based on max_workers
             worker_resources: Resource requirements per worker (num_cpus, num_gpus, memory)
 
         Examples:
@@ -56,6 +58,7 @@ class Stage:
         """
         self.stage_id = stage_id
         self.operator_config = operator_config
+        self.output_partitions = output_partitions
 
         # Parse parallelism parameter
         if isinstance(parallelism, int):
@@ -95,5 +98,6 @@ class Stage:
             "operator_config": self.operator_config.to_dict(),
             "max_parallelism": self.max_parallelism,
             "min_parallelism": self.min_parallelism,
+            "output_partitions": self.output_partitions,
             "worker_resources": self.worker_resources,
         }

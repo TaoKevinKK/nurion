@@ -340,7 +340,7 @@ job = Job(
 )
 ```
 
-Access at: `http://localhost:8000/solstice/jobs/{job_id}/`
+Access at: `http://localhost:<port>/jobs/{job_id}/` (port starts at 5000)
 
 See `solstice/webui/README.md` for details.
 

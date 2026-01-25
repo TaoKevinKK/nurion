@@ -338,6 +338,9 @@ class WorkerManager:
         # Use ray.wait in a thread to avoid blocking the async event loop
         ready, _ = await asyncio.to_thread(ray.wait, task_list, num_returns=1, timeout=timeout)
 
+        if ready:
+            self._logger.info(f"wait_for_completion: {len(ready)} of {len(task_list)} tasks ready")
+
         if not ready:
             return [], []
 
@@ -366,12 +369,15 @@ class WorkerManager:
             self._workers.pop(worker_id, None)
             self._worker_tasks.pop(worker_id, None)
 
-    def notify_upstream_finished(self) -> None:
+    async def notify_upstream_finished(self) -> None:
         """Notify all workers that upstream has finished."""
         self._upstream_finished = True
+        # Use fire-and-forget pattern to avoid blocking the event loop
         for worker_id, worker in self._workers.items():
             try:
-                ray.get(worker.notify_upstream_finished.remote(), timeout=5)
+                # Don't wait for response - fire and forget
+                worker.notify_upstream_finished.remote()
+                self._logger.debug(f"Notified worker {worker_id}: upstream finished")
             except Exception as e:
                 self._logger.warning(f"Failed to notify worker {worker_id}: {e}")
 

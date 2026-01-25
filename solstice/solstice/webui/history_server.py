@@ -18,7 +18,7 @@ import click
 import uvicorn
 
 from solstice.webui.app import create_webui_app
-from solstice.webui.storage import PortalStorage
+from solstice.webui.storage.slatedb_storage import PortalStorage
 
 
 @click.command()
@@ -67,7 +67,7 @@ def history_server(storage_path: str, host: str, port: int, reload: bool):
     click.echo("Press Ctrl+C to stop")
     click.echo()
 
-    # Initialize storage (read-only, scans all job directories)
+    # Initialize storage (read-only, caches readers per job)
     try:
         storage = PortalStorage(storage_path)
         click.echo("✓ Connected to storage (read-only)")
@@ -77,6 +77,7 @@ def history_server(storage_path: str, host: str, port: int, reload: bool):
 
     # Create history server app (no base_path prefix, runs at root)
     app = create_webui_app(storage, title="Solstice History Server", base_path="")
+    app.add_event_handler("shutdown", storage.close)
 
     # Run server
     uvicorn.run(

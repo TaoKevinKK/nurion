@@ -244,6 +244,92 @@ def get_s3_storage_options(
     return options
 
 
+def _parse_s3_url(path: str) -> tuple[str, str]:
+    """Parse an s3:// URL into (bucket, key)."""
+    parsed = urlparse(path)
+    if parsed.scheme != "s3" or not parsed.netloc:
+        raise ValueError(f"Invalid S3 path: {path}")
+    return parsed.netloc, parsed.path.lstrip("/")
+
+
+def _get_s3_client():
+    """Create a boto3 S3 client with short timeouts."""
+    import boto3
+    from botocore.config import Config
+
+    endpoint_url = os.environ.get("AWS_ENDPOINT_URL") or os.environ.get("FSSPEC_S3_ENDPOINT_URL")
+    region_name = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    if not region_name:
+        options = get_s3_storage_options()
+        region_name = options.get("client_kwargs", {}).get("region_name")
+
+    return boto3.client(
+        "s3",
+        region_name=region_name,
+        endpoint_url=endpoint_url,
+        config=Config(connect_timeout=3, read_timeout=5, retries={"max_attempts": 2}),
+    )
+
+
+def restore_s3_object(path: str, days: int = 2) -> bool:
+    """Request a restore for an archived S3 object if needed.
+
+    Returns True if a restore request was submitted, False otherwise.
+    """
+    if not path.startswith("s3://"):
+        return False
+
+    bucket, key = _parse_s3_url(path)
+    client = _get_s3_client()
+
+    try:
+        head = client.head_object(Bucket=bucket, Key=key)
+    except Exception as e:
+        logger.warning(f"Failed to head S3 object for restore: {path} ({e})")
+        return False
+
+    storage_class = head.get("StorageClass", "")
+    archive_status = head.get("ArchiveStatus", "")
+    restore_header = head.get("Restore", "") or ""
+
+    is_intelligent_tiering_archive = archive_status in {
+        "ARCHIVE_ACCESS",
+        "DEEP_ARCHIVE_ACCESS",
+    }
+    is_glacier_archive = storage_class in {"GLACIER", "DEEP_ARCHIVE", "GLACIER_IR"}
+    is_archived = is_glacier_archive or is_intelligent_tiering_archive
+
+    if restore_header:
+        # Restore already in progress or completed
+        if 'ongoing-request="true"' in restore_header:
+            return False
+        if 'ongoing-request="false"' in restore_header:
+            return False
+
+    if not is_archived:
+        return False
+
+    try:
+        if is_intelligent_tiering_archive:
+            # Intelligent-Tiering archive tiers don't accept Days in restore requests.
+            restore_request: Dict[str, Any] = {}
+        else:
+            restore_request = {
+                "Days": days,
+                "GlacierJobParameters": {"Tier": "Standard"},
+            }
+
+        client.restore_object(
+            Bucket=bucket,
+            Key=key,
+            RestoreRequest=restore_request,
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to request restore for {path}: {e}")
+        return False
+
+
 def get_lance_storage_options(
     bucket: str,
     rclone_remote: Optional[str] = None,

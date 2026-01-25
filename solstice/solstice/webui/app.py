@@ -14,8 +14,8 @@
 
 """FastAPI application factory for Solstice WebUI.
 
-Provides shared utilities and app factory for both Portal and History Server.
-Both use the same read-only pattern: all data from PortalStorage (SlateDB).
+Provides shared utilities and app factory for runtime and history modes.
+Storage is injected via the JobStorageReader interface.
 """
 
 import os
@@ -43,8 +43,8 @@ def create_webui_app(
 ) -> FastAPI:
     """Create the Solstice WebUI FastAPI application.
 
-    This is the unified app factory used by both Portal and History Server.
-    All routes read from storage (PortalStorage).
+    This is the unified app factory used by runtime and history modes.
+    All routes read from the injected storage adapter.
 
     Args:
         storage: Storage instance for reading data (PortalStorage)

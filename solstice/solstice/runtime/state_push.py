@@ -127,7 +127,13 @@ class StatePushManager:
             self._storage = storage
 
             # Create and start broker
-            self._broker = TansuBrokerManager(storage_url=self.config.storage_url)
+            # Use actual node IP for cross-node access (workers on other nodes need to connect)
+            from solstice.utils.network import get_node_ip
+
+            self._broker = TansuBrokerManager(
+                storage_url=self.config.storage_url,
+                host=get_node_ip(),
+            )
             self._broker.start()
 
             broker_url = self._broker.get_broker_url()

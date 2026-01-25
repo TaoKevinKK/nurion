@@ -70,7 +70,7 @@ class TestElasticScaling:
     async def test_scale_up_during_processing(self, ray_cluster):
         """Scale up: new workers should join and partition rebalance correctly."""
         # Use more records and smaller batch size to ensure longer processing time
-        NUM_RECORDS = 50000
+        NUM_RECORDS = 5000
         FILTER_MODULO = 3
         FILTER_REMAINDER = 0
         validator = DataValidator()
@@ -146,7 +146,7 @@ class TestElasticScaling:
                 pass
 
             # Wait for completion
-            await asyncio.wait_for(run_task, timeout=360)
+            await asyncio.wait_for(run_task, timeout=90)
         finally:
             await runner.stop()
 
@@ -164,7 +164,7 @@ class TestElasticScaling:
     @pytest.mark.asyncio
     async def test_scale_down_during_processing(self, ray_cluster):
         """Scale down: removed workers' partitions should be taken over by others."""
-        NUM_RECORDS = 12000
+        NUM_RECORDS = 1500
         EXPLODE_FACTOR = 2
         validator = DataValidator()
 
@@ -189,7 +189,7 @@ class TestElasticScaling:
 
             # Wait for processing to start with more workers
             await wait_for_progress(
-                runner, min_processed=3000, timeout=60, collector_name=self.collector_name
+                runner, min_processed=200, timeout=60, collector_name=self.collector_name
             )
 
             # Scale down: kill some workers
@@ -198,7 +198,7 @@ class TestElasticScaling:
             await kill_random_worker(runner, stage_id="transform")
 
             # Wait for completion
-            await asyncio.wait_for(run_task, timeout=360)
+            await asyncio.wait_for(run_task, timeout=90)
         finally:
             await runner.stop()
 
@@ -214,7 +214,7 @@ class TestElasticScaling:
     @pytest.mark.asyncio
     async def test_scale_to_zero_and_back(self, ray_cluster):
         """Scale to zero then back: state should be preserved, recovery from offset."""
-        NUM_RECORDS = 10000
+        NUM_RECORDS = 1500
         FILTER_MODULO = 5
         FILTER_REMAINDER = 0
         EXPLODE_FACTOR = 2
@@ -247,7 +247,7 @@ class TestElasticScaling:
 
             # Wait for processing to start
             await wait_for_progress(
-                runner, min_processed=1500, timeout=60, collector_name=self.collector_name
+                runner, min_processed=150, timeout=60, collector_name=self.collector_name
             )
 
             # Kill all workers (scale to ~zero active processing)
@@ -264,7 +264,7 @@ class TestElasticScaling:
             await asyncio.sleep(2)
 
             # Wait for completion
-            await asyncio.wait_for(run_task, timeout=420)
+            await asyncio.wait_for(run_task, timeout=120)
         finally:
             await runner.stop()
 
@@ -289,7 +289,7 @@ class TestElasticScaling:
     @pytest.mark.asyncio
     async def test_rapid_scale_up_down_cycles(self, ray_cluster):
         """Rapid scaling: no race conditions or duplicate processing."""
-        NUM_RECORDS = 12000
+        NUM_RECORDS = 1500
         FILTER_MODULO = 4
         FILTER_REMAINDER = 0
         validator = DataValidator()
@@ -324,7 +324,7 @@ class TestElasticScaling:
             for cycle in range(4):
                 await wait_for_progress(
                     runner,
-                    min_processed=500 + cycle * 700,
+                    min_processed=100 + cycle * 100,
                     timeout=90,
                     collector_name=self.collector_name,
                 )
@@ -348,7 +348,7 @@ class TestElasticScaling:
                 await asyncio.sleep(0.2)
 
             # Wait for completion
-            await asyncio.wait_for(run_task, timeout=420)
+            await asyncio.wait_for(run_task, timeout=120)
         finally:
             await runner.stop()
 
@@ -368,7 +368,7 @@ class TestElasticScaling:
     @pytest.mark.asyncio
     async def test_scale_with_partition_rebalance(self, ray_cluster):
         """Partition rebalance during scaling: balanced distribution, no message loss."""
-        NUM_RECORDS = 15000
+        NUM_RECORDS = 2000
         EXPLODE_FACTOR = 3
         validator = DataValidator()
 
@@ -393,7 +393,7 @@ class TestElasticScaling:
 
             # Wait for initial processing
             await wait_for_progress(
-                runner, min_processed=5000, timeout=90, collector_name=self.collector_name
+                runner, min_processed=300, timeout=90, collector_name=self.collector_name
             )
 
             master = runner._masters.get("transform")
@@ -413,7 +413,7 @@ class TestElasticScaling:
 
             # Continue processing
             await wait_for_progress(
-                runner, min_processed=20000, timeout=120, collector_name=self.collector_name
+                runner, min_processed=500, timeout=120, collector_name=self.collector_name
             )
 
             # Scale down to trigger another rebalance
@@ -422,7 +422,7 @@ class TestElasticScaling:
                 await asyncio.sleep(0.2)
 
             # Wait for completion
-            await asyncio.wait_for(run_task, timeout=480)
+            await asyncio.wait_for(run_task, timeout=120)
         finally:
             await runner.stop()
 

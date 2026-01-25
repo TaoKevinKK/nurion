@@ -29,7 +29,7 @@ A web-based debugging and monitoring interface for Solstice streaming jobs.
 
 ### Dual-Mode Design
 
-1. **Embedded Mode**: WebUI runs alongside the job via Ray Serve
+1. **Embedded Mode**: WebUI runs inside the driver process (uvicorn)
 2. **History Server Mode**: Standalone service for viewing archived jobs
 
 ### Storage Strategy
@@ -65,7 +65,8 @@ job.add_stage(sink_stage)
 runner = job.create_ray_runner()
 await runner.run()
 
-# WebUI will be available at: http://localhost:8000/solstice/jobs/{job_id}/
+# WebUI will be available at: http://localhost:<port>/jobs/{job_id}/
+# (port starts at 5000 and increments until free)
 ```
 
 ### History Server Mode
@@ -80,7 +81,7 @@ solstice history-server -s s3://my-bucket/solstice-history/ -p 8080
 ## Portal Structure
 
 ```
-http://localhost:8000/solstice/
+http://localhost:<port>/
 ├── /                           → All jobs (running + completed)
 ├── /running                    → Running jobs only
 ├── /completed                  → Completed jobs only
@@ -103,7 +104,7 @@ http://localhost:8000/solstice/
 | `prometheus_enabled` | bool | True | Export Prometheus metrics |
 | `metrics_snapshot_interval_s` | float | 30.0 | Snapshot interval |
 | `archive_on_completion` | bool | True | Archive job when complete |
-| `port` | int | 8000 | Ray Serve port |
+| `port` | int | 5000 | Embedded WebUI base port (auto-increment) |
 
 ### Environment Variables
 
