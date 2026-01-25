@@ -18,8 +18,8 @@ from solstice.testing.fault_injection import (
     FaultInjector,
     FaultConfig,
     check_fault,
-    get_fault_injector,
-    set_fault_injector,
+    reset_fault_injector,
+    is_fault_injection_enabled,
     # Fault points
     FAULT_STATE_STORE_PUT,
     FAULT_STATE_STORE_GET,
@@ -36,8 +36,8 @@ __all__ = [
     "FaultInjector",
     "FaultConfig",
     "check_fault",
-    "get_fault_injector",
-    "set_fault_injector",
+    "reset_fault_injector",
+    "is_fault_injection_enabled",
     # Fault points
     "FAULT_STATE_STORE_PUT",
     "FAULT_STATE_STORE_GET",

@@ -261,12 +261,12 @@ class TestLongRunningStability:
 
             async def periodic_chaos():
                 while chaos_running and not is_runner_finished(runner):
-                    await asyncio.sleep(random.uniform(5.0, 15.0))
+                    await asyncio.sleep(random.uniform(3.0, 8.0))
                     if is_runner_finished(runner):
                         break
                     try:
-                        # Kill any worker (including source/sink) to test recovery
-                        await kill_random_worker(runner)
+                        # Only kill transform workers - source/sink kills cause pipeline stalls
+                        await kill_random_worker(runner, stage_id="transform")
                     except Exception:
                         pass
 

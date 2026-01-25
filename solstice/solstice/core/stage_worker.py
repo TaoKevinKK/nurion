@@ -47,7 +47,13 @@ from solstice.core.stage_config import (
 )
 from solstice.core.split_payload_store import SplitPayloadStore
 from solstice.core.operator import Operator, SemanticGuarantee
-from solstice.testing.fault_injection import check_fault, FAULT_BEFORE_MARK_PROCESSED
+from solstice.testing.fault_injection import (
+    check_fault,
+    FAULT_BEFORE_MARK_PROCESSED,
+    FAULT_AFTER_MARK_PROCESSED,
+    FAULT_BEFORE_PROCESS,
+    FAULT_AFTER_PROCESS,
+)
 
 if TYPE_CHECKING:
     from solstice.core.stage import Stage
@@ -355,14 +361,23 @@ class StageWorker:
                         self.job_id, self.stage_id, partition_id, record.offset
                     )
 
+                    # Fault injection point: before processing (no-op in production)
+                    check_fault(FAULT_BEFORE_PROCESS)
+
                     # Process the message
                     await self._process_message(pop, message, record.offset, partition_id, split_id)
 
-                    # Fault injection point (no-op in production)
+                    # Fault injection point: after processing (no-op in production)
+                    check_fault(FAULT_AFTER_PROCESS)
+
+                    # Fault injection point: before mark processed (no-op in production)
                     check_fault(FAULT_BEFORE_MARK_PROCESSED)
 
                     # Mark as processed
                     pop.mark_processed(record.offset)
+
+                    # Fault injection point: after mark processed (no-op in production)
+                    check_fault(FAULT_AFTER_MARK_PROCESSED)
 
                     # Commit offset (at-least-once: commit after produce)
                     self.upstream_queue.commit_offset(

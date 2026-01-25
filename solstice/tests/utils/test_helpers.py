@@ -31,7 +31,7 @@ async def wait_for_progress(
     runner: RayJobRunner,
     min_processed: int,
     timeout: float = 60.0,
-    poll_interval: float = 0.5,
+    poll_interval: float = 0.1,  # Faster polling for tests
     collector_name: Optional[str] = None,
 ) -> None:
     """Wait until at least min_processed records have been processed.

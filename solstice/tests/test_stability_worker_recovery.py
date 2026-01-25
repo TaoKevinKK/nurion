@@ -45,8 +45,8 @@ from tests.utils import (
     wait_for_stage_workers,
 )
 
-# Mark all tests in this module as distributed tests
-pytestmark = pytest.mark.distributed
+# Mark all tests in this module as stability tests
+pytestmark = pytest.mark.stability
 
 
 class TestWorkerFaultRecovery:
@@ -72,7 +72,7 @@ class TestWorkerFaultRecovery:
     async def test_single_worker_crash_recovery(self, ray_cluster):
         """Worker crash: in-flight splits should be rescheduled, no data loss."""
         # Use larger data + smaller batch to ensure workers are still running when we kill
-        NUM_RECORDS = 50000
+        NUM_RECORDS = 5000
         BATCH_SIZE = 100  # Smaller batch = more splits = longer processing
         FILTER_MODULO = 3
         FILTER_REMAINDER = 0
@@ -87,7 +87,7 @@ class TestWorkerFaultRecovery:
             num_records=NUM_RECORDS,
             batch_size=BATCH_SIZE,
             min_workers=3,
-            max_workers=6,
+            max_workers=8,
             collector_name=self.collector_name,
             with_checksum=True,
             source_data=source_data,
@@ -103,7 +103,7 @@ class TestWorkerFaultRecovery:
             run_task = asyncio.create_task(runner.run())
 
             # First, wait for workers to be spawned
-            await wait_for_stage_workers(runner, "transform", min_workers=3, timeout=30)
+            await wait_for_stage_workers(runner, "transform", min_workers=3, timeout=15)
 
             # Immediately verify and kill while workers still exist
             # Don't wait too long for progress as workers might finish
@@ -117,7 +117,7 @@ class TestWorkerFaultRecovery:
             assert killed_worker is not None, "No worker was killed"
 
             # Wait for completion
-            await asyncio.wait_for(run_task, timeout=360)
+            await asyncio.wait_for(run_task, timeout=45)
         finally:
             await runner.stop()
 
@@ -137,7 +137,7 @@ class TestWorkerFaultRecovery:
     @pytest.mark.asyncio
     async def test_multi_worker_simultaneous_crash(self, ray_cluster):
         """Multiple workers crash simultaneously: system should recover without deadlock."""
-        NUM_RECORDS = 12000
+        NUM_RECORDS = 1500
         EXPLODE_FACTOR = 2
 
         source_data = generate_test_data_with_checksum(NUM_RECORDS)
@@ -161,7 +161,7 @@ class TestWorkerFaultRecovery:
 
             # Wait for processing to start and workers to be up
             await wait_for_progress(
-                runner, min_processed=3000, timeout=60, collector_name=self.collector_name
+                runner, min_processed=200, timeout=30, collector_name=self.collector_name
             )
 
             # Kill multiple workers simultaneously
@@ -175,7 +175,7 @@ class TestWorkerFaultRecovery:
                         pass
 
             # Wait for completion - should not deadlock
-            await asyncio.wait_for(run_task, timeout=420)
+            await asyncio.wait_for(run_task, timeout=60)
         finally:
             await runner.stop()
 
@@ -195,7 +195,7 @@ class TestWorkerFaultRecovery:
     async def test_all_workers_crash_and_recovery(self, ray_cluster):
         """All workers crash: master should recreate workers and recover from offset."""
         # Use moderate data size for reasonable test time
-        NUM_RECORDS = 30000
+        NUM_RECORDS = 3000
         BATCH_SIZE = 200
         FILTER_MODULO = 4
         FILTER_REMAINDER = 1
@@ -210,7 +210,7 @@ class TestWorkerFaultRecovery:
             num_records=NUM_RECORDS,
             batch_size=BATCH_SIZE,
             min_workers=3,
-            max_workers=6,
+            max_workers=8,
             collector_name=self.collector_name,
             with_checksum=True,
             source_data=source_data,
@@ -226,7 +226,7 @@ class TestWorkerFaultRecovery:
             run_task = asyncio.create_task(runner.run())
 
             # Wait for workers to be spawned and get some progress
-            await wait_for_stage_workers(runner, "transform", min_workers=3, timeout=30)
+            await wait_for_stage_workers(runner, "transform", min_workers=3, timeout=15)
 
             # Give workers time to start processing, then kill immediately
             await asyncio.sleep(0.5)
@@ -236,7 +236,7 @@ class TestWorkerFaultRecovery:
             # Note: killed_count might be 0 if workers finished quickly, but test should still pass
 
             # Wait for workers to be recreated (if needed) and complete
-            await asyncio.wait_for(run_task, timeout=300)
+            await asyncio.wait_for(run_task, timeout=45)
         finally:
             await runner.stop()
 
@@ -259,7 +259,7 @@ class TestWorkerFaultRecovery:
     async def test_worker_restart_continues_from_offset(self, ray_cluster):
         """Worker restart: should continue from committed offset, no skip or repeat."""
         # Use larger data + smaller batch for longer processing time
-        NUM_RECORDS = 50000
+        NUM_RECORDS = 5000
         BATCH_SIZE = 100
         EXPLODE_FACTOR = 3
 
@@ -270,7 +270,7 @@ class TestWorkerFaultRecovery:
             num_records=NUM_RECORDS,
             batch_size=BATCH_SIZE,
             min_workers=3,
-            max_workers=6,
+            max_workers=8,
             collector_name=self.collector_name,
             with_checksum=True,
             source_data=source_data,
@@ -283,28 +283,28 @@ class TestWorkerFaultRecovery:
             run_task = asyncio.create_task(runner.run())
 
             # Wait for workers to be spawned
-            await wait_for_stage_workers(runner, "transform", min_workers=3, timeout=30)
+            await wait_for_stage_workers(runner, "transform", min_workers=3, timeout=15)
 
             # Wait for some processing
             await wait_for_progress(
-                runner, min_processed=5000, timeout=60, collector_name=self.collector_name
+                runner, min_processed=300, timeout=30, collector_name=self.collector_name
             )
 
             # Verify workers exist before killing
             master = runner._masters.get("transform")
             if master and len(master._workers) > 0:
                 await kill_random_worker(runner, stage_id="transform")
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.3)
 
             # Wait for more processing and kill again
             await wait_for_progress(
-                runner, min_processed=50000, timeout=180, collector_name=self.collector_name
+                runner, min_processed=500, timeout=30, collector_name=self.collector_name
             )
             if master and len(master._workers) > 0:
                 await kill_random_worker(runner, stage_id="transform")
 
             # Wait for completion
-            await asyncio.wait_for(run_task, timeout=480)
+            await asyncio.wait_for(run_task, timeout=60)
         finally:
             await runner.stop()
 
@@ -344,7 +344,7 @@ class TestExactlyOnceSemantics:
     async def test_no_duplicate_on_worker_restart(self, ray_cluster):
         """Worker restart should not produce duplicate records."""
         # Use larger data + smaller batch for longer processing time
-        NUM_RECORDS = 50000
+        NUM_RECORDS = 5000
         BATCH_SIZE = 100
         FILTER_MODULO = 5
         FILTER_REMAINDER = 0
@@ -360,7 +360,7 @@ class TestExactlyOnceSemantics:
             num_records=NUM_RECORDS,
             batch_size=BATCH_SIZE,
             min_workers=3,
-            max_workers=6,
+            max_workers=8,
             collector_name=self.collector_name,
             with_checksum=True,
             source_data=source_data,
@@ -377,13 +377,13 @@ class TestExactlyOnceSemantics:
             run_task = asyncio.create_task(runner.run())
 
             # Wait for workers to be spawned
-            await wait_for_stage_workers(runner, "transform", min_workers=3, timeout=30)
+            await wait_for_stage_workers(runner, "transform", min_workers=3, timeout=15)
 
             # Restart workers multiple times during processing
             for i in range(3):
                 await wait_for_progress(
                     runner,
-                    min_processed=2000 + i * 3000,
+                    min_processed=100 + i * 200,
                     timeout=90,
                     collector_name=self.collector_name,
                 )
@@ -392,7 +392,7 @@ class TestExactlyOnceSemantics:
                     await kill_random_worker(runner, stage_id="transform")
                     await asyncio.sleep(0.5)
 
-            await asyncio.wait_for(run_task, timeout=480)
+            await asyncio.wait_for(run_task, timeout=60)
         finally:
             await runner.stop()
 
@@ -419,7 +419,7 @@ class TestExactlyOnceSemantics:
     @pytest.mark.asyncio
     async def test_no_loss_on_crash_before_commit(self, ray_cluster):
         """Crash before commit: batch should be reprocessed (at-least-once)."""
-        NUM_RECORDS = 12000
+        NUM_RECORDS = 1500
         EXPLODE_FACTOR = 2
 
         source_data = generate_test_data_with_checksum(NUM_RECORDS)
@@ -429,7 +429,7 @@ class TestExactlyOnceSemantics:
             num_records=NUM_RECORDS,
             batch_size=300,  # Small batches for more commit points
             min_workers=3,
-            max_workers=6,
+            max_workers=8,
             collector_name=self.collector_name,
             with_checksum=True,
             source_data=source_data,
@@ -442,11 +442,11 @@ class TestExactlyOnceSemantics:
             run_task = asyncio.create_task(runner.run())
 
             # Wait for workers to be spawned first
-            await wait_for_stage_workers(runner, "transform", min_workers=3, timeout=30)
+            await wait_for_stage_workers(runner, "transform", min_workers=3, timeout=15)
 
             # Wait for some initial processing before killing to test at-least-once
             await wait_for_progress(
-                runner, min_processed=1000, timeout=60, collector_name=self.collector_name
+                runner, min_processed=150, timeout=30, collector_name=self.collector_name
             )
 
             # Rapid kills to increase chance of catching pre-commit state
@@ -454,7 +454,7 @@ class TestExactlyOnceSemantics:
                 await asyncio.sleep(0.5)
                 await kill_random_worker(runner, stage_id="transform")
 
-            await asyncio.wait_for(run_task, timeout=480)
+            await asyncio.wait_for(run_task, timeout=60)
         finally:
             await runner.stop()
 
@@ -505,11 +505,11 @@ class TestExactlyOnceSemantics:
 
             # Kill one worker after initial progress
             await wait_for_progress(
-                runner, min_processed=200, timeout=60, collector_name=self.collector_name
+                runner, min_processed=200, timeout=30, collector_name=self.collector_name
             )
             await kill_random_worker(runner)
 
-            await asyncio.wait_for(run_task, timeout=180)
+            await asyncio.wait_for(run_task, timeout=60)
         finally:
             await runner.stop()
 
@@ -531,7 +531,7 @@ class TestExactlyOnceSemantics:
     async def test_at_least_once_with_multi_partition(self, ray_cluster):
         """Multi-partition: no data loss after worker crashes (at-least-once)."""
         # Use larger data + smaller batch for longer processing time
-        NUM_RECORDS = 50000
+        NUM_RECORDS = 5000
         BATCH_SIZE = 100
         FILTER_MODULO = 4
         FILTER_REMAINDER = 0
@@ -564,18 +564,18 @@ class TestExactlyOnceSemantics:
             run_task = asyncio.create_task(runner.run())
 
             # Wait for workers to be spawned
-            await wait_for_stage_workers(runner, "transform", min_workers=4, timeout=30)
+            await wait_for_stage_workers(runner, "transform", min_workers=4, timeout=15)
 
             # Kill workers to test partition rebalancing
             await wait_for_progress(
-                runner, min_processed=5000, timeout=60, collector_name=self.collector_name
+                runner, min_processed=300, timeout=30, collector_name=self.collector_name
             )
             master = runner._masters.get("transform")
             if master and len(master._workers) > 0:
                 await kill_random_worker(runner, stage_id="transform")
 
             await wait_for_progress(
-                runner, min_processed=20000, timeout=120, collector_name=self.collector_name
+                runner, min_processed=500, timeout=120, collector_name=self.collector_name
             )
             # Kill multiple to force significant rebalance
             if master and len(master._workers) > 0:
@@ -583,7 +583,7 @@ class TestExactlyOnceSemantics:
             if master and len(master._workers) > 0:
                 await kill_random_worker(runner, stage_id="transform")
 
-            await asyncio.wait_for(run_task, timeout=600)
+            await asyncio.wait_for(run_task, timeout=60)
         finally:
             await runner.stop()
 

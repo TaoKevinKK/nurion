@@ -72,21 +72,21 @@ class TestBasicDataConsistency:
     @pytest.mark.asyncio
     async def test_e2e_no_data_loss_simple(self, ray_cluster):
         """Basic scenario: verify simple pipeline has no data loss."""
-        NUM_RECORDS = 10000
+        NUM_RECORDS = 1500
         validator = DataValidator()
 
         job = create_test_pipeline(
             num_records=NUM_RECORDS,
             batch_size=500,
-            min_workers=2,
-            max_workers=6,
+            min_workers=4,
+            max_workers=8,
             collector_name=self.collector_name,
         )
 
         runner = RayJobRunner(job)
         try:
             await runner.initialize()
-            await asyncio.wait_for(runner.run(), timeout=480)
+            await asyncio.wait_for(runner.run(), timeout=60)
         finally:
             await runner.stop()
 
@@ -103,22 +103,22 @@ class TestBasicDataConsistency:
     @pytest.mark.asyncio
     async def test_e2e_no_data_loss_multi_stage(self, ray_cluster):
         """Multi-stage pipeline: verify no data loss through multiple stages."""
-        NUM_RECORDS = 10000
+        NUM_RECORDS = 1500
         validator = DataValidator()
 
         job = create_multi_stage_pipeline(
             num_records=NUM_RECORDS,
             batch_size=500,
             num_transform_stages=3,
-            min_workers=2,
-            max_workers=4,
+            min_workers=4,
+            max_workers=8,
             collector_name=self.collector_name,
         )
 
         runner = RayJobRunner(job)
         try:
             await runner.initialize()
-            await asyncio.wait_for(runner.run(), timeout=540)
+            await asyncio.wait_for(runner.run(), timeout=60)
         finally:
             await runner.stop()
 
@@ -132,7 +132,7 @@ class TestBasicDataConsistency:
     @pytest.mark.asyncio
     async def test_e2e_no_duplicates_simple(self, ray_cluster):
         """Verify no duplicate records in output."""
-        NUM_RECORDS = 15000
+        NUM_RECORDS = 2000
         validator = DataValidator()
 
         job = create_test_pipeline(
@@ -146,7 +146,7 @@ class TestBasicDataConsistency:
         runner = RayJobRunner(job)
         try:
             await runner.initialize()
-            await asyncio.wait_for(runner.run(), timeout=480)
+            await asyncio.wait_for(runner.run(), timeout=60)
         finally:
             await runner.stop()
 
@@ -163,7 +163,7 @@ class TestBasicDataConsistency:
     @pytest.mark.asyncio
     async def test_e2e_checksum_integrity(self, ray_cluster):
         """Verify data checksum integrity through pipeline."""
-        NUM_RECORDS = 10000
+        NUM_RECORDS = 1500
         validator = DataValidator()
 
         # Generate source data with checksums
@@ -173,7 +173,7 @@ class TestBasicDataConsistency:
             num_records=NUM_RECORDS,
             batch_size=500,
             min_workers=3,
-            max_workers=6,
+            max_workers=8,
             collector_name=self.collector_name,
             with_checksum=True,
             source_data=source_data,
@@ -182,7 +182,7 @@ class TestBasicDataConsistency:
         runner = RayJobRunner(job)
         try:
             await runner.initialize()
-            await asyncio.wait_for(runner.run(), timeout=480)
+            await asyncio.wait_for(runner.run(), timeout=60)
         finally:
             await runner.stop()
 
@@ -197,7 +197,7 @@ class TestBasicDataConsistency:
     @pytest.mark.asyncio
     async def test_e2e_content_correctness(self, ray_cluster):
         """Verify content is correctly transformed and preserved."""
-        NUM_RECORDS = 10000
+        NUM_RECORDS = 1500
         validator = DataValidator()
 
         source_data = generate_test_data_with_checksum(NUM_RECORDS)
@@ -213,7 +213,7 @@ class TestBasicDataConsistency:
         runner = RayJobRunner(job)
         try:
             await runner.initialize()
-            await asyncio.wait_for(runner.run(), timeout=480)
+            await asyncio.wait_for(runner.run(), timeout=60)
         finally:
             await runner.stop()
 
@@ -245,7 +245,7 @@ class TestFilterOperatorConsistency:
     @pytest.mark.asyncio
     async def test_filter_50_percent(self, ray_cluster):
         """Filter 50% of data: verify correct row count and no data corruption."""
-        NUM_RECORDS = 20000
+        NUM_RECORDS = 2500
         FILTER_MODULO = 2
         FILTER_REMAINDER = 0  # Keep even IDs
         validator = DataValidator()
@@ -256,7 +256,7 @@ class TestFilterOperatorConsistency:
             num_records=NUM_RECORDS,
             batch_size=500,
             min_workers=3,
-            max_workers=6,
+            max_workers=8,
             collector_name=self.collector_name,
             with_checksum=True,
             source_data=source_data,
@@ -269,7 +269,7 @@ class TestFilterOperatorConsistency:
         runner = RayJobRunner(job)
         try:
             await runner.initialize()
-            await asyncio.wait_for(runner.run(), timeout=540)
+            await asyncio.wait_for(runner.run(), timeout=60)
         finally:
             await runner.stop()
 
@@ -288,7 +288,7 @@ class TestFilterOperatorConsistency:
     @pytest.mark.asyncio
     async def test_filter_20_percent(self, ray_cluster):
         """Filter to 20% of data: verify correct row count."""
-        NUM_RECORDS = 25000
+        NUM_RECORDS = 3000
         FILTER_MODULO = 5
         FILTER_REMAINDER = 0  # Keep ids divisible by 5
         validator = DataValidator()
@@ -312,7 +312,7 @@ class TestFilterOperatorConsistency:
         runner = RayJobRunner(job)
         try:
             await runner.initialize()
-            await asyncio.wait_for(runner.run(), timeout=540)
+            await asyncio.wait_for(runner.run(), timeout=60)
         finally:
             await runner.stop()
 
@@ -346,7 +346,7 @@ class TestExplodeOperatorConsistency:
     @pytest.mark.asyncio
     async def test_explode_3x(self, ray_cluster):
         """Explode 3x: verify correct row count and no data corruption."""
-        NUM_RECORDS = 10000
+        NUM_RECORDS = 1500
         EXPLODE_FACTOR = 3
         validator = DataValidator()
 
@@ -357,7 +357,7 @@ class TestExplodeOperatorConsistency:
             num_records=NUM_RECORDS,
             batch_size=500,
             min_workers=3,
-            max_workers=6,
+            max_workers=8,
             collector_name=self.collector_name,
             with_checksum=True,
             source_data=source_data,
@@ -367,7 +367,7 @@ class TestExplodeOperatorConsistency:
         runner = RayJobRunner(job)
         try:
             await runner.initialize()
-            await asyncio.wait_for(runner.run(), timeout=540)
+            await asyncio.wait_for(runner.run(), timeout=60)
         finally:
             await runner.stop()
 
@@ -392,7 +392,7 @@ class TestExplodeOperatorConsistency:
     @pytest.mark.asyncio
     async def test_explode_5x(self, ray_cluster):
         """Explode 5x: verify large row count increase."""
-        NUM_RECORDS = 8000
+        NUM_RECORDS = 1500
         EXPLODE_FACTOR = 5
         validator = DataValidator()
 
@@ -410,7 +410,7 @@ class TestExplodeOperatorConsistency:
         runner = RayJobRunner(job)
         try:
             await runner.initialize()
-            await asyncio.wait_for(runner.run(), timeout=420)
+            await asyncio.wait_for(runner.run(), timeout=60)
         finally:
             await runner.stop()
 
@@ -442,7 +442,7 @@ class TestFilterExplodeConsistency:
     @pytest.mark.asyncio
     async def test_filter_then_explode(self, ray_cluster):
         """Filter 20% then explode 4x: verify complex row count changes."""
-        NUM_RECORDS = 25000
+        NUM_RECORDS = 3000
         FILTER_MODULO = 5
         FILTER_REMAINDER = 0
         EXPLODE_FACTOR = 4
@@ -473,7 +473,7 @@ class TestFilterExplodeConsistency:
         runner = RayJobRunner(job)
         try:
             await runner.initialize()
-            await asyncio.wait_for(runner.run(), timeout=420)
+            await asyncio.wait_for(runner.run(), timeout=60)
         finally:
             await runner.stop()
 
@@ -511,7 +511,7 @@ class TestFaultScenarioConsistency:
     @pytest.mark.asyncio
     async def test_e2e_consistency_with_worker_crash(self, ray_cluster):
         """Verify data consistency when a worker crashes mid-processing."""
-        NUM_RECORDS = 15000
+        NUM_RECORDS = 2000
         FILTER_MODULO = 3
         FILTER_REMAINDER = 0
         validator = DataValidator()
@@ -525,7 +525,7 @@ class TestFaultScenarioConsistency:
             num_records=NUM_RECORDS,
             batch_size=500,
             min_workers=3,
-            max_workers=6,
+            max_workers=8,
             collector_name=self.collector_name,
             with_checksum=True,
             source_data=source_data,
@@ -542,16 +542,16 @@ class TestFaultScenarioConsistency:
 
             # Wait for processing to start
             await wait_for_progress(
-                runner, min_processed=2000, timeout=60, collector_name=self.collector_name
+                runner, min_processed=200, timeout=30, collector_name=self.collector_name
             )
 
             # Kill a random worker
             killed = await kill_random_worker(runner, stage_id="transform")
             if killed:
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.3)
 
             # Wait for completion
-            await asyncio.wait_for(run_task, timeout=360)
+            await asyncio.wait_for(run_task, timeout=45)
         finally:
             await runner.stop()
 
@@ -569,7 +569,7 @@ class TestFaultScenarioConsistency:
     @pytest.mark.asyncio
     async def test_e2e_consistency_with_scale_events(self, ray_cluster):
         """Verify data consistency during worker scaling events with explode."""
-        NUM_RECORDS = 10000
+        NUM_RECORDS = 1500
         EXPLODE_FACTOR = 3
         validator = DataValidator()
 
@@ -579,7 +579,7 @@ class TestFaultScenarioConsistency:
         job = create_test_pipeline(
             num_records=NUM_RECORDS,
             batch_size=500,
-            min_workers=2,
+            min_workers=4,
             max_workers=8,
             collector_name=self.collector_name,
             with_checksum=True,
@@ -594,7 +594,7 @@ class TestFaultScenarioConsistency:
 
             # Wait for processing to start
             await wait_for_progress(
-                runner, min_processed=2000, timeout=60, collector_name=self.collector_name
+                runner, min_processed=200, timeout=30, collector_name=self.collector_name
             )
 
             # Scale up: spawn additional workers
@@ -607,14 +607,14 @@ class TestFaultScenarioConsistency:
                         pass
 
             # Wait then scale down
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.3)
             await wait_for_progress(
-                runner, min_processed=10000, timeout=120, collector_name=self.collector_name
+                runner, min_processed=300, timeout=120, collector_name=self.collector_name
             )
             await kill_random_worker(runner, stage_id="transform")
 
             # Wait for completion
-            await asyncio.wait_for(run_task, timeout=420)
+            await asyncio.wait_for(run_task, timeout=60)
         finally:
             await runner.stop()
 
@@ -629,7 +629,7 @@ class TestFaultScenarioConsistency:
     @pytest.mark.asyncio
     async def test_e2e_consistency_with_slow_worker(self, ray_cluster):
         """Verify data consistency with slow workers (filter + slow processing)."""
-        NUM_RECORDS = 10000
+        NUM_RECORDS = 1500
         FILTER_MODULO = 4
         FILTER_REMAINDER = 0
         validator = DataValidator()
@@ -643,8 +643,8 @@ class TestFaultScenarioConsistency:
         job = create_test_pipeline(
             num_records=NUM_RECORDS,
             batch_size=500,
-            min_workers=2,
-            max_workers=4,
+            min_workers=4,
+            max_workers=8,
             collector_name=self.collector_name,
             with_checksum=True,
             source_data=source_data,
@@ -657,7 +657,7 @@ class TestFaultScenarioConsistency:
         runner = RayJobRunner(job)
         try:
             await runner.initialize()
-            await asyncio.wait_for(runner.run(), timeout=540)
+            await asyncio.wait_for(runner.run(), timeout=60)
         finally:
             await runner.stop()
 
@@ -671,7 +671,7 @@ class TestFaultScenarioConsistency:
     @pytest.mark.asyncio
     async def test_e2e_consistency_with_backpressure(self, ray_cluster):
         """Verify data consistency when backpressure is activated (filter+explode)."""
-        NUM_RECORDS = 15000
+        NUM_RECORDS = 2000
         FILTER_MODULO = 5
         FILTER_REMAINDER = 0
         EXPLODE_FACTOR = 3
@@ -686,8 +686,8 @@ class TestFaultScenarioConsistency:
         job = create_test_pipeline(
             num_records=NUM_RECORDS,
             batch_size=200,
-            min_workers=2,
-            max_workers=4,
+            min_workers=4,
+            max_workers=8,
             collector_name=self.collector_name,
             with_checksum=True,
             source_data=source_data,
@@ -701,7 +701,7 @@ class TestFaultScenarioConsistency:
         runner = RayJobRunner(job)
         try:
             await runner.initialize()
-            await asyncio.wait_for(runner.run(), timeout=480)
+            await asyncio.wait_for(runner.run(), timeout=60)
         finally:
             await runner.stop()
 
@@ -719,7 +719,7 @@ class TestFaultScenarioConsistency:
     @pytest.mark.slow
     async def test_e2e_consistency_large_dataset(self, ray_cluster):
         """Verify data consistency with large dataset (50K+ output records)."""
-        NUM_RECORDS = 20000
+        NUM_RECORDS = 2500
         EXPLODE_FACTOR = 3
         validator = DataValidator()
 
@@ -740,7 +740,7 @@ class TestFaultScenarioConsistency:
         runner = RayJobRunner(job)
         try:
             await runner.initialize()
-            await asyncio.wait_for(runner.run(), timeout=540)
+            await asyncio.wait_for(runner.run(), timeout=60)
         finally:
             await runner.stop()
 

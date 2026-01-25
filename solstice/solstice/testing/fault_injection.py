@@ -14,26 +14,37 @@
 
 """Fault injection framework for testing exactly-once semantics.
 
-This module provides a clean way to inject faults for testing without
-polluting production code. Use dependency injection to swap in faulty
-implementations during tests.
+This module provides environment-variable-based fault injection that works
+across Ray worker processes. All workers read the same env vars, ensuring
+consistent fault injection behavior.
 
 Design principles:
-1. Zero overhead in production (disabled by default)
-2. Precise control over when/where faults occur
+1. Zero overhead in production (disabled by default via env var)
+2. Consistent across all Ray workers (env vars are inherited)
 3. Reproducible failures via deterministic triggers
 
-Usage:
-    # In tests
-    injector = FaultInjector()
-    injector.fail_after("state_store.put_batch", count=3)  # Fail on 4th call
+Environment Variables:
+    SOLSTICE_FAULT_INJECTION=1          # Enable fault injection (default: 0)
+    SOLSTICE_FAULT_<POINT>_AFTER=N      # Fail after N calls at <POINT>
+    SOLSTICE_FAULT_<POINT>_PROB=0.1     # Fail with 10% probability at <POINT>
 
-    # Wire into test
-    op = create_operator(fault_injector=injector)
+    Where <POINT> is one of:
+    - QUEUE_PRODUCE, QUEUE_FETCH, QUEUE_COMMIT
+    - BEFORE_PROCESS, AFTER_PROCESS
+    - BEFORE_MARK_PROCESSED, AFTER_MARK_PROCESSED
+    - STATE_STORE_PUT, STATE_STORE_GET
+
+Usage in tests:
+    import os
+    os.environ["SOLSTICE_FAULT_INJECTION"] = "1"
+    os.environ["SOLSTICE_FAULT_QUEUE_PRODUCE_AFTER"] = "3"  # Fail on 4th call
+
+    # Then run the pipeline - all workers will have the same fault config
 """
 
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Set
+import os
 import random
 
 
@@ -170,29 +181,93 @@ class FaultInjector:
         self._triggered.clear()
 
 
-# Global injector (disabled by default)
+# Global injector - lazy initialized from environment variables
 _global_injector: Optional[FaultInjector] = None
+_injector_initialized: bool = False
+
+# Mapping from env var suffix to fault point
+_FAULT_POINT_MAP: Dict[str, str] = {
+    "QUEUE_PRODUCE": "queue.produce",
+    "QUEUE_FETCH": "queue.fetch",
+    "QUEUE_COMMIT": "queue.commit",
+    "BEFORE_PROCESS": "operator.before_process",
+    "AFTER_PROCESS": "operator.after_process",
+    "BEFORE_MARK_PROCESSED": "operator.before_mark_processed",
+    "AFTER_MARK_PROCESSED": "operator.after_mark_processed",
+    "STATE_STORE_PUT": "state_store.put_batch",
+    "STATE_STORE_GET": "state_store.get",
+}
 
 
-def get_fault_injector() -> Optional[FaultInjector]:
-    """Get the global fault injector (None if not set)."""
-    return _global_injector
+def _init_global_injector() -> FaultInjector:
+    """Initialize global injector from environment variables.
 
+    Called lazily on first check_fault() call.
+    """
+    global _global_injector, _injector_initialized
 
-def set_fault_injector(injector: Optional[FaultInjector]) -> None:
-    """Set the global fault injector."""
-    global _global_injector
+    enabled = os.environ.get("SOLSTICE_FAULT_INJECTION", "0") == "1"
+    injector = FaultInjector(enabled=enabled)
+
+    if enabled:
+        # Parse fault configs from environment
+        for env_suffix, fault_point in _FAULT_POINT_MAP.items():
+            # Check for _AFTER config (fail after N calls)
+            after_key = f"SOLSTICE_FAULT_{env_suffix}_AFTER"
+            after_val = os.environ.get(after_key)
+            if after_val:
+                try:
+                    count = int(after_val)
+                    injector.fail_after(fault_point, count)
+                except ValueError:
+                    pass
+
+            # Check for _PROB config (fail with probability)
+            prob_key = f"SOLSTICE_FAULT_{env_suffix}_PROB"
+            prob_val = os.environ.get(prob_key)
+            if prob_val:
+                try:
+                    prob = float(prob_val)
+                    injector.fail_randomly(fault_point, prob)
+                except ValueError:
+                    pass
+
     _global_injector = injector
+    _injector_initialized = True
+    return injector
+
+
+def _get_injector() -> FaultInjector:
+    """Get the global injector, initializing if needed."""
+    global _global_injector, _injector_initialized
+    if not _injector_initialized:
+        return _init_global_injector()
+    return _global_injector  # type: ignore
 
 
 def check_fault(point: str) -> None:
     """Check fault at point using global injector.
 
-    No-op if no injector is set or injector is disabled.
+    No-op if SOLSTICE_FAULT_INJECTION env var is not "1".
     This is the function to call in production code.
     """
-    if _global_injector is not None:
-        _global_injector.check(point)
+    injector = _get_injector()
+    injector.check(point)
+
+
+def reset_fault_injector() -> None:
+    """Reset the global injector state (for tests).
+
+    Re-reads environment variables and reinitializes.
+    """
+    global _global_injector, _injector_initialized
+    _global_injector = None
+    _injector_initialized = False
+
+
+def is_fault_injection_enabled() -> bool:
+    """Check if fault injection is enabled."""
+    return os.environ.get("SOLSTICE_FAULT_INJECTION", "0") == "1"
 
 
 # =============================================================================

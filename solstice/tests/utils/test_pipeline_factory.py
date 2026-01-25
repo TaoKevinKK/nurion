@@ -512,10 +512,14 @@ def create_test_pipeline(
         with_checksum=with_checksum,
         source_data=source_data,
     )
+    # Low CPU requirements for test parallelism
+    test_resources = {"num_cpus": 0.1, "num_gpus": 0, "memory": 100 * 1024**2}
+
     source_stage = Stage(
         stage_id="source",
         operator_config=source_config,
         parallelism=(1, 1),  # Source is single-threaded
+        worker_resources=test_resources,
     )
     job.add_stage(source_stage)
 
@@ -526,6 +530,7 @@ def create_test_pipeline(
         stage_id="transform",
         operator_config=transform_config,
         parallelism=(min_workers, max_workers),
+        worker_resources=test_resources,
     )
     job.add_stage(transform_stage, upstream_stages=["source"])
 
@@ -535,6 +540,7 @@ def create_test_pipeline(
         stage_id="sink",
         operator_config=sink_config,
         parallelism=(1, 2),
+        worker_resources=test_resources,
     )
     job.add_stage(sink_stage, upstream_stages=["transform"])
 
@@ -576,6 +582,9 @@ def create_multi_stage_pipeline(
         config=JobConfig(queue_type=QueueType.TANSU),
     )
 
+    # Low CPU requirements for test parallelism
+    test_resources = {"num_cpus": 0.1, "num_gpus": 0, "memory": 100 * 1024**2}
+
     # Source stage
     source_config = TestSourceConfig(
         num_records=num_records,
@@ -586,6 +595,7 @@ def create_multi_stage_pipeline(
         stage_id="source",
         operator_config=source_config,
         parallelism=(1, 1),
+        worker_resources=test_resources,
     )
     job.add_stage(source_stage)
 
@@ -597,6 +607,7 @@ def create_multi_stage_pipeline(
             stage_id=stage_id,
             operator_config=PassthroughConfig(),
             parallelism=(min_workers, max_workers),
+            worker_resources=test_resources,
         )
         job.add_stage(transform_stage, upstream_stages=[prev_stage])
         prev_stage = stage_id
@@ -607,6 +618,7 @@ def create_multi_stage_pipeline(
         stage_id="sink",
         operator_config=sink_config,
         parallelism=(1, 2),
+        worker_resources=test_resources,
     )
     job.add_stage(sink_stage, upstream_stages=[prev_stage])
 

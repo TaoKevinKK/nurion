@@ -56,6 +56,12 @@ from confluent_kafka.admin import AdminClient, NewTopic
 from tansu_py import BrokerConfig, BrokerError, BrokerEventHandler, TansuBroker
 
 from solstice.queue.backend import Record
+from solstice.testing.fault_injection import (
+    check_fault,
+    FAULT_QUEUE_PRODUCE,
+    FAULT_QUEUE_FETCH,
+    FAULT_QUEUE_COMMIT,
+)
 from solstice.utils.logging import create_ray_logger
 from solstice.utils.network import find_free_port
 
@@ -332,6 +338,9 @@ class TansuQueueClient:
         partition: Optional[int] = None,
     ) -> int:
         """Produce a message to a topic."""
+        # Fault injection point (no-op in production)
+        check_fault(FAULT_QUEUE_PRODUCE)
+
         if self._producer is None:
             raise RuntimeError("Client not started")
 
@@ -397,6 +406,8 @@ class TansuQueueClient:
             partition: Partition to fetch from
             group_id: Consumer group ID (should match commit_offset calls)
         """
+        # Fault injection point (no-op in production)
+        check_fault(FAULT_QUEUE_FETCH)
         consumer = self._get_consumer(topic, partition=partition, group_id=group_id)
 
         # Only seek if offset is explicitly specified
@@ -436,6 +447,9 @@ class TansuQueueClient:
         partition: int = 0,
     ) -> None:
         """Commit the consumer offset for a consumer group."""
+        # Fault injection point (no-op in production)
+        check_fault(FAULT_QUEUE_COMMIT)
+
         consumer = self._get_consumer(topic, partition=partition, group_id=group)
         tp = TopicPartition(topic, partition, offset)
 

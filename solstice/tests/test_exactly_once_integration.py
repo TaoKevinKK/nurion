@@ -39,10 +39,11 @@ from solstice.core import (
 )
 from solstice.core.models import Split, SplitPayload
 from solstice.core.sink_operator import SinkOperator
+import os
+
 from solstice.queue import QueueType
 from solstice.testing import (
-    FaultInjector,
-    set_fault_injector,
+    reset_fault_injector,
     FAULT_BEFORE_MARK_PROCESSED,
 )
 
@@ -268,9 +269,9 @@ class TestFaultInjection:
         _clear_sink_storage(storage_id)
 
         # Set up fault injection - fail on 6th mark_processed call
-        injector = FaultInjector(enabled=True)
-        injector.fail_after(FAULT_BEFORE_MARK_PROCESSED, count=5)
-        set_fault_injector(injector)
+        os.environ["SOLSTICE_FAULT_INJECTION"] = "1"
+        os.environ["SOLSTICE_FAULT_BEFORE_MARK_PROCESSED_AFTER"] = "5"
+        reset_fault_injector()
 
         try:
             # First run: will crash on offset 5
@@ -318,7 +319,8 @@ class TestFaultInjection:
             assert len(storage_after_crash) == 6
 
             # Disable fault injection for recovery
-            injector.enabled = False
+            os.environ["SOLSTICE_FAULT_INJECTION"] = "0"
+            reset_fault_injector()
 
             # Second run: recovery
             config2 = _IdempotentSinkConfig(
@@ -356,7 +358,9 @@ class TestFaultInjection:
             assert final_storage == set(range(10))
 
         finally:
-            set_fault_injector(None)
+            os.environ.pop("SOLSTICE_FAULT_INJECTION", None)
+            os.environ.pop("SOLSTICE_FAULT_BEFORE_MARK_PROCESSED_AFTER", None)
+            reset_fault_injector()
 
     def test_at_least_once_dedup_works_same_as_exactly_once(self, clean_storage, temp_state_dir):
         """AT_LEAST_ONCE uses the same offset-based dedup as EXACTLY_ONCE within a run.

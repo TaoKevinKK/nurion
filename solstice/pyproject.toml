@@ -139,6 +139,8 @@ filterwarnings = [
 markers = [
     "integration: marks integration tests",
     "distributed: marks distributed tests (multi-worker Ray pipelines)",
+    "stability: marks stability tests with deterministic fault injection",
+    "chaos: marks chaos engineering tests with random failures (may be flaky)",
     "benchmark: marks performance benchmark tests (skipped by default in CI)",
     "slow: marks slow tests (Tansu broker startup ~5s per test)",
     "timeout: marks tests with timeout (requires pytest-timeout)",
