@@ -119,10 +119,13 @@ def _is_ffmpeg_decode_error(exc: Exception) -> bool:
 
 
 def _extract_frames_with_retry(
-    video_path: str, fps: float, jpeg_quality: int
+    video_path: str,
+    fps: float,
+    jpeg_quality: int,
+    use_cache: bool,
 ) -> List[Dict[str, Any]]:
     try:
-        with ensure_local_file(video_path) as local_path:
+        with ensure_local_file(video_path, use_cache=use_cache) as local_path:
             if local_path.stat().st_size == 0:
                 raise RuntimeError(f"Empty video file: {video_path}")
             return _extract_frames_at_fps(local_path, fps=fps, quality=jpeg_quality)
@@ -217,6 +220,9 @@ class VideoSliceConfig(OperatorConfig):
     jpeg_quality: int = 95
     """JPEG quality for extracted frames (1-100)."""
     
+    use_cache: bool = False
+    """Whether to cache downloaded remote videos locally."""
+
     max_rows: Optional[int] = None
     """Maximum rows to process (for testing). None = no limit."""
     
@@ -236,6 +242,7 @@ class VideoSliceOperator(Operator):
         self.video_path_json_key = config.video_path_json_key
         self.skip_missing = config.skip_missing_videos
         self.jpeg_quality = config.jpeg_quality
+        self.use_cache = config.use_cache
         self.max_rows = config.max_rows
         self._processed_count = 0  # Track processed rows
     
@@ -294,7 +301,10 @@ class VideoSliceOperator(Operator):
             
             try:
                 frames = _extract_frames_with_retry(
-                    video_path, fps=self.fps, jpeg_quality=self.jpeg_quality
+                    video_path,
+                    fps=self.fps,
+                    jpeg_quality=self.jpeg_quality,
+                    use_cache=self.use_cache,
                 )
                 for frame in frames:
                     image_bytes = frame["image"]
@@ -380,6 +390,7 @@ def create_job(
         - video_path_json_key: JSON key for video path (default: "mkv")
         - skip_missing_videos: Skip missing videos (default: True)
         - jpeg_quality: JPEG quality 1-100 (default: 95)
+        - use_cache: Cache downloaded remote videos locally (default: False)
         - sink_parallelism: Number of sink workers (default: auto)
         - ray_address: Ray cluster address (default: "ray://localhost:8265")
         - webui_storage_path: SlateDB root path for WebUI (optional)
@@ -413,6 +424,7 @@ def create_job(
     video_path_json_key = config.get("video_path_json_key", "mkv")
     skip_missing_videos = config.get("skip_missing_videos", True)
     jpeg_quality = config.get("jpeg_quality", 95)
+    use_cache = config.get("use_cache", False)
     webui_storage_path = config.get("webui_storage_path")
     sink_parallelism = config.get("sink_parallelism", 0)
     if not sink_parallelism:
@@ -464,6 +476,7 @@ def create_job(
             video_path_json_key=video_path_json_key,
             skip_missing_videos=skip_missing_videos,
             jpeg_quality=jpeg_quality,
+            use_cache=use_cache,
             max_rows=max_rows,
         ),
         parallelism=slice_parallelism,

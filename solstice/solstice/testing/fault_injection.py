@@ -48,6 +48,16 @@ import os
 import random
 
 
+class InjectedFaultError(Exception):
+    """Exception raised by fault injection for testing.
+
+    This is a distinct exception type so retry logic can specifically
+    catch injected faults without catching real programming errors.
+    """
+
+    pass
+
+
 @dataclass
 class FaultConfig:
     """Configuration for a single fault injection point."""
@@ -58,7 +68,7 @@ class FaultConfig:
     fail_once: bool = True  # Only fail once, then stop
 
     # Failure behavior
-    exception_class: type = RuntimeError
+    exception_class: type = InjectedFaultError
     exception_message: str = "Injected fault"
 
     # State
@@ -99,7 +109,7 @@ class FaultInjector:
         self,
         point: str,
         count: int,
-        exception: type = RuntimeError,
+        exception: type = InjectedFaultError,
         message: str = "Injected fault",
     ) -> "FaultInjector":
         """Convenience: fail after N successful calls."""
@@ -116,7 +126,7 @@ class FaultInjector:
         self,
         point: str,
         probability: float,
-        exception: type = RuntimeError,
+        exception: type = InjectedFaultError,
         message: str = "Random injected fault",
     ) -> "FaultInjector":
         """Convenience: fail with given probability."""

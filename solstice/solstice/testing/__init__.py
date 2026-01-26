@@ -17,6 +17,7 @@
 from solstice.testing.fault_injection import (
     FaultInjector,
     FaultConfig,
+    InjectedFaultError,
     check_fault,
     reset_fault_injector,
     is_fault_injection_enabled,
@@ -35,6 +36,7 @@ from solstice.testing.fault_injection import (
 __all__ = [
     "FaultInjector",
     "FaultConfig",
+    "InjectedFaultError",
     "check_fault",
     "reset_fault_injector",
     "is_fault_injection_enabled",

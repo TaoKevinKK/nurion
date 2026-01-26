@@ -37,6 +37,11 @@ from typing import Dict, Optional
 from slatedb import ClosedError, SlateDB
 
 from solstice.state.protocols import PartitionStateStore
+from solstice.testing.fault_injection import (
+    check_fault,
+    FAULT_STATE_STORE_GET,
+    FAULT_STATE_STORE_PUT,
+)
 from solstice.utils.logging import create_ray_logger
 
 
@@ -130,6 +135,9 @@ class SlateDBPartitionStateStore(PartitionStateStore):
 
     def get(self, partition_id: int, key: bytes) -> Optional[bytes]:
         """Get a value from partition state."""
+        # Fault injection point (no-op in production)
+        check_fault(FAULT_STATE_STORE_GET)
+
         db = self._check_partition(partition_id)
         try:
             return db.get(key)
@@ -161,6 +169,9 @@ class SlateDBPartitionStateStore(PartitionStateStore):
         Args:
             writes: List of (partition_id, key, value) tuples
         """
+        # Fault injection point (no-op in production)
+        check_fault(FAULT_STATE_STORE_PUT)
+
         # Group writes by partition
         by_partition: dict[int, list[tuple[bytes, bytes]]] = {}
         for partition_id, key, value in writes:

@@ -62,6 +62,14 @@ from abc import abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Iterator, Optional
 
+from confluent_kafka import KafkaException
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    RetryCallState,
+)
 
 from solstice.core.models import Split
 from solstice.core.stage_master import (
@@ -84,6 +92,14 @@ from solstice.utils.logging import create_ray_logger
 if TYPE_CHECKING:
     from solstice.core.stage import Stage
     from solstice.core.split_payload_store import SplitPayloadStore
+
+# Import InjectedFaultError for testing - this is raised by FaultInjector
+from solstice.testing.fault_injection import InjectedFaultError
+
+# Exceptions that indicate transient failures and should be retried.
+# InjectedFaultError is included for fault injection testing.
+# In production, Kafka/Tansu errors raise KafkaException.
+_RETRYABLE_EXCEPTIONS = (KafkaException, OSError, TimeoutError, InjectedFaultError)
 
 
 @dataclass
@@ -304,14 +320,14 @@ class SourceMaster(StageMaster):
                     consecutive_backpressure_pauses = 0
 
             try:
-                await self._produce_split(split)
+                await self._produce_split_with_retry(split)
                 self._splits_produced += 1
 
                 if self._splits_produced % 100 == 0:
                     self.logger.info(f"Produced {self._splits_produced} splits")
 
             except Exception as e:
-                self.logger.error(f"Error producing split {split.split_id}: {e}")
+                self.logger.error(f"Failed to produce split {split.split_id} after retries: {e}")
                 self._failed = True
                 self._failure_message = str(e)
                 raise
@@ -330,23 +346,50 @@ class SourceMaster(StageMaster):
         if not self._source_client:
             return
 
-        try:
-            from solstice.core.stage_master import QueueMessage
+        from solstice.core.stage_master import QueueMessage
 
-            # Send EOF to each partition
-            source_partitions = self.config.max_workers
-            for partition in range(source_partitions):
-                eof_message = QueueMessage.create_eof(partition=partition)
-                self._source_client.produce(
-                    self._source_topic,
-                    eof_message.to_bytes(),
-                    partition=partition,
+        # Send EOF to each partition with retry logic
+        source_partitions = self.config.max_workers
+
+        for partition in range(source_partitions):
+            eof_message = QueueMessage.create_eof(partition=partition)
+            try:
+                await self._produce_eof_with_retry(eof_message, partition)
+            except Exception as e:
+                # Best effort EOF delivery - continue to next partition
+                self.logger.warning(
+                    f"Failed to send EOF to partition {partition} after retries: {e}"
                 )
-            self.logger.info(
-                f"Source {self.stage_id} sent EOF marker to {source_partitions} partition(s)"
+
+        self.logger.info(
+            f"Source {self.stage_id} sent EOF marker to {source_partitions} partition(s)"
+        )
+
+    async def _produce_eof_with_retry(self, eof_message: "QueueMessage", partition: int) -> None:
+        """Produce EOF message with retry logic."""
+
+        def before_sleep_callback(retry_state: RetryCallState) -> None:
+            exc = retry_state.outcome.exception() if retry_state.outcome else None
+            self.logger.warning(
+                f"Retry {retry_state.attempt_number}/3 sending EOF to partition {partition}: {exc}"
             )
-        except Exception as e:
-            self.logger.warning(f"Failed to send EOF to source queue: {e}")
+
+        @retry(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=0.1, min=0.1, max=1.0),
+            retry=retry_if_exception_type(_RETRYABLE_EXCEPTIONS),
+            before_sleep=before_sleep_callback,
+            reraise=True,
+        )
+        async def _do_produce() -> None:
+            assert self._source_client is not None
+            self._source_client.produce(
+                self._source_topic,
+                eof_message.to_bytes(),
+                partition=partition,
+            )
+
+        await _do_produce()
 
     async def _check_backpressure_before_produce(self) -> bool:
         """Check if we should pause production due to downstream backpressure.
@@ -400,6 +443,27 @@ class SourceMaster(StageMaster):
         # This ensures recovered workers will also be notified
         if self._worker_manager:
             await self._worker_manager.notify_upstream_finished()
+
+    async def _produce_split_with_retry(self, split: Split) -> None:
+        """Produce a split with retry logic for transient failures."""
+
+        def before_sleep_callback(retry_state: RetryCallState) -> None:
+            exc = retry_state.outcome.exception() if retry_state.outcome else None
+            self.logger.warning(
+                f"Retry {retry_state.attempt_number}/3 producing split {split.split_id}: {exc}"
+            )
+
+        @retry(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=0.1, min=0.1, max=1.0),
+            retry=retry_if_exception_type(_RETRYABLE_EXCEPTIONS),
+            before_sleep=before_sleep_callback,
+            reraise=True,
+        )
+        async def _do_produce() -> None:
+            await self._produce_split(split)
+
+        await _do_produce()
 
     async def _produce_split(self, split: Split) -> None:
         """Produce a split to the source queue.

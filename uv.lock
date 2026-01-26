@@ -655,6 +655,15 @@ wheels = [
 ]
 
 [[package]]
+name = "dill"
+version = "0.4.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/81/e1/56027a71e31b02ddc53c7d65b01e68edf64dea2932122fe7746a516f75d5/dill-0.4.1.tar.gz", hash = "sha256:423092df4182177d4d8ba8290c8a5b640c66ab35ec7da59ccfa00f6fa3eea5fa", size = 187315, upload-time = "2026-01-19T02:36:56.85Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1e/77/dc8c558f7593132cf8fefec57c4f60c83b16941c574ac5f619abb3ae7933/dill-0.4.1-py3-none-any.whl", hash = "sha256:1e1ce33e978ae97fcfcff5638477032b801c46c7c65cf717f95fbc2248f79a9d", size = 120019, upload-time = "2026-01-19T02:36:55.663Z" },
+]
+
+[[package]]
 name = "distlib"
 version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2401,6 +2410,21 @@ wheels = [
 ]
 
 [[package]]
+name = "pytest-isolate"
+version = "0.0.13"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "dill" },
+    { name = "filelock" },
+    { name = "pytest" },
+    { name = "tblib" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f2/60/b431cc5995cc07953446fb96c8675fed0db4759a95d949726584746733c0/pytest_isolate-0.0.13.tar.gz", hash = "sha256:108fd19a62e09f7c71ff212229c69fbdec3632137dce7da2cdfe7926faf9a13b", size = 16058, upload-time = "2025-09-08T15:19:31.731Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/74/c1/bd71f2f80f027625d221d3774245bdec8f77f57854261727f477d5a03161/pytest_isolate-0.0.13-py3-none-any.whl", hash = "sha256:17a50bc5f14ff37b48c150f926e9656e8b18ea87df66182a131051e673c28ed0", size = 14275, upload-time = "2025-09-08T15:19:30.837Z" },
+]
+
+[[package]]
 name = "pytest-timeout"
 version = "2.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2853,6 +2877,7 @@ dependencies = [
     { name = "sqlalchemy" },
     { name = "sse-starlette" },
     { name = "tansu-py" },
+    { name = "tenacity" },
     { name = "uvicorn" },
 ]
 
@@ -2870,6 +2895,7 @@ dev = [
     { name = "pydantic-settings" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "pytest-isolate" },
     { name = "pytest-timeout" },
     { name = "requests" },
     { name = "ruff" },
@@ -2881,7 +2907,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1.7" },
-    { name = "confluent-kafka", specifier = ">=2.6.0" },
+    { name = "confluent-kafka", specifier = ">=2.10.0" },
     { name = "duckdb", specifier = ">=1.1.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "fsspec", extras = ["s3"], specifier = ">=2024.6.0" },
@@ -2898,6 +2924,7 @@ requires-dist = [
     { name = "sqlalchemy", specifier = ">=2.0.0" },
     { name = "sse-starlette", specifier = ">=1.8.0" },
     { name = "tansu-py", editable = "solstice/tansu-py" },
+    { name = "tenacity", specifier = ">=8.2.0" },
     { name = "uvicorn", specifier = ">=0.34.0" },
 ]
 
@@ -2915,6 +2942,7 @@ dev = [
     { name = "pydantic-settings", specifier = ">=2.11.0" },
     { name = "pytest", specifier = ">=8.3.4" },
     { name = "pytest-asyncio", specifier = ">=0.24.0" },
+    { name = "pytest-isolate", specifier = ">=0.0.12" },
     { name = "pytest-timeout", specifier = ">=2.3.1" },
     { name = "requests", specifier = ">=2.32.0" },
     { name = "ruff", specifier = ">=0.14.0" },
@@ -3014,6 +3042,15 @@ wheels = [
 name = "tansu-py"
 version = "0.1.0"
 source = { editable = "solstice/tansu-py" }
+
+[[package]]
+name = "tblib"
+version = "3.2.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f4/8a/14c15ae154895cc131174f858c707790d416c444fc69f93918adfd8c4c0b/tblib-3.2.2.tar.gz", hash = "sha256:e9a652692d91bf4f743d4a15bc174c0b76afc750fe8c7b6d195cc1c1d6d2ccec", size = 35046, upload-time = "2025-11-12T12:21:16.572Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/02/be/5d2d47b1fb58943194fb59dcf222f7c4e35122ec0ffe8c36e18b5d728f0b/tblib-3.2.2-py3-none-any.whl", hash = "sha256:26bdccf339bcce6a88b2b5432c988b266ebbe63a4e593f6b578b1d2e723d2b76", size = 12893, upload-time = "2025-11-12T12:21:14.407Z" },
+]
 
 [[package]]
 name = "tenacity"

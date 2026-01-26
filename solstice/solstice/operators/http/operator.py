@@ -26,6 +26,13 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, Optional, Type
 
 import aiohttp
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    RetryCallState,
+)
 
 from solstice.core.operator import Operator, OperatorConfig
 from solstice.core.models import Split, SplitPayload
@@ -241,74 +248,82 @@ class HttpOperator(Operator):
             rate_limit_acquired = True
 
         session = await self._ensure_session()
-        last_error: Optional[Exception] = None
 
         try:
-            for attempt in range(self._http_config.max_retries + 1):
-                try:
-                    async with session.request(method, url, **kwargs) as response:
-                        # Check if status code should trigger retry
-                        if response.status in self._http_config.retry_on_status:
-                            body = await response.text()
-                            raise RetryableError(
-                                f"HTTP {response.status}: {body[:200]}",
-                                status_code=response.status,
-                            )
-
-                        # Check for other error status codes
-                        if response.status >= 400:
-                            body = await response.text()
-                            raise aiohttp.ClientResponseError(
-                                response.request_info,
-                                response.history,
-                                status=response.status,
-                                message=f"HTTP {response.status}: {body[:200]}",
-                            )
-
-                        # Success
-                        self._circuit_breaker.record_success()
-                        return await response.json()
-
-                except RetryableError as e:
-                    last_error = e
-                    if attempt < self._http_config.max_retries:
-                        backoff = self._http_config.retry_backoff * (2**attempt)
-                        self.logger.warning(
-                            f"Retry {attempt + 1}/{self._http_config.max_retries} "
-                            f"for {url}: {e}, backoff {backoff}s"
-                        )
-                        await asyncio.sleep(backoff)
-                    else:
-                        self._circuit_breaker.record_failure()
-                        raise
-
-                except asyncio.TimeoutError as e:
-                    last_error = e
-                    if attempt < self._http_config.max_retries:
-                        backoff = self._http_config.retry_backoff * (2**attempt)
-                        self.logger.warning(
-                            f"Timeout retry {attempt + 1}/{self._http_config.max_retries} "
-                            f"for {url}, backoff {backoff}s"
-                        )
-                        await asyncio.sleep(backoff)
-                    else:
-                        self._circuit_breaker.record_failure()
-                        raise RetryableError(f"Request timed out after retries: {url}")
-
-                except aiohttp.ClientError:
-                    # Non-retryable client errors
-                    self._circuit_breaker.record_failure()
-                    raise
-
-            # Should not reach here, but just in case
-            if last_error:
-                raise last_error
-            raise RuntimeError("Unexpected state in HTTP request")
-
+            return await self._request_with_retry(session, method, url, **kwargs)
+        except (RetryableError, asyncio.TimeoutError):
+            self._circuit_breaker.record_failure()
+            raise
+        except aiohttp.ClientError:
+            self._circuit_breaker.record_failure()
+            raise
         finally:
             # Release rate limit (local, fast)
             if rate_limit_acquired and self._local_limiter:
                 self._local_limiter.release()
+
+    def _create_retry_decorator(self) -> Any:
+        """Create a tenacity retry decorator with current config."""
+
+        def before_sleep_callback(retry_state: RetryCallState) -> None:
+            exc = retry_state.outcome.exception() if retry_state.outcome else None
+            self.logger.warning(
+                f"Retry {retry_state.attempt_number}/{self._http_config.max_retries} failed: {exc}"
+            )
+
+        return retry(
+            stop=stop_after_attempt(self._http_config.max_retries + 1),
+            wait=wait_exponential(
+                multiplier=self._http_config.retry_backoff,
+                min=self._http_config.retry_backoff,
+                max=self._http_config.retry_backoff * 8,
+            ),
+            retry=retry_if_exception_type((RetryableError, asyncio.TimeoutError)),
+            before_sleep=before_sleep_callback,
+            reraise=True,
+        )
+
+    async def _request_with_retry(
+        self,
+        session: aiohttp.ClientSession,
+        method: str,
+        url: str,
+        **kwargs: Any,
+    ) -> dict:
+        """Make HTTP request with tenacity retry logic."""
+        # Create and apply retry decorator dynamically
+        retry_decorator = self._create_retry_decorator()
+
+        @retry_decorator
+        async def _do_request() -> dict:
+            async with session.request(method, url, **kwargs) as response:
+                # Check if status code should trigger retry
+                if response.status in self._http_config.retry_on_status:
+                    body = await response.text()
+                    raise RetryableError(
+                        f"HTTP {response.status}: {body[:200]}",
+                        status_code=response.status,
+                    )
+
+                # Check for other error status codes
+                if response.status >= 400:
+                    body = await response.text()
+                    raise aiohttp.ClientResponseError(
+                        response.request_info,
+                        response.history,
+                        status=response.status,
+                        message=f"HTTP {response.status}: {body[:200]}",
+                    )
+
+                # Success
+                assert self._circuit_breaker is not None
+                self._circuit_breaker.record_success()
+                return await response.json()
+
+        try:
+            return await _do_request()
+        except asyncio.TimeoutError:
+            raise RetryableError(f"Request timed out after retries: {url}")
 
     def process_split(
         self, split: Split, payload: Optional[SplitPayload] = None
