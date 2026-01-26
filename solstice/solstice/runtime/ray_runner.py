@@ -42,9 +42,9 @@ if TYPE_CHECKING:
     from solstice.webui.job_webui import JobWebUI
     from solstice.webui.storage import JobStorage
     from solstice.webui.runtime_server import EmbeddedWebUIServer
+from solstice.core.stage import StageRuntime
 from solstice.core.stage_master import (
     StageMaster,
-    StageConfig,
     QueueEndpoint,
 )
 from solstice.operators.sources.source import SourceMaster
@@ -280,21 +280,13 @@ class RayJobRunner:
             upstream_ids = self._reverse_dag.get(stage_id, [])
             is_source = not upstream_ids
 
-            # Build config from stage settings (same for source and regular stages)
-            config = self._build_stage_config(stage)
-
-            # Set state push config (for WebUI metrics)
-            config.state_endpoint = self._state_push.endpoint
-            config.state_topic = self._state_push.topic
+            # Determine upstream info (None for source stages)
+            upstream_endpoint: Optional[QueueEndpoint] = None
+            upstream_topic: Optional[str] = None
 
             if not is_source:
                 # Non-source stage: get upstream endpoint
                 # TODO: Implement multi-upstream support (currently only uses first upstream)
-                # For stages with multiple upstreams (e.g., dedupe receiving from cc_iterate
-                # and doc_registry), a proper implementation would:
-                # 1. Create consumers for all upstream topics
-                # 2. Merge messages from all sources
-                # 3. Track EOF markers from each source
                 if len(upstream_ids) > 1:
                     self.logger.warning(
                         f"Stage {stage_id} has {len(upstream_ids)} upstreams but "
@@ -307,12 +299,14 @@ class RayJobRunner:
                 if not upstream_master._running:
                     await upstream_master.start()
 
-                # Set upstream queue config
-                config.upstream_endpoint = upstream_master._output_endpoint
-                config.upstream_topic = upstream_master._output_topic
+                upstream_endpoint = upstream_master._output_endpoint
+                upstream_topic = upstream_master._output_topic
+
+            # Build immutable StageRuntime with all info
+            runtime = self._build_stage_runtime(stage, upstream_endpoint, upstream_topic)
 
             # Create master using operator_config.master_class (or default StageMaster)
-            master = self._create_master(stage, config)
+            master = self._create_master(stage, runtime)
             self._masters[stage_id] = master
             self.logger.info(f"Created {type(master).__name__} for stage {stage_id}")
 
@@ -347,20 +341,28 @@ class RayJobRunner:
             if downstream_refs:
                 upstream_master.set_downstream_stage_refs(downstream_refs)
 
-    def _build_stage_config(self, stage: "Stage") -> StageConfig:
-        """Build StageConfig from stage settings including worker resources."""
-        worker_res = stage.worker_resources or {}
-        return StageConfig(
+    def _build_stage_runtime(
+        self,
+        stage: "Stage",
+        upstream_endpoint: Optional[QueueEndpoint] = None,
+        upstream_topic: Optional[str] = None,
+    ) -> StageRuntime:
+        """Build StageRuntime from job and runner configuration.
+
+        Args:
+            stage: The stage being configured
+            upstream_endpoint: Queue endpoint for upstream stage (None for source)
+            upstream_topic: Queue topic for upstream stage (None for source)
+        """
+        return StageRuntime(
             queue_type=self.queue_type,
-            min_workers=stage.min_parallelism,
-            max_workers=stage.max_parallelism,
-            num_cpus=worker_res.get("num_cpus", 1.0),
-            num_gpus=worker_res.get("num_gpus", 0.0),
-            memory_mb=int(worker_res.get("memory", 0) / (1024**2)),
-            lineage_sample_rate=self.job.config.webui.lineage_sample_rate,
             shared_broker_endpoint=self._shared_broker_endpoint,
+            upstream_endpoint=upstream_endpoint,
+            upstream_topic=upstream_topic,
+            state_endpoint=self._state_push.endpoint,
+            state_topic=self._state_push.topic,
             semantic_guarantee=self.job.config.semantic_guarantee,
-            partition_count=stage.output_partitions,  # None = auto based on max_workers
+            lineage_sample_rate=self.job.config.webui.lineage_sample_rate,
         )
 
     def _stage_info(self, stage: "Stage") -> Dict[str, Any]:
@@ -374,12 +376,18 @@ class RayJobRunner:
         }
 
     def _create_master(
-        self, stage: "Stage", config: StageConfig
+        self,
+        stage: "Stage",
+        runtime: StageRuntime,
     ) -> Union[StageMaster, SourceMaster]:
         """Create appropriate master for a stage.
 
         Uses operator_config.master_class if specified, otherwise defaults
         to StageMaster.
+
+        Args:
+            stage: The stage definition
+            runtime: Immutable runtime parameters
         """
         master_class = stage.operator_config.master_class
 
@@ -394,7 +402,7 @@ class RayJobRunner:
             job_id=self.job.job_id,
             stage=stage,
             payload_store=self._payload_store,
-            config=config,
+            runtime=runtime,
         )
 
     def _get_topological_order(self) -> List[str]:

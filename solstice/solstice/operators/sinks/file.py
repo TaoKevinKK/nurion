@@ -27,7 +27,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from solstice.core.models import Split, SplitPayload
-from solstice.core.operator import OperatorConfig
+from solstice.core.operator import OperatorConfig, OperatorRuntime, operator
 from solstice.core.sink_operator import SinkOperator
 
 
@@ -45,6 +45,7 @@ class FileSinkConfig(OperatorConfig):
     """Number of records to buffer before flushing."""
 
 
+@operator(FileSinkConfig)
 class FileSink(SinkOperator):
     """Sink that writes records to a local path with exactly-once support.
 
@@ -55,8 +56,8 @@ class FileSink(SinkOperator):
     - On rollback(), the staging file is deleted
     """
 
-    def __init__(self, config: FileSinkConfig):
-        super().__init__(config)
+    def __init__(self, config: FileSinkConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         if not config.output_path:
             raise ValueError("output_path is required for FileSink")
 
@@ -252,7 +253,3 @@ class FileSink(SinkOperator):
                 else:
                     row["value"] = record_value
                 writer.writerow(row)
-
-
-# Set operator_class after class definition
-FileSinkConfig.operator_class = FileSink

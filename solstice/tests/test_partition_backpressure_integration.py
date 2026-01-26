@@ -28,13 +28,12 @@ from dataclasses import dataclass
 
 from solstice.core.stage_master import (
     StageMaster,
-    StageConfig,
-    QueueType,
     QueueEndpoint,
     QueueMessage,
 )
-from solstice.core.stage import Stage
-from solstice.core.operator import OperatorConfig, Operator
+from solstice.core.stage import Stage, StageRuntime
+from solstice.core.operator import OperatorConfig, Operator, OperatorRuntime, SemanticGuarantee
+from solstice.queue import QueueType
 
 
 @dataclass
@@ -47,8 +46,8 @@ class _TestOperatorConfig(OperatorConfig):
 class _TestOperator(Operator):
     """Test operator that passes through data (prefixed with _ to avoid pytest collection)."""
 
-    def __init__(self, config: _TestOperatorConfig):
-        super().__init__(config)
+    def __init__(self, config: _TestOperatorConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self._closed = False
 
     def process_split(self, split, payload):
@@ -69,6 +68,24 @@ class _TestOperator(Operator):
 # Set operator_class after class definition
 _TestOperatorConfig.operator_class = _TestOperator
 
+
+def _make_runtime(
+    queue_type: QueueType = QueueType.MEMORY,
+    shared_broker_endpoint: "QueueEndpoint" = None,
+) -> StageRuntime:
+    """Create a StageRuntime for tests."""
+    return StageRuntime(
+        queue_type=queue_type,
+        shared_broker_endpoint=shared_broker_endpoint,
+        upstream_endpoint=None,
+        upstream_topic=None,
+        state_endpoint=None,
+        state_topic=None,
+        semantic_guarantee=SemanticGuarantee.AT_LEAST_ONCE,
+        lineage_sample_rate=0.0,
+    )
+
+
 # Mark all tests in this module as integration tests
 pytestmark = pytest.mark.integration
 
@@ -79,11 +96,7 @@ class TestMultiPartitionParallelConsumption:
     @pytest.mark.asyncio
     async def test_partition_count_matches_worker_count(self, payload_store, ray_cluster):
         """Test that partition count matches worker count configuration."""
-        config = StageConfig(
-            queue_type=QueueType.MEMORY,
-            max_workers=8,
-            min_workers=1,
-        )
+        runtime = _make_runtime(queue_type=QueueType.MEMORY)
         stage = Stage(
             stage_id="test_stage",
             operator_config=_TestOperatorConfig(),
@@ -93,7 +106,7 @@ class TestMultiPartitionParallelConsumption:
         master = StageMaster(
             job_id="test_job",
             stage=stage,
-            config=config,
+            runtime=runtime,
             payload_store=payload_store,
         )
 
@@ -121,29 +134,6 @@ class TestPartitionSkewScenario:
         import math
         import asyncio
         from confluent_kafka import Producer, Consumer, TopicPartition
-
-        config = StageConfig(
-            queue_type=QueueType.TANSU,
-            max_workers=4,
-            partition_count=3,
-            shared_broker_endpoint=QueueEndpoint(
-                queue_type=QueueType.TANSU,
-                host="127.0.0.1",
-                port=tansu_backend.port,
-                storage_url="memory://tansu/",
-            ),
-        )
-        stage = Stage(
-            stage_id="test_stage",
-            operator_config=_TestOperatorConfig(),
-            parallelism=4,
-        )
-        master = StageMaster(
-            job_id="test_job",
-            stage=stage,
-            config=config,
-            payload_store=payload_store,
-        )
 
         topic = "test_topic"
         tansu_backend.create_topic(topic, partitions=3)
@@ -184,14 +174,35 @@ class TestPartitionSkewScenario:
 
         await asyncio.to_thread(_commit_offsets)
 
-        master.upstream_endpoint = QueueEndpoint(
+        # Create runtime with upstream info included
+        upstream_endpoint = QueueEndpoint(
             queue_type=QueueType.TANSU,
             host="127.0.0.1",
             port=tansu_backend.port,
             storage_url="memory://tansu/",
         )
-        master.upstream_topic = topic
-        master._consumer_group = consumer_group
+        runtime = StageRuntime(
+            queue_type=QueueType.TANSU,
+            shared_broker_endpoint=upstream_endpoint,
+            upstream_endpoint=upstream_endpoint,
+            upstream_topic=topic,
+            state_endpoint=None,
+            state_topic=None,
+            semantic_guarantee=SemanticGuarantee.AT_LEAST_ONCE,
+            lineage_sample_rate=0.0,
+        )
+        stage = Stage(
+            stage_id="test_stage",
+            operator_config=_TestOperatorConfig(),
+            parallelism=4,
+            output_partitions=3,
+        )
+        master = StageMaster(
+            job_id="test_job",
+            stage=stage,
+            runtime=runtime,
+            payload_store=payload_store,
+        )
 
         # Initialize backpressure monitor with the upstream config
         await master.start()
@@ -227,11 +238,9 @@ class TestBackpressureEndToEnd:
     @pytest.mark.asyncio
     async def test_backpressure_propagation_chain(self, payload_store, ray_cluster):
         """Test backpressure propagation through a chain of stages."""
+        runtime = _make_runtime(queue_type=QueueType.MEMORY)
+
         # Stage 1: Source
-        config1 = StageConfig(
-            queue_type=QueueType.MEMORY,
-            max_workers=2,
-        )
         stage1 = Stage(
             stage_id="source",
             operator_config=_TestOperatorConfig(),
@@ -240,15 +249,11 @@ class TestBackpressureEndToEnd:
         master1 = StageMaster(
             job_id="test_job",
             stage=stage1,
-            config=config1,
+            runtime=runtime,
             payload_store=payload_store,
         )
 
         # Stage 2: Process (middle)
-        config2 = StageConfig(
-            queue_type=QueueType.MEMORY,
-            max_workers=2,
-        )
         stage2 = Stage(
             stage_id="process",
             operator_config=_TestOperatorConfig(),
@@ -257,15 +262,11 @@ class TestBackpressureEndToEnd:
         master2 = StageMaster(
             job_id="test_job",
             stage=stage2,
-            config=config2,
+            runtime=runtime,
             payload_store=payload_store,
         )
 
         # Stage 3: Sink (slow)
-        config3 = StageConfig(
-            queue_type=QueueType.MEMORY,
-            max_workers=1,
-        )
         stage3 = Stage(
             stage_id="sink",
             operator_config=_TestOperatorConfig(),
@@ -274,7 +275,7 @@ class TestBackpressureEndToEnd:
         master3 = StageMaster(
             job_id="test_job",
             stage=stage3,
-            config=config3,
+            runtime=runtime,
             payload_store=payload_store,
         )
 
@@ -305,10 +306,8 @@ class TestBackpressureEndToEnd:
         self, payload_store, tansu_backend, ray_cluster
     ):
         """Test that backpressure clears when downstream processing catches up."""
-        config = StageConfig(
+        runtime = _make_runtime(
             queue_type=QueueType.TANSU,
-            max_workers=2,
-            backpressure_threshold_lag=5000,
             shared_broker_endpoint=QueueEndpoint(
                 queue_type=QueueType.TANSU,
                 host="127.0.0.1",
@@ -320,11 +319,12 @@ class TestBackpressureEndToEnd:
             stage_id="test_stage",
             operator_config=_TestOperatorConfig(),
             parallelism=2,
+            backpressure_threshold_lag=5000,
         )
         master = StageMaster(
             job_id="test_job",
             stage=stage,
-            config=config,
+            runtime=runtime,
             payload_store=payload_store,
         )
 
@@ -395,10 +395,8 @@ class TestCombinedScenarios:
     @pytest.mark.asyncio
     async def test_skew_and_backpressure_together(self, payload_store, tansu_backend, ray_cluster):
         """Test scenario where both skew and backpressure occur."""
-        config = StageConfig(
+        runtime = _make_runtime(
             queue_type=QueueType.TANSU,
-            max_workers=4,
-            partition_count=4,
             shared_broker_endpoint=QueueEndpoint(
                 queue_type=QueueType.TANSU,
                 host="127.0.0.1",
@@ -410,11 +408,12 @@ class TestCombinedScenarios:
             stage_id="test_stage",
             operator_config=_TestOperatorConfig(),
             parallelism=4,
+            output_partitions=4,
         )
         master = StageMaster(
             job_id="test_job",
             stage=stage,
-            config=config,
+            runtime=runtime,
             payload_store=payload_store,
         )
 
@@ -462,22 +461,18 @@ class TestCombinedScenarios:
     async def test_dynamic_workers_with_partitions(self, payload_store, ray_cluster):
         """Test dynamic worker scaling with multiple partitions."""
         # Use smaller resource requirements to fit within local Ray cluster
-        config = StageConfig(
-            queue_type=QueueType.MEMORY,
-            max_workers=4,
-            min_workers=1,
-            partition_count=4,
-            num_cpus=0.25,  # Smaller CPU requirement per worker
-        )
+        runtime = _make_runtime(queue_type=QueueType.MEMORY)
         stage = Stage(
             stage_id="test_stage",
             operator_config=_TestOperatorConfig(),
-            parallelism=4,
+            parallelism=(1, 4),
+            output_partitions=4,
+            worker_resources={"num_cpus": 0.25},  # Smaller CPU requirement per worker
         )
         master = StageMaster(
             job_id="test_job",
             stage=stage,
-            config=config,
+            runtime=runtime,
             payload_store=payload_store,
         )
 
@@ -511,43 +506,35 @@ class TestDownstreamBackpressurePropagation:
         This test verifies the fix for the TypeError that occurred when awaiting
         the synchronous get_status() method.
         """
-        # Create upstream stage config
-        upstream_config = StageConfig(
-            queue_type=QueueType.MEMORY,
-            max_workers=2,
-            min_workers=1,
-            partition_count=2,
-            num_cpus=0.25,
-        )
+        runtime = _make_runtime(queue_type=QueueType.MEMORY)
+
+        # Create upstream stage
         upstream_stage = Stage(
             stage_id="upstream_stage",
             operator_config=_TestOperatorConfig(),
-            parallelism=2,
+            parallelism=(1, 2),
+            output_partitions=2,
+            worker_resources={"num_cpus": 0.25},
         )
         upstream_master = StageMaster(
             job_id="test_job",
             stage=upstream_stage,
-            config=upstream_config,
+            runtime=runtime,
             payload_store=payload_store,
         )
 
-        # Create downstream stage config
-        downstream_config = StageConfig(
-            queue_type=QueueType.MEMORY,
-            max_workers=2,
-            min_workers=1,
-            partition_count=2,
-            num_cpus=0.25,
-        )
+        # Create downstream stage
         downstream_stage = Stage(
             stage_id="downstream_stage",
             operator_config=_TestOperatorConfig(),
-            parallelism=2,
+            parallelism=(1, 2),
+            output_partitions=2,
+            worker_resources={"num_cpus": 0.25},
         )
         downstream_master = StageMaster(
             job_id="test_job",
             stage=downstream_stage,
-            config=downstream_config,
+            runtime=runtime,
             payload_store=payload_store,
         )
 
@@ -585,44 +572,36 @@ class TestDownstreamBackpressurePropagation:
     @pytest.mark.asyncio
     async def test_backpressure_propagates_when_downstream_active(self, payload_store, ray_cluster):
         """Test that backpressure from downstream stage is detected by upstream."""
+        runtime = _make_runtime(queue_type=QueueType.MEMORY)
+
         # Create upstream stage
-        upstream_config = StageConfig(
-            queue_type=QueueType.MEMORY,
-            max_workers=2,
-            min_workers=1,
-            partition_count=2,
-            num_cpus=0.25,
-            backpressure_threshold_queue_size=10,  # Low threshold for testing
-        )
         upstream_stage = Stage(
             stage_id="upstream",
             operator_config=_TestOperatorConfig(),
-            parallelism=2,
+            parallelism=(1, 2),
+            output_partitions=2,
+            worker_resources={"num_cpus": 0.25},
+            backpressure_threshold_queue_size=10,  # Low threshold for testing
         )
         upstream_master = StageMaster(
             job_id="test_job",
             stage=upstream_stage,
-            config=upstream_config,
+            runtime=runtime,
             payload_store=payload_store,
         )
 
         # Create downstream stage
-        downstream_config = StageConfig(
-            queue_type=QueueType.MEMORY,
-            max_workers=2,
-            min_workers=1,
-            partition_count=2,
-            num_cpus=0.25,
-        )
         downstream_stage = Stage(
             stage_id="downstream",
             operator_config=_TestOperatorConfig(),
-            parallelism=2,
+            parallelism=(1, 2),
+            output_partitions=2,
+            worker_resources={"num_cpus": 0.25},
         )
         downstream_master = StageMaster(
             job_id="test_job",
             stage=downstream_stage,
-            config=downstream_config,
+            runtime=runtime,
             payload_store=payload_store,
         )
 

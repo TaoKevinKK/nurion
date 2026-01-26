@@ -47,7 +47,7 @@ from typing import ClassVar, List, Optional, Type
 import pyarrow as pa
 
 from solstice.core.models import Split, SplitPayload
-from solstice.core.operator import Operator, OperatorConfig
+from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime, operator
 from solstice.compute import DuckDBEngine
 
 
@@ -99,8 +99,8 @@ class ShuffleOperator(Operator):
     # Column name for target partition (added to output)
     PARTITION_COLUMN = "__target_partition"
 
-    def __init__(self, config: ShuffleOperatorConfig):
-        super().__init__(config)
+    def __init__(self, config: ShuffleOperatorConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self.shuffle_config = config
 
         # DuckDB engine for partition computation (created lazily)
@@ -206,9 +206,10 @@ class RepartitionConfig(ShuffleOperatorConfig):
     - Preparing for a join operation
     """
 
-    operator_class: ClassVar[Type["RepartitionOperator"]] = None  # type: ignore[assignment]  # Set below
+    pass
 
 
+@operator(RepartitionConfig)
 class RepartitionOperator(ShuffleOperator):
     """Operator that repartitions data by key without transformation.
 
@@ -220,13 +221,12 @@ class RepartitionOperator(ShuffleOperator):
         stage = Stage("repartition", config, parallelism=8)
     """
 
+    def __init__(self, config: RepartitionConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
+
     def process_data(self, table: pa.Table) -> Optional[pa.Table]:
         """Pass through data unchanged."""
         return table
-
-
-# Set the operator class reference
-RepartitionConfig.operator_class = RepartitionOperator
 
 
 def split_by_partition(table: pa.Table) -> dict[int, pa.Table]:

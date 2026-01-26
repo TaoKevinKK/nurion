@@ -31,13 +31,13 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import ray
 
-from solstice.core.stage_config import StageConfig, QueueEndpoint
-from solstice.core.stage_worker import StageWorker
+from solstice.core.models import QueueEndpoint
+from solstice.core.stage_worker import StageWorker, WorkerRuntime
 from solstice.core.managers.partition_manager import PartitionManager
 from solstice.utils.logging import create_ray_logger
 
 if TYPE_CHECKING:
-    from solstice.core.stage import Stage
+    from solstice.core.stage import Stage, StageRuntime
     from solstice.core.split_payload_store import SplitPayloadStore
 
 
@@ -54,7 +54,7 @@ class WorkerManager:
         self,
         job_id: str,
         stage: "Stage",
-        config: StageConfig,
+        runtime: "StageRuntime",
         partition_manager: PartitionManager,
         payload_store: "SplitPayloadStore",
         output_endpoint: Optional[QueueEndpoint],
@@ -67,7 +67,7 @@ class WorkerManager:
         self._job_id = job_id
         self._stage = stage
         self._stage_id = stage.stage_id
-        self._config = config
+        self._runtime = runtime
         self._partition_manager = partition_manager
         self._payload_store = payload_store
         self._output_endpoint = output_endpoint
@@ -83,11 +83,11 @@ class WorkerManager:
         self._worker_tasks: Dict[str, ray.ObjectRef] = {}
 
         # Target worker count (used during startup for correct partition assignment)
-        self._target_worker_count: int = config.min_workers
+        self._target_worker_count: int = stage.min_parallelism
 
-        # Upstream config (can be updated for SourceMaster)
-        self._upstream_endpoint = config.upstream_endpoint
-        self._upstream_topic = config.upstream_topic
+        # Upstream config (from runtime)
+        self._upstream_endpoint = runtime.upstream_endpoint
+        self._upstream_topic = runtime.upstream_topic
 
         # Upstream tracking
         self._upstream_finished = False
@@ -147,7 +147,7 @@ class WorkerManager:
         if not is_min_worker:
             # Optional worker - check if it started successfully
             is_ready = await self._check_worker_ready(
-                worker_id, self._config.worker_ready_timeout_seconds
+                worker_id, self._stage.worker_ready_timeout_seconds
             )
             if not is_ready:
                 self._logger.warning(
@@ -192,33 +192,40 @@ class WorkerManager:
 
         # Build resource requirements
         resources = {}
-        if self._config.num_cpus > 0:
-            resources["num_cpus"] = self._config.num_cpus
-        if self._config.num_gpus > 0:
-            resources["num_gpus"] = self._config.num_gpus
-        if self._config.memory_mb > 0:
-            resources["memory"] = self._config.memory_mb * 1024 * 1024
+        if self._stage.num_cpus > 0:
+            resources["num_cpus"] = self._stage.num_cpus
+        if self._stage.num_gpus > 0:
+            resources["num_gpus"] = self._stage.num_gpus
+        if self._stage.memory_mb > 0:
+            resources["memory"] = self._stage.memory_mb * 1024 * 1024
+
+        # Build immutable WorkerRuntime
+        runtime = WorkerRuntime(
+            worker_id=worker_id,
+            job_id=self._job_id,
+            stage_id=self._stage_id,
+            assigned_partitions=tuple(assigned_partitions),
+            consumer_group=self._consumer_group,
+            semantic_guarantee=self._runtime.semantic_guarantee,
+            upstream_endpoint=self._upstream_endpoint,
+            upstream_topic=self._upstream_topic,
+            output_endpoint=self._output_endpoint,
+            output_topic=self._output_topic,
+            state_endpoint=self._state_endpoint,
+            state_topic=self._state_topic,
+            lineage_sample_rate=self._lineage_sample_rate,
+            batch_size=self._stage.batch_size,
+            commit_batch_size=self._stage.commit_batch_size,
+        )
 
         # Create worker actor
         worker = StageWorker.options(  # type: ignore[attr-defined]
             name=f"{self._stage_id}:{worker_id}",
             **resources,
         ).remote(
-            worker_id=worker_id,
-            job_id=self._job_id,
+            runtime=runtime,
             stage=self._stage,
-            upstream_endpoint=self._upstream_endpoint,
-            upstream_topic=self._upstream_topic,
-            output_endpoint=self._output_endpoint,
-            output_topic=self._output_topic,
-            consumer_group=self._consumer_group,
-            assigned_partitions=assigned_partitions,
-            config=self._config,
             payload_store=self._payload_store,
-            state_endpoint=self._state_endpoint,
-            state_topic=self._state_topic,
-            lineage_sample_rate=self._lineage_sample_rate,
-            semantic_guarantee=self._config.semantic_guarantee,
         )
 
         self._workers[worker_id] = worker
@@ -258,7 +265,7 @@ class WorkerManager:
             except Exception as e:
                 self._logger.debug(f"Worker {worker_id} not ready yet: {e}")
 
-            await asyncio.sleep(self._config.worker_spawn_retry_delay_seconds)
+            await asyncio.sleep(self._stage.worker_spawn_retry_delay_seconds)
 
         return False
 

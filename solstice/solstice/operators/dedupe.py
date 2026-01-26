@@ -36,10 +36,11 @@ without maintaining in-memory caches. This ensures:
 """
 
 from dataclasses import dataclass, field
-from typing import ClassVar, List, Optional, Type
+from typing import List, Optional
 
 import pyarrow as pa
 
+from solstice.core.operator import OperatorRuntime, operator
 from solstice.operators.shuffle import ShuffleOperator, ShuffleOperatorConfig
 
 
@@ -60,14 +61,13 @@ class HashDedupeConfig(ShuffleOperatorConfig):
     keep: str = "first"  # "first" or "last"
     # state_store_path is inherited from ShuffleOperatorConfig
 
-    operator_class: ClassVar[Type["HashDedupeOperator"]] = None  # type: ignore[assignment]  # Set below
-
     def __post_init__(self):
         # dedup_keys are also partition_keys for shuffle
         if self.dedup_keys and not self.partition_keys:
             self.partition_keys = self.dedup_keys
 
 
+@operator(HashDedupeConfig)
 class HashDedupeOperator(ShuffleOperator):
     """Stateless operator for exact hash-based deduplication.
 
@@ -94,8 +94,8 @@ class HashDedupeOperator(ShuffleOperator):
         - On recovery, SlateDB state is restored automatically
     """
 
-    def __init__(self, config: HashDedupeConfig):
-        super().__init__(config)
+    def __init__(self, config: HashDedupeConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self.dedupe_config = config
 
     @property
@@ -190,7 +190,3 @@ class HashDedupeOperator(ShuffleOperator):
 
         key_str = "|".join(key_parts)
         return hashlib.sha256(key_str.encode()).digest()[:16]
-
-
-# Set the operator class reference
-HashDedupeConfig.operator_class = HashDedupeOperator

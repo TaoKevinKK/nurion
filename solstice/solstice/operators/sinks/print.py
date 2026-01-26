@@ -22,7 +22,7 @@ from typing import Optional
 
 import json
 from solstice.core.models import Split, SplitPayload
-from solstice.core.operator import OperatorConfig
+from solstice.core.operator import OperatorConfig, OperatorRuntime, operator
 from solstice.core.sink_operator import SinkOperator
 
 
@@ -33,11 +33,12 @@ class PrintSinkConfig(OperatorConfig):
     pass  # No configuration needed for PrintSink
 
 
+@operator(PrintSinkConfig)
 class PrintSink(SinkOperator):
     """Sink that prints records to stdout."""
 
-    def __init__(self, config: PrintSinkConfig):
-        super().__init__(config)
+    def __init__(self, config: PrintSinkConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self.logger = logging.getLogger(self.__class__.__name__)
         self.count = 0
 
@@ -50,7 +51,3 @@ class PrintSink(SinkOperator):
         for record in batch.to_records():
             self.logger.info(json.dumps(record.to_dict()))
         return None
-
-
-# Set operator_class after class definition
-PrintSinkConfig.operator_class = PrintSink

@@ -31,7 +31,7 @@ from solstice.runtime.autoscaler import (
     SimpleAutoscaler,
     StageMetrics,
 )
-from solstice.core.stage_master import StageStatus, StageConfig
+from solstice.core.stage_master import StageStatus
 
 
 # ============================================================================
@@ -55,10 +55,10 @@ class MockStageMaster:
         self._running = True
         self._finished = False
 
-        # Config
-        self.config = MagicMock()
-        self.config.min_workers = min_workers
-        self.config.max_workers = max_workers
+        # Stage (replaces config)
+        self.stage = MagicMock()
+        self.stage.min_parallelism = min_workers
+        self.stage.max_parallelism = max_workers
 
         # For lag simulation
         self._input_queue_lag = input_queue_lag
@@ -78,7 +78,7 @@ class MockStageMaster:
 
     async def scale_up(self, count: int) -> int:
         """Scale up by spawning new workers."""
-        to_add = min(count, self.config.max_workers - len(self._workers))
+        to_add = min(count, self.stage.max_parallelism - len(self._workers))
         for _ in range(to_add):
             worker_id = f"worker_{len(self._workers)}"
             self._workers[worker_id] = MagicMock()
@@ -86,7 +86,7 @@ class MockStageMaster:
 
     async def scale_down(self, count: int) -> int:
         """Scale down by removing workers."""
-        to_remove = min(count, len(self._workers) - self.config.min_workers)
+        to_remove = min(count, len(self._workers) - self.stage.min_parallelism)
         for _ in range(to_remove):
             if self._workers:
                 key = list(self._workers.keys())[-1]
@@ -470,7 +470,9 @@ class TestMetricsCollection:
         source._workers = {"worker_0": MagicMock()}
         source._running = True
         source._finished = False
-        source.config = StageConfig(min_workers=1, max_workers=1)
+        source.stage = MagicMock()
+        source.stage.min_parallelism = 1
+        source.stage.max_parallelism = 1
         source.get_status.return_value = StageStatus(
             stage_id="source",
             worker_count=1,

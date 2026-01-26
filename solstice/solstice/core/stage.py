@@ -12,19 +12,69 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Stage definition and management"""
+"""Stage definition and runtime configuration.
 
+This module contains:
+- Stage: User-defined stage configuration (immutable after creation)
+- StageRuntime: System-assigned runtime parameters (frozen dataclass)
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Union
-import logging
 
-from solstice.core.operator import OperatorConfig
+from solstice.core.operator import OperatorConfig, SemanticGuarantee
+from solstice.queue import QueueType
 
 if TYPE_CHECKING:
-    pass
+    from solstice.core.models import QueueEndpoint
+
+
+# =============================================================================
+# Stage Runtime - System-assigned parameters (immutable after creation)
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class StageRuntime:
+    """Runtime parameters assigned by the runner.
+
+    These are determined when the job starts and remain constant throughout
+    the stage's lifecycle. Immutable (frozen) for distributed safety.
+
+    Attributes:
+        queue_type: Type of queue backend (MEMORY, TANSU)
+        shared_broker_endpoint: Shared Tansu broker endpoint
+        upstream_endpoint: Upstream queue endpoint (None for source stages)
+        upstream_topic: Upstream queue topic name
+        state_endpoint: WebUI state push endpoint
+        state_topic: WebUI state topic name
+        semantic_guarantee: AT_LEAST_ONCE or EXACTLY_ONCE
+        lineage_sample_rate: Sample rate for lineage tracking (0=off, 1=full)
+    """
+
+    queue_type: QueueType
+    shared_broker_endpoint: Optional["QueueEndpoint"] = None
+    upstream_endpoint: Optional["QueueEndpoint"] = None
+    upstream_topic: Optional[str] = None
+    state_endpoint: Optional["QueueEndpoint"] = None
+    state_topic: Optional[str] = None
+    semantic_guarantee: SemanticGuarantee = SemanticGuarantee.AT_LEAST_ONCE
+    lineage_sample_rate: float = 0.0
+
+
+# =============================================================================
+# Stage - User-defined configuration
+# =============================================================================
 
 
 class Stage:
-    """Represents a stage in the processing pipeline"""
+    """Represents a stage in the processing pipeline.
+
+    User-defined configuration that specifies how a stage should behave.
+    Includes operator config, parallelism settings, and worker resources.
+    """
 
     def __init__(
         self,
@@ -33,9 +83,17 @@ class Stage:
         parallelism: Union[int, Tuple[int, int]] = 1,
         output_partitions: Optional[int] = None,
         worker_resources: Optional[Dict[str, float]] = None,
+        # Processing configuration
+        batch_size: int = 100,
+        commit_batch_size: int = 5,
+        # Backpressure thresholds
+        backpressure_threshold_lag: int = 5000,
+        backpressure_threshold_queue_size: int = 1000,
+        # Worker lifecycle
+        worker_ready_timeout_seconds: float = 30.0,
+        worker_spawn_retry_delay_seconds: float = 2.0,
     ):
-        """
-        Initialize a stage.
+        """Initialize a stage.
 
         Args:
             stage_id: Unique identifier for the stage
@@ -47,6 +105,12 @@ class Stage:
                 - Tuple[int, int]: (min_workers, max_workers) for auto-scaling
             output_partitions: Output queue partitions. None = auto based on max_workers
             worker_resources: Resource requirements per worker (num_cpus, num_gpus, memory)
+            batch_size: Number of messages to fetch per batch
+            commit_batch_size: Commit offset after every N messages processed
+            backpressure_threshold_lag: Lag threshold for backpressure activation
+            backpressure_threshold_queue_size: Queue size threshold for backpressure
+            worker_ready_timeout_seconds: Max time to wait for worker to be ready
+            worker_spawn_retry_delay_seconds: Delay between spawn retries
 
         Examples:
             >>> # Fixed 4 workers, no scaling
@@ -54,7 +118,6 @@ class Stage:
 
             >>> # Auto-scaling between 2 and 10 workers
             >>> Stage('process', MyOperatorConfig(param=value), parallelism=(2, 10))
-
         """
         self.stage_id = stage_id
         self.operator_config = operator_config
@@ -62,11 +125,9 @@ class Stage:
 
         # Parse parallelism parameter
         if isinstance(parallelism, int):
-            # Fixed parallelism
             self.min_parallelism = parallelism
             self.max_parallelism = parallelism
         elif isinstance(parallelism, tuple) and len(parallelism) == 2:
-            # Dynamic parallelism with (min, max)
             min_p, max_p = parallelism
             if min_p > max_p:
                 raise ValueError(
@@ -84,15 +145,40 @@ class Stage:
             "memory": 500 * 1024**2,  # 500MB
         }
 
-        self.logger = logging.getLogger(f"Stage-{stage_id}")
+        # Processing configuration
+        self.batch_size = batch_size
+        self.commit_batch_size = commit_batch_size
+
+        # Backpressure thresholds
+        self.backpressure_threshold_lag = backpressure_threshold_lag
+        self.backpressure_threshold_queue_size = backpressure_threshold_queue_size
+
+        # Worker lifecycle
+        self.worker_ready_timeout_seconds = worker_ready_timeout_seconds
+        self.worker_spawn_retry_delay_seconds = worker_spawn_retry_delay_seconds
 
     @property
     def parallelism(self) -> Tuple[int, int]:
-        """Get parallelism configuration"""
+        """Get parallelism configuration as (min, max)."""
         return (self.min_parallelism, self.max_parallelism)
 
+    @property
+    def num_cpus(self) -> float:
+        """CPU resources per worker."""
+        return self.worker_resources.get("num_cpus", 0.5)
+
+    @property
+    def num_gpus(self) -> float:
+        """GPU resources per worker."""
+        return self.worker_resources.get("num_gpus", 0.0)
+
+    @property
+    def memory_mb(self) -> int:
+        """Memory (MB) per worker."""
+        return int(self.worker_resources.get("memory", 0) / (1024**2))
+
     def to_dict(self) -> Dict[str, Any]:
-        """Convert stage to dictionary representation"""
+        """Convert stage to dictionary representation."""
         return {
             "stage_id": self.stage_id,
             "operator_config": self.operator_config.to_dict(),
@@ -100,4 +186,6 @@ class Stage:
             "min_parallelism": self.min_parallelism,
             "output_partitions": self.output_partitions,
             "worker_resources": self.worker_resources,
+            "batch_size": self.batch_size,
+            "commit_batch_size": self.commit_batch_size,
         }

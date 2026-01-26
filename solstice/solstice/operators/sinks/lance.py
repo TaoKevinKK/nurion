@@ -17,15 +17,20 @@
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional, Set
 
 import pyarrow as pa
 from lance.dataset import write_dataset
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    before_sleep_log,
+)
 
 from solstice.core.models import Split, SplitPayload
-from solstice.core.operator import OperatorConfig
+from solstice.core.operator import OperatorConfig, OperatorRuntime, operator
 from solstice.core.sink_operator import SinkOperator
 
 
@@ -58,11 +63,12 @@ class LanceSinkConfig(OperatorConfig):
     """Maximum backoff in seconds between retries."""
 
 
+@operator(LanceSinkConfig)
 class LanceSink(SinkOperator):
     """Sink that writes records to a Lance table."""
 
-    def __init__(self, config: LanceSinkConfig):
-        super().__init__(config)
+    def __init__(self, config: LanceSinkConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         if not config.table_path:
             raise ValueError("table_path is required for LanceSink")
 
@@ -145,33 +151,9 @@ class LanceSink(SinkOperator):
 
             table = pa.table(dict(zip(table.column_names, new_columns)), schema=new_schema)
 
-        attempt = 0
-        while True:
-            try:
-                write_dataset(
-                    table,
-                    self.table_path,
-                    mode=self.mode if self.table is None else "append",
-                    storage_options=self.storage_options,
-                )
-                break
-            except Exception as e:
-                attempt += 1
-                if attempt >= self.write_retry_attempts:
-                    self.logger.error("Lance write failed after %s attempts: %s", attempt, e)
-                    raise
-                backoff = min(
-                    self.write_retry_backoff_s * (2 ** (attempt - 1)),
-                    self.write_retry_max_backoff_s,
-                )
-                self.logger.warning(
-                    "Lance write failed (attempt %s/%s): %s. Retrying in %.2fs.",
-                    attempt,
-                    self.write_retry_attempts,
-                    e,
-                    backoff,
-                )
-                time.sleep(backoff)
+        # Write with retry using tenacity
+        self._write_with_retry(table)
+
         if self.table is None:
             self.mode = "append"
 
@@ -183,10 +165,28 @@ class LanceSink(SinkOperator):
         self.logger.info(f"Flushed {len(self.buffer)} records to Lance table{blob_info}")
         self.buffer.clear()
 
+    def _write_with_retry(self, table: pa.Table) -> None:
+        """Write table to Lance with retry logic."""
+
+        @retry(
+            stop=stop_after_attempt(self.write_retry_attempts),
+            wait=wait_exponential(
+                multiplier=self.write_retry_backoff_s,
+                max=self.write_retry_max_backoff_s,
+            ),
+            before_sleep=before_sleep_log(self.logger, logging.WARNING),
+            reraise=True,
+        )
+        def _do_write() -> None:
+            write_dataset(
+                table,
+                self.table_path,
+                mode=self.mode if self.table is None else "append",
+                storage_options=self.storage_options,
+            )
+
+        _do_write()
+
     def close(self) -> None:
         """Flush remaining buffered records when closing."""
         self._flush()
-
-
-# Set operator_class after class definition
-LanceSinkConfig.operator_class = LanceSink

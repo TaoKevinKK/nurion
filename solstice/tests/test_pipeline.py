@@ -29,7 +29,7 @@ import pyarrow as pa
 
 from solstice.core.job import Job, JobConfig
 from solstice.core.stage import Stage
-from solstice.core.operator import Operator, OperatorConfig
+from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime
 from solstice.core.models import Split, SplitPayload
 from solstice.queue import QueueType
 from solstice.runtime.ray_runner import RayJobRunner
@@ -46,8 +46,8 @@ pytestmark = pytest.mark.asyncio(loop_scope="function")
 class MockSourceOperator(Operator):
     """Source operator that generates test data."""
 
-    def __init__(self, config: "MockSourceConfig"):
-        super().__init__(config)
+    def __init__(self, config: "MockSourceConfig", runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self._generated = 0
 
     def generate_splits(self) -> List[Split]:
@@ -127,8 +127,8 @@ MockSourceConfig.master_class = MockSourceMaster
 class MockTransformOperator(Operator):
     """Transform operator that modifies data."""
 
-    def __init__(self, config: "MockTransformConfig"):
-        super().__init__(config)
+    def __init__(self, config: "MockTransformConfig", runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self._processed = 0
 
     def process_split(
@@ -175,8 +175,8 @@ class MockSinkOperator(Operator):
     # Shared storage for test verification
     collected_records: List[Dict] = []
 
-    def __init__(self, config: "MockSinkConfig"):
-        super().__init__(config)
+    def __init__(self, config: "MockSinkConfig", runtime: OperatorRuntime):
+        super().__init__(config, runtime)
 
     def process_split(
         self, split: Split, payload: Optional[SplitPayload]

@@ -22,12 +22,12 @@ from typing import TYPE_CHECKING, Iterable, Iterator, Optional
 import lance
 
 from solstice.core.models import Split, SplitPayload
-from solstice.core.operator import OperatorConfig
+from solstice.core.operator import OperatorConfig, OperatorRuntime, operator
 from solstice.core.source_operator import SourceOperator
-from solstice.operators.sources.source import SourceMaster, SourceConfig
+from solstice.operators.sources.source import SourceMaster
 
 if TYPE_CHECKING:
-    from solstice.core.stage import Stage
+    from solstice.core.stage import Stage, StageRuntime
     from solstice.core.split_payload_store import SplitPayloadStore
 
 
@@ -39,7 +39,7 @@ class LanceTableSourceConfig(OperatorConfig):
     and the master (for planning splits).
 
     Note: queue_type and tansu_storage_url are configured via JobConfig,
-    not here. The runner passes these to the master via SourceConfig.
+    not here. The runner passes these to the master via StageRuntime.
     """
 
     dataset_uri: str
@@ -68,11 +68,12 @@ def _get_lance_storage_options(uri: str) -> Optional[dict]:
     return None
 
 
+@operator(LanceTableSourceConfig)
 class LanceTableSource(SourceOperator):
     """Source operator for reading from Lance tables."""
 
-    def __init__(self, config: LanceTableSourceConfig):
-        super().__init__(config)
+    def __init__(self, config: LanceTableSourceConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         if not config.dataset_uri:
             raise ValueError("dataset_uri is required for LanceTableSource")
         self.dataset_uri: str = config.dataset_uri
@@ -104,10 +105,6 @@ class LanceTableSource(SourceOperator):
         self.dataset_uri = None  # type: ignore[assignment]
 
 
-# Set operator_class after class definition
-LanceTableSourceConfig.operator_class = LanceTableSource
-
-
 class LanceSourceMaster(SourceMaster):
     """Source master for Lance tables.
 
@@ -123,7 +120,7 @@ class LanceSourceMaster(SourceMaster):
         job_id: str,
         stage: "Stage",
         payload_store: "SplitPayloadStore",
-        config: Optional[SourceConfig] = None,
+        runtime: "StageRuntime",
     ):
         # Get Lance-specific config from stage.operator_config
         operator_cfg = stage.operator_config
@@ -132,8 +129,7 @@ class LanceSourceMaster(SourceMaster):
                 f"LanceSourceMaster requires LanceTableSourceConfig, got {type(operator_cfg)}"
             )
 
-        # Use config from runner (contains queue_type, parallelism, resources)
-        super().__init__(job_id, stage, payload_store, config)
+        super().__init__(job_id, stage, payload_store, runtime)
 
         # Lance-specific configuration
         self.dataset_uri: str = operator_cfg.dataset_uri

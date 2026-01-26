@@ -36,11 +36,12 @@ The output is shuffled by band_hash so that similar documents
 
 import hashlib
 from dataclasses import dataclass
-from typing import ClassVar, Optional, Type
+from typing import Optional
 
 import numpy as np
 import pyarrow as pa
 
+from solstice.core.operator import OperatorRuntime, operator
 from solstice.operators.shuffle import ShuffleOperator, ShuffleOperatorConfig
 
 
@@ -90,7 +91,7 @@ class MinHashComputeConfig(ShuffleOperatorConfig):
     shingle_size: int = 5  # Character n-gram size
     seed: int = 42
 
-    operator_class: ClassVar[Type["MinHashComputeOperator"]] = None  # type: ignore[assignment]  # Set below
+    # operator_class is set by @operator decorator below
 
     def __post_init__(self):
         # Partition by band_hash for LSH bucketing
@@ -103,6 +104,7 @@ class MinHashComputeConfig(ShuffleOperatorConfig):
             )
 
 
+@operator(MinHashComputeConfig)
 class MinHashComputeOperator(ShuffleOperator):
     """Operator for computing MinHash signatures.
 
@@ -122,8 +124,8 @@ class MinHashComputeOperator(ShuffleOperator):
         stage = Stage("minhash", config, parallelism=8)
     """
 
-    def __init__(self, config: MinHashComputeConfig):
-        super().__init__(config)
+    def __init__(self, config: MinHashComputeConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self.minhash_config = config
 
         # Pre-compute hash function parameters
@@ -230,10 +232,6 @@ class MinHashComputeOperator(ShuffleOperator):
     def _hash_band(self, band_values: np.ndarray) -> int:
         """Hash a band of signature values using deterministic hash."""
         return _hash_bytes(band_values.tobytes())
-
-
-# Set the operator class reference
-MinHashComputeConfig.operator_class = MinHashComputeOperator
 
 
 def jaccard_similarity(sig1: bytes, sig2: bytes) -> float:

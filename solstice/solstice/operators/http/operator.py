@@ -34,7 +34,7 @@ from tenacity import (
     RetryCallState,
 )
 
-from solstice.core.operator import Operator, OperatorConfig
+from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime
 from solstice.core.models import Split, SplitPayload
 from solstice.operators.http.circuit_breaker import (
     CircuitBreaker,
@@ -125,8 +125,8 @@ class HttpOperator(Operator):
                 return payload.with_new_data(result)
     """
 
-    def __init__(self, config: HttpOperatorConfig):
-        super().__init__(config)
+    def __init__(self, config: HttpOperatorConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self._http_config = config
         self._session: Optional[aiohttp.ClientSession] = None
         self._local_limiter: Optional[LocalRateLimiter] = None

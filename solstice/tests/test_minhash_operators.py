@@ -17,6 +17,7 @@
 import pyarrow as pa
 import pytest
 
+from tests.conftest import make_operator_runtime
 from solstice.core.models import Split, SplitPayload
 from solstice.operators.minhash import (
     MinHashComputeConfig,
@@ -54,7 +55,7 @@ class TestMinHashComputeOperator:
             num_bands=8,
             num_partitions=4,
         )
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
 
         result = operator.process_split(sample_split, payload)
 
@@ -94,7 +95,7 @@ class TestMinHashComputeOperator:
             seed=42,
             num_partitions=4,
         )
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
 
         result = operator.process_split(sample_split, payload)
         result_table = result.to_table()
@@ -140,7 +141,7 @@ class TestMinHashComputeOperator:
             num_bands=8,
             num_partitions=4,
         )
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
 
         result = operator.process_split(sample_split, payload)
 
@@ -171,10 +172,10 @@ class TestMinHashComputeOperator:
             num_partitions=4,
         )
 
-        operator1 = config.setup()
+        operator1 = config.setup(make_operator_runtime())
         result1 = operator1.process_split(sample_split, payload)
 
-        operator2 = config.setup()
+        operator2 = config.setup(make_operator_runtime())
         result2 = operator2.process_split(sample_split, payload)
 
         # Signatures should be identical
@@ -214,7 +215,7 @@ class TestCandidatePairOperator:
         payload = SplitPayload(data=table, split_id="test")
 
         config = CandidatePairConfig(similarity_threshold=0.5)
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
 
         result = operator.process_split(sample_split, payload)
 
@@ -245,7 +246,7 @@ class TestCandidatePairOperator:
         payload = SplitPayload(data=table, split_id="test")
 
         config = CandidatePairConfig(similarity_threshold=0.5)
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
 
         result = operator.process_split(sample_split, payload)
 
@@ -276,7 +277,7 @@ class TestCandidatePairOperator:
         payload = SplitPayload(data=table, split_id="test")
 
         config = CandidatePairConfig(similarity_threshold=0.5)
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
 
         result = operator.process_split(sample_split, payload)
 
@@ -316,7 +317,7 @@ class TestCandidatePairOperator:
         payload2 = SplitPayload(data=table2, split_id="test2")
 
         config = CandidatePairConfig(similarity_threshold=0.5)
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
 
         result1 = operator.process_split(sample_split, payload1)
         result2 = operator.process_split(sample_split, payload2)
@@ -352,7 +353,7 @@ class TestCandidatePairOperator:
             similarity_threshold=0.5,
             max_pairs_per_bucket=50,  # Limit pairs
         )
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
 
         result = operator.process_split(sample_split, payload)
 

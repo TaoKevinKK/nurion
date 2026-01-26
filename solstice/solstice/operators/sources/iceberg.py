@@ -21,7 +21,7 @@ from typing import Optional
 from pyiceberg.catalog import load_catalog
 
 from solstice.core.models import Split, SplitPayload
-from solstice.core.operator import OperatorConfig
+from solstice.core.operator import OperatorConfig, OperatorRuntime, operator
 from solstice.core.source_operator import SourceOperator
 
 
@@ -45,11 +45,12 @@ class IcebergSourceConfig(OperatorConfig):
     """Specific snapshot ID to read from."""
 
 
+@operator(IcebergSourceConfig)
 class IcebergSource(SourceOperator):
     """Source operator for reading from Iceberg tables."""
 
-    def __init__(self, config: IcebergSourceConfig):
-        super().__init__(config)
+    def __init__(self, config: IcebergSourceConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self.catalog_uri: Optional[str] = config.catalog_uri
         self.table_name: Optional[str] = config.table_name
         self.filter_expr: Optional[str] = config.filter
@@ -91,7 +92,3 @@ class IcebergSource(SourceOperator):
         self.scan = None
         self.table = None
         self.catalog = None
-
-
-# Set operator_class after class definition
-IcebergSourceConfig.operator_class = IcebergSource

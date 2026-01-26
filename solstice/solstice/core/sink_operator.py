@@ -16,7 +16,7 @@
 
 from typing import Any, Dict, Optional
 
-from solstice.core.operator import Operator, OperatorConfig
+from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime
 
 
 class SinkOperator(Operator):
@@ -31,8 +31,8 @@ class SinkOperator(Operator):
     For simpler at-least-once semantics, just implement `process_split()`.
     """
 
-    def __init__(self, config: OperatorConfig):
-        super().__init__(config)
+    def __init__(self, config: OperatorConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         # Track pending writes for exactly-once
         self._pending_commit_id: Optional[str] = None
         self._commit_offset: Dict[str, Any] = {}

@@ -27,7 +27,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-from solstice.core.stage_config import FailurePolicy, FailureTracker
+from solstice.core.models import FailurePolicy, FailureTracker
 from solstice.core.managers.partition_manager import PartitionManager
 from solstice.core.managers.worker_manager import WorkerManager
 from solstice.utils.logging import create_ray_logger

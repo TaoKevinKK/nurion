@@ -12,7 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Base operator interface with EasyConfig pattern and partition-aware state management.
+"""Base operator interface with config/runtime separation.
+
+Design Principles:
+- OperatorConfig: User-defined configuration, immutable after creation
+- OperatorRuntime: System-assigned runtime parameters, immutable after creation
+- Operator: Stateless processor with optional state store for exactly-once semantics
 
 Operators support two semantic guarantees (configured at job level):
 - AT_LEAST_ONCE (default): No dedup overhead, messages may be processed multiple times
@@ -48,6 +53,7 @@ if TYPE_CHECKING:
 
 
 T = TypeVar("T", bound="Operator")
+C = TypeVar("C", bound="OperatorConfig")
 F = TypeVar("F", bound=Callable[..., Any])
 
 
@@ -67,6 +73,69 @@ class SemanticGuarantee(Enum):
 
     AT_LEAST_ONCE = "at_least_once"
     EXACTLY_ONCE = "exactly_once"
+
+
+# =============================================================================
+# Operator Runtime - System-assigned parameters (immutable after creation)
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class OperatorRuntime:
+    """Runtime parameters assigned by the system.
+
+    These are determined at worker startup and remain constant throughout
+    the operator's lifecycle. Immutable (frozen) for distributed safety.
+
+    Attributes:
+        job_id: Job identifier
+        stage_id: Stage identifier
+        worker_id: Worker identifier (includes partition suffix)
+        partition_id: Partition this operator handles
+        semantic_guarantee: AT_LEAST_ONCE or EXACTLY_ONCE
+    """
+
+    job_id: str
+    stage_id: str
+    worker_id: str
+    partition_id: int
+    semantic_guarantee: SemanticGuarantee = SemanticGuarantee.AT_LEAST_ONCE
+
+
+# =============================================================================
+# Operator Decorator - Auto-bind Config to Operator
+# =============================================================================
+
+
+def operator(config_class: Type[C]) -> Callable[[Type[T]], Type[T]]:
+    """Decorator to bind an Operator class to its Config class.
+
+    This establishes the bidirectional relationship between Config and Operator,
+    eliminating the need for manual `Config.operator_class = Operator` assignment.
+
+    Example:
+        @dataclass
+        class MyOperatorConfig(OperatorConfig):
+            param: str
+
+        @operator(MyOperatorConfig)
+        class MyOperator(Operator):
+            def __init__(self, config: MyOperatorConfig, runtime: OperatorRuntime):
+                super().__init__(config, runtime)
+
+            def process_split(self, split, payload):
+                ...
+
+        # Now MyOperatorConfig.operator_class == MyOperator
+        # And MyOperator.config_class == MyOperatorConfig
+    """
+
+    def decorator(op_class: Type[T]) -> Type[T]:
+        config_class.operator_class = op_class  # type: ignore[attr-defined]
+        op_class.config_class = config_class  # type: ignore[attr-defined]
+        return op_class
+
+    return decorator
 
 
 # =============================================================================
@@ -124,35 +193,36 @@ def is_master_callable(method: Any) -> bool:
 class OperatorConfig(ABC):
     """Base configuration class for operators.
 
-    Subclasses should define their configuration fields as dataclass fields,
-    and set the `operator_class` class variable to the corresponding operator class.
+    User-defined configuration that is immutable after creation.
+    Runtime parameters are passed separately via OperatorRuntime.
+
+    Subclasses should define their configuration fields as dataclass fields.
+    Use the @operator decorator to bind Config to Operator class.
 
     Example:
         @dataclass
         class MyOperatorConfig(OperatorConfig):
-            operator_class = MyOperator
-
             param1: str
             param2: int = 10
 
+        @operator(MyOperatorConfig)
+        class MyOperator(Operator):
+            def __init__(self, config: MyOperatorConfig, runtime: OperatorRuntime):
+                super().__init__(config, runtime)
+
         # Usage:
         config = MyOperatorConfig(param1="value")
-        config.job_id = "job_123"
-        config.stage_id = "stage_0"
-        config.worker_id = "worker_0"
-        config.partition_id = 0
-        operator = config.setup()
+        runtime = OperatorRuntime(
+            job_id="job_123",
+            stage_id="stage_0",
+            worker_id="worker_0",
+            partition_id=0,
+        )
+        operator = config.setup(runtime)
 
     Class Variables:
-        operator_class: The operator class to instantiate
+        operator_class: The operator class to instantiate (set by @operator decorator)
         master_class: The master class to use (None = use default StageMaster)
-
-    Runtime Context (set by runner/worker before setup()):
-        job_id: Job identifier
-        stage_id: Stage identifier
-        worker_id: Worker identifier
-        partition_id: Partition this operator handles
-        semantic_guarantee: AT_LEAST_ONCE or EXACTLY_ONCE
     """
 
     operator_class: ClassVar[Type["Operator"]]
@@ -162,41 +232,21 @@ class OperatorConfig(ABC):
     # Using kw_only=True to allow child classes to have positional required fields
     state_store_path: Optional[str] = field(default=None, kw_only=True)
 
-    # Runtime context - set by runner/worker before setup()
-    # These are NOT constructor args, set via attribute assignment after init
-    # Using init=False to avoid dataclass inheritance ordering issues
-    job_id: Optional[str] = field(default=None, init=False, repr=False)
-    stage_id: Optional[str] = field(default=None, init=False, repr=False)
-    worker_id: Optional[str] = field(default=None, init=False, repr=False)
-    partition_id: Optional[int] = field(default=None, init=False, repr=False)
-    semantic_guarantee: SemanticGuarantee = field(
-        default=SemanticGuarantee.AT_LEAST_ONCE, init=False, repr=False
-    )
-
-    def setup(self) -> "Operator":
+    def setup(self, runtime: OperatorRuntime) -> "Operator":
         """Create and return an operator instance with this configuration.
 
-        Note: job_id, stage_id, worker_id, partition_id should be set on the config
-        before calling setup(). The operator accesses these via config.
+        Args:
+            runtime: Runtime parameters (job_id, stage_id, worker_id, partition_id)
 
         Returns:
             Configured operator instance
         """
-        return self.operator_class(config=self)
+        return self.operator_class(config=self, runtime=runtime)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert config to dictionary representation."""
         result = {}
         for f in fields(self):
-            # Skip runtime context fields
-            if f.name in (
-                "job_id",
-                "stage_id",
-                "worker_id",
-                "partition_id",
-                "semantic_guarantee",
-            ):
-                continue
             value = getattr(self, f.name)
             # Handle nested configs
             if isinstance(value, OperatorConfig):
@@ -209,12 +259,12 @@ class OperatorConfig(ABC):
 class Operator(ABC):
     """Base class for all operators with partition-aware state management.
 
-    Design Principle: Operators should be stateless configuration containers
-    with optional state store for exactly-once semantics.
+    Design Principle: Operators receive immutable config and runtime parameters.
+    Optional state store for exactly-once semantics.
 
     Partition-per-Operator Model:
     - Each partition gets its own Operator instance
-    - partition_id is in config, accessible via self.partition_id
+    - partition_id is in runtime, accessible via self.partition_id
     - State store is used for offset + business state persistence
 
     Offset-based Dedup (for EXACTLY_ONCE):
@@ -225,16 +275,25 @@ class Operator(ABC):
 
     Usage:
         # Worker creates operator per partition
-        config.partition_id = 0
-        config.semantic_guarantee = SemanticGuarantee.EXACTLY_ONCE
-        op = config.setup()
+        runtime = OperatorRuntime(
+            job_id="job_123",
+            stage_id="stage_0",
+            worker_id="worker_0_p0",
+            partition_id=0,
+            semantic_guarantee=SemanticGuarantee.EXACTLY_ONCE,
+        )
+        op = config.setup(runtime)
         op.init_from_state_store()  # Recover last_offset
         # ... process messages ...
         op.mark_processed(offset)
     """
 
-    def __init__(self, config: OperatorConfig):
-        self.config = config
+    # Class variable set by @operator decorator
+    config_class: ClassVar[Type[OperatorConfig]]
+
+    def __init__(self, config: OperatorConfig, runtime: OperatorRuntime):
+        self._config = config
+        self._runtime = runtime
         self.logger = logging.getLogger(self.__class__.__name__)
 
         # State store (created lazily if state_store_path is set)
@@ -253,29 +312,39 @@ class Operator(ABC):
         self.total_processing_time: float = 0.0
 
     @property
-    def worker_id(self) -> Optional[str]:
-        """Worker ID from config (for backward compatibility)."""
-        return self.config.worker_id
+    def config(self) -> OperatorConfig:
+        """User-defined configuration (immutable)."""
+        return self._config
 
     @property
-    def job_id(self) -> Optional[str]:
-        """Job ID from config."""
-        return self.config.job_id
+    def runtime(self) -> OperatorRuntime:
+        """System-assigned runtime parameters (immutable)."""
+        return self._runtime
 
     @property
-    def stage_id(self) -> Optional[str]:
-        """Stage ID from config."""
-        return self.config.stage_id
+    def worker_id(self) -> str:
+        """Worker ID from runtime."""
+        return self._runtime.worker_id
 
     @property
-    def partition_id(self) -> Optional[int]:
-        """Partition ID from config (for partition-per-operator model)."""
-        return self.config.partition_id
+    def job_id(self) -> str:
+        """Job ID from runtime."""
+        return self._runtime.job_id
+
+    @property
+    def stage_id(self) -> str:
+        """Stage ID from runtime."""
+        return self._runtime.stage_id
+
+    @property
+    def partition_id(self) -> int:
+        """Partition ID from runtime (for partition-per-operator model)."""
+        return self._runtime.partition_id
 
     @property
     def semantic_guarantee(self) -> SemanticGuarantee:
-        """Semantic guarantee from config."""
-        return self.config.semantic_guarantee
+        """Semantic guarantee from runtime."""
+        return self._runtime.semantic_guarantee
 
     @property
     def is_exactly_once(self) -> bool:
@@ -286,12 +355,11 @@ class Operator(ABC):
     def state_store(self) -> Optional["PartitionStateStore"]:
         """Lazily create state store from config.
 
-        Returns None if state_store_path is not configured or runtime context
-        (job_id, stage_id) is not set.
+        Returns None if state_store_path is not configured.
         """
         if self._state_store is None:
-            path = self.config.state_store_path
-            if path and self.job_id and self.stage_id:
+            path = self._config.state_store_path
+            if path:
                 from solstice.state import SlateDBPartitionStateStore
 
                 self._state_store = SlateDBPartitionStateStore(
@@ -309,8 +377,6 @@ class Operator(ABC):
                          Multi-partition operators should pass explicit partition_id.
         """
         pid = partition_id if partition_id is not None else self.partition_id
-        if pid is None:
-            return
         if pid in self._acquired_partitions:
             return
         store = self.state_store
@@ -324,20 +390,16 @@ class Operator(ABC):
     # =========================================================================
 
     def init_from_state_store(self) -> None:
-        """Initialize last_offset from state store (for recovery).
-
-        Call this after setting partition_id in config.
-        """
+        """Initialize last_offset from state store (for recovery)."""
         store = self.state_store
-        if store is None or self.partition_id is None:
+        if store is None:
             return
 
         self._ensure_partition_acquired()
-        partition_id = self.partition_id
 
         try:
             # Recover last_offset
-            offset_bytes = store.get(partition_id, OFFSET_KEY)
+            offset_bytes = store.get(self.partition_id, OFFSET_KEY)
             if offset_bytes is not None:
                 self.last_offset = int.from_bytes(offset_bytes, "big", signed=True)
                 self.logger.info(f"Recovered last_offset={self.last_offset}")
@@ -383,11 +445,10 @@ class Operator(ABC):
         self.last_offset = offset
 
         store = self.state_store
-        if store is None or self.partition_id is None:
+        if store is None:
             return
 
         self._ensure_partition_acquired()
-        partition_id = self.partition_id
 
         # Build batch writes
         writes: List[Tuple[int, bytes, bytes]] = []
@@ -395,11 +456,11 @@ class Operator(ABC):
         # Add operator's state updates
         if state_updates:
             for key, value in state_updates:
-                writes.append((partition_id, key, value))
+                writes.append((self.partition_id, key, value))
 
         # Add offset
         offset_bytes = offset.to_bytes(8, "big", signed=True)
-        writes.append((partition_id, OFFSET_KEY, offset_bytes))
+        writes.append((self.partition_id, OFFSET_KEY, offset_bytes))
 
         # Atomic write
         store.put_batch(writes)

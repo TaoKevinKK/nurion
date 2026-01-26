@@ -24,7 +24,7 @@ from typing import Dict, List, Optional
 import ray
 
 from solstice.core.models import Split, SplitPayload
-from solstice.core.operator import Operator, OperatorConfig
+from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime
 
 
 @ray.remote
@@ -131,8 +131,8 @@ class CollectingSink(Operator):
     output to a centralized collector for validation.
     """
 
-    def __init__(self, config: CollectingSinkConfig):
-        super().__init__(config)
+    def __init__(self, config: CollectingSinkConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self._collector_name = config.collector_name
         self._collector = None
 

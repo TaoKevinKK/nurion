@@ -7,10 +7,7 @@ from solstice.operators.sources.lance import (
     LanceTableSourceConfig,
     LanceSourceMaster,
 )
-from solstice.operators.sources.source import (
-    SourceMaster,
-    SourceConfig,
-)
+from solstice.operators.sources.source import SourceMaster
 from solstice.operators.sources.spark import (
     SparkSource,
     SparkSourceConfig,
@@ -34,7 +31,6 @@ __all__ = [
     "LanceSourceMaster",
     # Source base
     "SourceMaster",
-    "SourceConfig",
     # Spark source V1
     "SparkSource",
     "SparkSourceConfig",

@@ -33,12 +33,11 @@ import pyarrow as pa
 import pytest
 from lance.dataset import write_dataset
 
+from tests.conftest import make_operator_runtime, make_stage_runtime
 from solstice.core.models import Split
 from solstice.core.stage import Stage
 from solstice.operators.sources import LanceTableSourceConfig
 from solstice.operators.sources.lance import LanceSourceMaster
-from solstice.operators.sources.source import SourceConfig
-from solstice.queue import QueueType
 
 pytestmark = pytest.mark.integration
 
@@ -98,7 +97,7 @@ class TestLanceSourceLocal:
     def test_lance_source_reads_fragments(self, lance_dataset_local):
         """Test reading Lance dataset fragments."""
         config = LanceTableSourceConfig(dataset_uri=lance_dataset_local, split_size=2)
-        source = config.setup()
+        source = config.setup(make_operator_runtime())
         splits = build_lance_splits(lance_dataset_local, split_size=2)
 
         batches = []
@@ -118,7 +117,7 @@ class TestLanceSourceLocal:
         config = LanceTableSourceConfig(
             dataset_uri=lance_dataset_local, split_size=10, columns=["id", "name"]
         )
-        source = config.setup()
+        source = config.setup(make_operator_runtime())
         splits = build_lance_splits(lance_dataset_local, split_size=10)
         for split in splits:
             split.data_range["columns"] = ["id", "name"]
@@ -163,7 +162,7 @@ class TestLanceSourceS3:
         os.environ["AWS_ALLOW_HTTP"] = "true"
 
         config = LanceTableSourceConfig(dataset_uri=s3_path, split_size=5)
-        source = config.setup()
+        source = config.setup(make_operator_runtime())
 
         splits = build_lance_splits(s3_path, split_size=5, storage_options=s3_storage_options)
 
@@ -206,12 +205,12 @@ class TestLancePipeline:
         from solstice.core.split_payload_store import RaySplitPayloadStore
 
         payload_store = RaySplitPayloadStore(name="test-lance-pipeline_store")
-        source_config = SourceConfig(queue_type=QueueType.MEMORY)
+        runtime = make_stage_runtime()
         master = LanceSourceMaster(
             job_id="test-lance-pipeline",
             stage=source_stage,
             payload_store=payload_store,
-            config=source_config,
+            runtime=runtime,
         )
 
         # Start the full pipeline (creates queues, spawns workers)
@@ -287,12 +286,12 @@ class TestLancePipeline:
         from solstice.core.split_payload_store import RaySplitPayloadStore
 
         payload_store = RaySplitPayloadStore(name="test-lance-s3-pipeline_store")
-        source_config = SourceConfig(queue_type=QueueType.MEMORY)
+        runtime = make_stage_runtime()
         master = LanceSourceMaster(
             job_id="test-lance-s3-pipeline",
             stage=source_stage,
             payload_store=payload_store,
-            config=source_config,
+            runtime=runtime,
         )
 
         await master.start()

@@ -17,7 +17,7 @@
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from solstice.core.operator import Operator, OperatorConfig
+from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime, operator
 from solstice.core.models import Record, Split, SplitPayload
 
 
@@ -29,11 +29,12 @@ class MapOperatorConfig(OperatorConfig):
     """Function to apply to each record's value."""
 
 
+@operator(MapOperatorConfig)
 class MapOperator(Operator):
     """Operator that applies a function to each record"""
 
-    def __init__(self, config: MapOperatorConfig):
-        super().__init__(config)
+    def __init__(self, config: MapOperatorConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
 
         if not callable(config.map_fn):
             raise ValueError("map_fn must be a callable")
@@ -62,10 +63,6 @@ class MapOperator(Operator):
             return None
 
 
-# Set operator_class after class definition
-MapOperatorConfig.operator_class = MapOperator
-
-
 @dataclass
 class MapBatchesOperatorConfig(OperatorConfig):
     """Configuration for MapBatchesOperator."""
@@ -77,11 +74,12 @@ class MapBatchesOperatorConfig(OperatorConfig):
     """If True, return empty payload on error instead of raising."""
 
 
+@operator(MapBatchesOperatorConfig)
 class MapBatchesOperator(Operator):
     """Operator that applies a function to entire batches"""
 
-    def __init__(self, config: MapBatchesOperatorConfig):
-        super().__init__(config)
+    def __init__(self, config: MapBatchesOperatorConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
 
         if not callable(config.map_batches_fn):
             raise ValueError("map_batches_fn must be a callable")
@@ -110,10 +108,6 @@ class MapBatchesOperator(Operator):
                 raise
 
 
-# Set operator_class after class definition
-MapBatchesOperatorConfig.operator_class = MapBatchesOperator
-
-
 @dataclass
 class FlatMapOperatorConfig(OperatorConfig):
     """Configuration for FlatMapOperator."""
@@ -122,11 +116,12 @@ class FlatMapOperatorConfig(OperatorConfig):
     """Function to apply to the batch, returning multiple records."""
 
 
+@operator(FlatMapOperatorConfig)
 class FlatMapOperator(Operator):
     """Operator that applies a function that returns multiple records"""
 
-    def __init__(self, config: FlatMapOperatorConfig):
-        super().__init__(config)
+    def __init__(self, config: FlatMapOperatorConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
 
         if not callable(config.flatmap_fn):
             raise ValueError("flatmap_fn must be a callable")
@@ -146,7 +141,3 @@ class FlatMapOperator(Operator):
         except Exception as e:
             self.logger.error(f"Error flatmapping split {split.split_id}: {e}")
             return None
-
-
-# Set operator_class after class definition
-FlatMapOperatorConfig.operator_class = FlatMapOperator

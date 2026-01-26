@@ -31,7 +31,9 @@ from pyiceberg.catalog.rest import RestCatalog
 from pyiceberg.schema import Schema
 from pyiceberg.types import LongType, NestedField, StringType
 
+from tests.conftest import make_operator_runtime
 from solstice.core.models import Split
+from solstice.core.operator import SemanticGuarantee
 from solstice.core.stage import Stage
 from solstice.operators.sources import IcebergSourceConfig
 
@@ -94,7 +96,7 @@ class TestIcebergSource:
             catalog_uri=iceberg_test_table["catalog_uri"],
             table_name=iceberg_test_table["table_name"],
         )
-        source = config.setup()
+        source = config.setup(make_operator_runtime())
 
         split = Split(
             split_id="split-0",
@@ -126,7 +128,7 @@ class TestIcebergSource:
             table_name=iceberg_test_table["table_name"],
             filter="value > 25",
         )
-        source = config.setup()
+        source = config.setup(make_operator_runtime())
 
         split = Split(
             split_id="split-0",
@@ -162,8 +164,9 @@ class TestIcebergPipeline:
         """
         from dataclasses import dataclass
 
-        from solstice.core.operator import Operator, OperatorConfig
-        from solstice.core.stage_master import StageMaster, StageConfig
+        from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime, operator
+        from solstice.core.stage import StageRuntime
+        from solstice.core.stage_master import StageMaster
         from solstice.queue import QueueType
 
         # Create a simple pass-through operator for testing
@@ -172,9 +175,10 @@ class TestIcebergPipeline:
             catalog_uri: str = ""
             table_name: str = ""
 
+        @operator(PassThroughConfig)
         class PassThroughOperator(Operator):
-            def __init__(self, config, worker_id=None):
-                super().__init__(config, worker_id)
+            def __init__(self, config: PassThroughConfig, runtime: OperatorRuntime):
+                super().__init__(config, runtime)
                 self.catalog_uri = config.catalog_uri
                 self.table_name = config.table_name
 
@@ -184,7 +188,7 @@ class TestIcebergPipeline:
                     catalog_uri=self.catalog_uri,
                     table_name=self.table_name,
                 )
-                source = source_config.setup()
+                source = source_config.setup(make_operator_runtime())
                 return source.process_split(split)
 
             def generate_splits(self):
@@ -202,8 +206,6 @@ class TestIcebergPipeline:
             def close(self):
                 pass
 
-        PassThroughConfig.operator_class = PassThroughOperator
-
         # Create stage
         source_stage = Stage(
             stage_id="iceberg_source",
@@ -216,10 +218,15 @@ class TestIcebergPipeline:
         # Create stage master with Memory queue for testing
         from solstice.core.split_payload_store import RaySplitPayloadStore
 
-        config = StageConfig(
+        runtime = StageRuntime(
             queue_type=QueueType.MEMORY,
-            min_workers=1,
-            max_workers=1,
+            shared_broker_endpoint=None,
+            upstream_endpoint=None,
+            upstream_topic=None,
+            state_endpoint=None,
+            state_topic=None,
+            semantic_guarantee=SemanticGuarantee.AT_LEAST_ONCE,
+            lineage_sample_rate=0.0,
         )
 
         payload_store = RaySplitPayloadStore(name="test-iceberg-store")
@@ -227,8 +234,8 @@ class TestIcebergPipeline:
         master = StageMaster(
             job_id="test-iceberg-pipeline",
             stage=source_stage,
-            config=config,
             payload_store=payload_store,
+            runtime=runtime,
         )
 
         # Start the pipeline

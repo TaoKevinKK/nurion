@@ -71,12 +71,12 @@ from typing import Any, Callable, Dict, Iterator, Optional, TYPE_CHECKING
 
 from solstice.core.models import Split
 from solstice.core.operator import OperatorConfig
-from solstice.core.stage_master import StageMaster, StageConfig
+from solstice.core.stage_master import StageMaster
 from solstice.utils.logging import create_ray_logger
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession, DataFrame
-    from solstice.core.stage import Stage
+    from solstice.core.stage import Stage, StageRuntime
     from solstice.core.split_payload_store import SplitPayloadStore
 
 
@@ -134,7 +134,7 @@ class SparkSourceV2Master(StageMaster):
         job_id: str,
         stage: "Stage",
         payload_store: "SplitPayloadStore",
-        config: StageConfig,
+        runtime: "StageRuntime",
         **kwargs,
     ):
         # Get config from stage.operator_config
@@ -144,21 +144,13 @@ class SparkSourceV2Master(StageMaster):
                 f"SparkSourceV2Master requires SparkSourceV2Config, got {type(operator_cfg)}"
             )
 
-        # Override worker settings for V2 (JVM writes directly, no workers needed)
-        stage_config = StageConfig(
-            queue_type=config.queue_type,
-            shared_broker_endpoint=config.shared_broker_endpoint,
-            min_workers=0,
-            max_workers=0,
-            upstream_endpoint=None,
-            upstream_topic=None,
-        )
-
+        # SparkSourceV2 has no workers (JVM writes directly)
+        # We still call parent init which will initialize with 0 workers
         super().__init__(
             job_id=job_id,
             stage=stage,
-            config=stage_config,
             payload_store=payload_store,
+            runtime=runtime,
         )
 
         self._config = operator_cfg

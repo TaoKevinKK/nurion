@@ -189,10 +189,9 @@ class SimpleAutoscaler:
             # Get basic status
             status = master.get_status()
 
-            # Get config (min/max workers)
-            config = master.config
-            min_workers = config.min_workers
-            max_workers = config.max_workers
+            # Get min/max workers from stage
+            min_workers = master.stage.min_parallelism
+            max_workers = master.stage.max_parallelism
 
             # For non-source stages, try to get input queue lag
             input_lag = 0

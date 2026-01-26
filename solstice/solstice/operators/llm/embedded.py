@@ -36,7 +36,7 @@ from typing import Any, ClassVar, Literal, Optional, Type
 import pyarrow as pa
 
 from solstice.core.models import Split, SplitPayload
-from solstice.core.operator import Operator, OperatorConfig
+from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime, operator
 from solstice.operators.llm.utils import (
     extract_images,
     extract_messages,
@@ -186,6 +186,7 @@ class EmbeddedLLMOperatorConfig(OperatorConfig):
             )
 
 
+@operator(EmbeddedLLMOperatorConfig)
 class EmbeddedLLMOperator(Operator):
     """Embedded LLM operator using vLLM or SGLang offline batch inference.
 
@@ -201,16 +202,11 @@ class EmbeddedLLMOperator(Operator):
     - Multi-image VLM (prompt/prompt_field + images_field)
     """
 
-    def __init__(self, config: EmbeddedLLMOperatorConfig) -> None:
-        super().__init__(config)
+    def __init__(self, config: EmbeddedLLMOperatorConfig, runtime: OperatorRuntime) -> None:
+        super().__init__(config, runtime)
         self._llm_config = config
         self._engine: Any = None
         self._sampling_params: Any = None
-
-    def setup(self) -> None:
-        """Initialize the inference engine."""
-        super().setup()
-        self._init_engine()
 
     def _init_engine(self) -> None:
         """Initialize vLLM or SGLang engine."""
@@ -473,8 +469,4 @@ class EmbeddedLLMOperator(Operator):
             self._engine = None
             self._sampling_params = None
 
-        super().teardown()
-
-
-# Link config to operator class
-EmbeddedLLMOperatorConfig.operator_class = EmbeddedLLMOperator
+        super().close()

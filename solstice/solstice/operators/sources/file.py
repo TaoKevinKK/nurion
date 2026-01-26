@@ -26,7 +26,7 @@ import pyarrow.csv as pacsv
 import pyarrow.parquet as pq
 
 from solstice.core.models import Split, SplitPayload
-from solstice.core.operator import OperatorConfig
+from solstice.core.operator import OperatorConfig, OperatorRuntime, operator
 from solstice.core.source_operator import SourceOperator
 
 
@@ -41,6 +41,7 @@ class FileSourceConfig(OperatorConfig):
     """File format (json, parquet, or csv)."""
 
 
+@operator(FileSourceConfig)
 class FileSource(SourceOperator):
     """Source operator for reading from local files (JSON, Parquet, CSV).
 
@@ -52,8 +53,8 @@ class FileSource(SourceOperator):
 
     SUPPORTED_FORMATS = {"json", "parquet", "csv"}
 
-    def __init__(self, config: FileSourceConfig):
-        super().__init__(config)
+    def __init__(self, config: FileSourceConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self.file_paths = [str(path) for path in config.file_paths]
         self.file_format = config.format.lower()
 
@@ -148,7 +149,3 @@ class FileSource(SourceOperator):
             return pacsv.read_csv(file_path)
 
         raise ValueError(f"Unsupported format: {self.file_format}")
-
-
-# Set operator_class after class definition
-FileSourceConfig.operator_class = FileSource

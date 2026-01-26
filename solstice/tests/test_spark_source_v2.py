@@ -34,7 +34,9 @@ from solstice.operators.sources.sparkv2 import (
     SparkSourceV2Config,
     SparkSourceV2Master,
 )
-from solstice.core.stage_master import StageConfig, QueueEndpoint
+from solstice.core.operator import SemanticGuarantee
+from solstice.core.stage import StageRuntime
+from solstice.core.stage_master import QueueEndpoint
 from solstice.queue import QueueType
 
 
@@ -107,7 +109,7 @@ class TestSparkSourceV2Integration:
         payload_store = RaySplitPayloadStore(name="test_v2_output_store")
         _wait_for_actor(payload_store)
 
-        stage_config = StageConfig(
+        runtime = StageRuntime(
             queue_type=QueueType.TANSU,
             shared_broker_endpoint=QueueEndpoint(
                 queue_type=QueueType.TANSU,
@@ -115,12 +117,18 @@ class TestSparkSourceV2Integration:
                 port=tansu_backend.port,
                 storage_url="memory://tansu/",
             ),
+            upstream_endpoint=None,
+            upstream_topic=None,
+            state_endpoint=None,
+            state_topic=None,
+            semantic_guarantee=SemanticGuarantee.AT_LEAST_ONCE,
+            lineage_sample_rate=0.0,
         )
         master = SparkSourceV2Master(
             job_id="test-v2-output",
             stage=source_stage,
             payload_store=payload_store,
-            config=stage_config,
+            runtime=runtime,
         )
 
         try:
@@ -177,7 +185,7 @@ class TestSparkSourceV2Integration:
         payload_store = RaySplitPayloadStore(name="test_v2_parallel_store")
         _wait_for_actor(payload_store)
 
-        stage_config = StageConfig(
+        runtime = StageRuntime(
             queue_type=QueueType.TANSU,
             shared_broker_endpoint=QueueEndpoint(
                 queue_type=QueueType.TANSU,
@@ -185,12 +193,18 @@ class TestSparkSourceV2Integration:
                 port=tansu_backend.port,
                 storage_url="memory://tansu/",
             ),
+            upstream_endpoint=None,
+            upstream_topic=None,
+            state_endpoint=None,
+            state_topic=None,
+            semantic_guarantee=SemanticGuarantee.AT_LEAST_ONCE,
+            lineage_sample_rate=0.0,
         )
         master = SparkSourceV2Master(
             job_id="test-v2-parallel",
             stage=source_stage,
             payload_store=payload_store,
-            config=stage_config,
+            runtime=runtime,
         )
 
         try:
@@ -224,7 +238,7 @@ class TestSparkSourceV2Integration:
         payload_store = RaySplitPayloadStore(name="test_v2_large_store")
         _wait_for_actor(payload_store)
 
-        stage_config = StageConfig(
+        runtime = StageRuntime(
             queue_type=QueueType.TANSU,
             shared_broker_endpoint=QueueEndpoint(
                 queue_type=QueueType.TANSU,
@@ -232,12 +246,18 @@ class TestSparkSourceV2Integration:
                 port=tansu_backend.port,
                 storage_url="memory://tansu/",
             ),
+            upstream_endpoint=None,
+            upstream_topic=None,
+            state_endpoint=None,
+            state_topic=None,
+            semantic_guarantee=SemanticGuarantee.AT_LEAST_ONCE,
+            lineage_sample_rate=0.0,
         )
         master = SparkSourceV2Master(
             job_id="test-v2-large",
             stage=source_stage,
             payload_store=payload_store,
-            config=stage_config,
+            runtime=runtime,
         )
 
         try:

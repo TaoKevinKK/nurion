@@ -25,6 +25,7 @@ import tempfile
 import pyarrow as pa
 import pytest
 
+from tests.conftest import make_operator_runtime
 from solstice.core.models import Split, SplitPayload
 from solstice.operators.connected_components import (
     CCInitConfig,
@@ -56,7 +57,7 @@ class TestCCInitOperator:
         payload = SplitPayload(data=table, split_id="test")
 
         config = CCInitConfig()
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
 
         result = operator.process_split(sample_split, payload)
 
@@ -73,7 +74,7 @@ class TestCCInitOperator:
     def test_init_empty(self, sample_split):
         """Test with no candidate pairs."""
         config = CCInitConfig()
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
 
         result = operator.process_split(sample_split, None)
         assert result is None
@@ -104,7 +105,7 @@ class TestCCIterateOperator:
         payload = SplitPayload(data=table, split_id="test")
 
         config = CCIterateConfig(num_partitions=4)
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
 
         result = operator.process_split(sample_split, payload)
 
@@ -144,7 +145,7 @@ class TestCCIterateOperator:
         payload = SplitPayload(data=table, split_id="test")
 
         config = CCIterateConfig(num_partitions=4)
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
 
         result = operator.process_split(sample_split, payload)
 
@@ -188,7 +189,7 @@ class TestCCIterateOperator:
         payload = SplitPayload(data=table, split_id="test")
 
         config = CCIterateConfig(num_partitions=4)
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
 
         result = operator.process_split(sample_split, payload)
 
@@ -229,7 +230,7 @@ class TestDedupeByClusterOperator:
         payload = SplitPayload(data=table, split_id="test")
 
         config = DedupeByClusterConfig(num_partitions=4)
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
 
         result = operator.process_split(sample_split, payload)
 
@@ -256,7 +257,7 @@ class TestDedupeByClusterOperator:
         should be in the same batch/partition.
         """
         config = DedupeByClusterConfig(num_partitions=4)
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
 
         # First batch: cluster A with doc A
         table1 = pa.table(
@@ -295,7 +296,7 @@ class TestDedupeByClusterOperator:
     def test_dedupe_empty(self, sample_split):
         """Test with empty input."""
         config = DedupeByClusterConfig(num_partitions=4)
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
 
         result = operator.process_split(sample_split, None)
         assert result is None
@@ -322,7 +323,7 @@ class TestCCEndToEnd:
         pairs_payload = SplitPayload(data=pairs_table, split_id="pairs")
 
         init_config = CCInitConfig()
-        init_op = init_config.setup()
+        init_op = init_config.setup(make_operator_runtime())
         messages_result = init_op.process_split(sample_split, pairs_payload)
 
         assert messages_result is not None
@@ -333,7 +334,7 @@ class TestCCEndToEnd:
 
         # Now iterate
         iterate_config = CCIterateConfig(num_partitions=1)
-        iterate_op = iterate_config.setup()
+        iterate_op = iterate_config.setup(make_operator_runtime())
 
         labels_result = iterate_op.process_split(sample_split, messages_result)
 
@@ -390,7 +391,7 @@ class TestCCIterateStateStore:
         config.job_id = "test_job"
         config.stage_id = "cc_iterate"
         config.worker_id = "worker_0"
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
 
         # First, process some data to populate state store
         table = pa.table(
@@ -427,7 +428,7 @@ class TestCCIterateStateStore:
         config.job_id = "test_job"
         config.stage_id = "cc_iterate"
         config.worker_id = "worker_0"
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
 
         # Process initial data - creates edges A-B, C-D
         table = pa.table(
@@ -466,10 +467,11 @@ class TestCCIterateStateStore:
             num_partitions=num_partitions,
             state_store_path=temp_state_store_path,
         )
-        config.job_id = "test_job"
-        config.stage_id = "cc_iterate"
-        config.worker_id = "worker_0"
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime(
+            job_id="test_job",
+            stage_id="cc_iterate",
+            worker_id="worker_0",
+        ))
 
         # Create data that will hash to MULTIPLE partitions
         # Using many docs increases chance of hitting multiple partitions
@@ -493,6 +495,9 @@ class TestCCIterateStateStore:
             f"Test requires multiple partitions, got {len(partitions_touched)}"
         )
 
+        # Close operator FIRST to flush its state store writes
+        operator.close()
+
         # Now read __changes__ from ALL partitions via state store
         state_store = SlateDBPartitionStateStore(
             base_path=temp_state_store_path,
@@ -512,7 +517,6 @@ class TestCCIterateStateStore:
                 pass  # Partition may not have been used
 
         state_store.close()
-        operator.close()
 
         # Key assertion: __changes__ should only be in ONE partition
         assert len(changes_found) == 1, (
@@ -531,7 +535,7 @@ class TestCCIterateStateStore:
         config.job_id = "test_job"
         config.stage_id = "cc_iterate"
         config.worker_id = "worker_0"
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
 
         # Process initial data
         table = pa.table(

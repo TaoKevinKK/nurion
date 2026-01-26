@@ -30,23 +30,22 @@ Key design principles:
 from __future__ import annotations
 
 import asyncio
-import copy
 import time
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import ray
 
 from solstice.queue import QueueType, QueueClient, MemoryClient, TansuQueueClient
 from solstice.webui.state.producer import StateProducer
 from solstice.utils.logging import create_ray_logger
-from solstice.core.stage_config import (
-    StageConfig,
+from solstice.core.models import (
     QueueEndpoint,
     QueueMessage,
     make_split_id,
 )
 from solstice.core.split_payload_store import SplitPayloadStore
-from solstice.core.operator import Operator, SemanticGuarantee
+from solstice.core.operator import Operator, OperatorRuntime, SemanticGuarantee
 from solstice.testing.fault_injection import (
     check_fault,
     FAULT_BEFORE_MARK_PROCESSED,
@@ -57,6 +56,65 @@ from solstice.testing.fault_injection import (
 
 if TYPE_CHECKING:
     from solstice.core.stage import Stage
+
+
+# =============================================================================
+# Worker Runtime - Immutable parameters for worker initialization
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class WorkerRuntime:
+    """Runtime parameters for StageWorker initialization.
+
+    All parameters needed to start a worker, packaged in an immutable dataclass.
+    This simplifies the worker constructor and enables safer distributed passing.
+
+    Attributes:
+        worker_id: Unique identifier for this worker
+        job_id: Job identifier
+        stage_id: Stage identifier
+        assigned_partitions: Partitions this worker handles (tuple for immutability)
+        consumer_group: Consumer group for offset tracking
+        semantic_guarantee: AT_LEAST_ONCE or EXACTLY_ONCE
+
+        # Queue endpoints
+        upstream_endpoint: Upstream queue endpoint (None for source)
+        upstream_topic: Upstream queue topic
+        output_endpoint: Output queue endpoint
+        output_topic: Output queue topic
+
+        # State push (WebUI)
+        state_endpoint: State push endpoint
+        state_topic: State push topic
+        lineage_sample_rate: Sample rate for lineage tracking
+
+        # Processing config
+        batch_size: Messages per batch
+        commit_batch_size: Commit every N messages
+    """
+
+    worker_id: str
+    job_id: str
+    stage_id: str
+    assigned_partitions: Tuple[int, ...]
+    consumer_group: str
+    semantic_guarantee: SemanticGuarantee
+
+    # Queue endpoints
+    upstream_endpoint: Optional[QueueEndpoint] = None
+    upstream_topic: Optional[str] = None
+    output_endpoint: Optional[QueueEndpoint] = None
+    output_topic: Optional[str] = None
+
+    # State push (WebUI)
+    state_endpoint: Optional[QueueEndpoint] = None
+    state_topic: Optional[str] = None
+    lineage_sample_rate: float = 0.0
+
+    # Processing config (from Stage)
+    batch_size: int = 100
+    commit_batch_size: int = 5
 
 
 @ray.remote
@@ -79,53 +137,51 @@ class StageWorker:
 
     def __init__(
         self,
-        worker_id: str,
-        job_id: str,
+        runtime: WorkerRuntime,
         stage: "Stage",
-        upstream_endpoint: Optional[QueueEndpoint],
-        upstream_topic: Optional[str],
-        output_endpoint: QueueEndpoint,
-        output_topic: str,
-        consumer_group: str,
-        assigned_partitions: List[int],
-        config: StageConfig,
         payload_store: SplitPayloadStore,
-        state_endpoint: Optional[QueueEndpoint] = None,
-        state_topic: Optional[str] = None,
-        lineage_sample_rate: float = 0.0,
-        semantic_guarantee: SemanticGuarantee = SemanticGuarantee.AT_LEAST_ONCE,
     ):
-        self.worker_id = worker_id
-        self.job_id = job_id
-        self.stage_id = stage.stage_id
-        self.stage = stage
-        self.config = config
-        self.semantic_guarantee = semantic_guarantee
+        """Initialize worker with runtime parameters.
 
-        # SplitPayloadStore for storing SplitPayload data across workers
+        Args:
+            runtime: Immutable worker runtime parameters
+            stage: Stage definition (for operator_config)
+            payload_store: Shared payload store
+        """
+        # Extract from runtime
+        self.worker_id = runtime.worker_id
+        self.job_id = runtime.job_id
+        self.stage_id = runtime.stage_id
+        self.semantic_guarantee = runtime.semantic_guarantee
+        self.assigned_partitions = list(runtime.assigned_partitions)
+        self.consumer_group = runtime.consumer_group
+
+        # Store endpoints
+        self.upstream_endpoint = runtime.upstream_endpoint
+        self.upstream_topic = runtime.upstream_topic
+        self.output_endpoint = runtime.output_endpoint
+        self.output_topic = runtime.output_topic
+
+        # State push configuration (for WebUI)
+        self.state_endpoint = runtime.state_endpoint
+        self.state_topic = runtime.state_topic
+        self._lineage_sample_rate = runtime.lineage_sample_rate
+
+        # Processing config
+        self._batch_size = runtime.batch_size
+        self._commit_batch_size = runtime.commit_batch_size
+
+        # Store references
+        self.stage = stage
         self.payload_store = payload_store
 
-        # Store endpoints (will create connections in run())
-        self.upstream_endpoint = upstream_endpoint
-        self.upstream_topic = upstream_topic
-        self.output_endpoint = output_endpoint
-        self.output_topic = output_topic
-        self.consumer_group = consumer_group
-        self.assigned_partitions = list(assigned_partitions)
-
-        # State push configuration (optional, for WebUI)
-        self.state_endpoint = state_endpoint
-        self.state_topic = state_topic
         self._state_producer: Optional[StateProducer] = None
-
-        # Lineage tracking configuration
-        self._lineage_sample_rate = lineage_sample_rate
 
         # Queue connections (created lazily)
         self.upstream_queue: Optional[QueueClient] = None
         self.output_queue: Optional[QueueClient] = None
 
-        self.logger = create_ray_logger(f"Worker-{self.stage_id}-{worker_id}")
+        self.logger = create_ray_logger(f"Worker-{self.stage_id}-{self.worker_id}")
 
         # Partition-per-Operator: Create one Operator per assigned partition
         self._partition_operators: Dict[int, Operator] = {}
@@ -146,23 +202,25 @@ class StageWorker:
 
         Each partition gets its own Operator instance with isolated state.
         """
-        # Deep copy the config to avoid shared state
-        op_config = copy.deepcopy(self.stage.operator_config)
-        op_config.job_id = self.job_id
-        op_config.stage_id = self.stage_id
-        op_config.worker_id = f"{self.worker_id}_p{partition_id}"
-        op_config.partition_id = partition_id
-        op_config.semantic_guarantee = self.semantic_guarantee
+        # Create runtime parameters for this partition
+        runtime = OperatorRuntime(
+            job_id=self.job_id,
+            stage_id=self.stage_id,
+            worker_id=f"{self.worker_id}_p{partition_id}",
+            partition_id=partition_id,
+            semantic_guarantee=self.semantic_guarantee,
+        )
 
-        # Create operator instance
-        operator = op_config.setup()
-        self._partition_operators[partition_id] = operator
+        # Create operator instance with config and runtime
+        # Config is shared (immutable), runtime is per-partition
+        op = self.stage.operator_config.setup(runtime)
+        self._partition_operators[partition_id] = op
 
         # Initialize from state store for recovery (if operator has one)
-        operator.init_from_state_store()
+        op.init_from_state_store()
 
         self.logger.debug(f"Created Operator for partition {partition_id}")
-        return operator
+        return op
 
     async def _create_queue_from_endpoint(self, endpoint: QueueEndpoint) -> QueueClient:
         """Create a queue connection from endpoint info."""
@@ -307,7 +365,7 @@ class StageWorker:
                 # Fetch from this partition
                 records = self.upstream_queue.fetch(
                     self.upstream_topic,
-                    max_records=self.config.batch_size,
+                    max_records=self._batch_size,
                     timeout_ms=1000,
                     partition=partition_id,
                     group_id=self.consumer_group,
@@ -528,11 +586,11 @@ class StageWorker:
 
     def _get_output_partition_count(self) -> int:
         """Compute output partition count to avoid out-of-range publishes."""
-        if self.config.partition_count is not None:
-            return max(1, self.config.partition_count)
-        if self.config.max_workers <= 1:
+        if self.stage.output_partitions is not None:
+            return max(1, self.stage.output_partitions)
+        if self.stage.max_parallelism <= 1:
             return 1
-        return self.config.max_workers
+        return self.stage.max_parallelism
 
     async def _cleanup(self) -> None:
         """Clean up resources."""

@@ -22,6 +22,7 @@ import pytest
 import json
 
 from solstice.core.models import Record, Split, SplitPayload
+from solstice.core.operator import OperatorRuntime, SemanticGuarantee
 from solstice.operators.filter import FilterOperatorConfig
 from solstice.operators.map import (
     FlatMapOperatorConfig,
@@ -29,6 +30,22 @@ from solstice.operators.map import (
     MapOperatorConfig,
 )
 from solstice.operators.sinks.file import FileSinkConfig
+
+
+def make_runtime(
+    worker_id: str = "worker-1",
+    job_id: str = "test_job",
+    stage_id: str = "stage",
+    partition_id: int = 0,
+) -> OperatorRuntime:
+    """Create a test OperatorRuntime."""
+    return OperatorRuntime(
+        job_id=job_id,
+        stage_id=stage_id,
+        worker_id=worker_id,
+        partition_id=partition_id,
+        semantic_guarantee=SemanticGuarantee.AT_LEAST_ONCE,
+    )
 
 
 def make_split(split_id: str = "split", stage_id: str = "stage") -> Split:
@@ -46,8 +63,8 @@ class TestMapOperator:
             return {"value": value["value"] + 1}
 
         config = MapOperatorConfig(map_fn=increment)
-        config.worker_id = "worker-1"
-        operator = config.setup()
+        runtime = make_runtime(worker_id="worker-1")
+        operator = config.setup(runtime)
         split = make_split()
         batch = make_payload([{"value": 1}, {"value": 41}])
 
@@ -62,7 +79,8 @@ class TestMapOperator:
             raise RuntimeError("boom")
 
         config = MapOperatorConfig(map_fn=explode)
-        operator = config.setup()
+        runtime = make_runtime()
+        operator = config.setup(runtime)
         split = make_split()
         batch = make_payload([{"value": 1}])
 
@@ -81,8 +99,8 @@ class TestFlatMapOperator:
             return pa.Table.from_pylist(expanded)
 
         config = FlatMapOperatorConfig(flatmap_fn=duplicate)
-        config.worker_id = "w0"
-        operator = config.setup()
+        runtime = make_runtime(worker_id="w0")
+        operator = config.setup(runtime)
         split = make_split()
         batch = make_payload([{"video": "a"}, {"video": "b"}])
 
@@ -98,7 +116,8 @@ class TestFlatMapOperator:
             return pa.table({})
 
         config = FlatMapOperatorConfig(flatmap_fn=drop_all)
-        operator = config.setup()
+        runtime = make_runtime()
+        operator = config.setup(runtime)
         split = make_split()
         batch = make_payload([{"video": "a"}])
 
@@ -115,7 +134,8 @@ class TestMapBatchesOperator:
             return pa.Table.from_pylist(rows)
 
         config = MapBatchesOperatorConfig(map_batches_fn=add_flag)
-        operator = config.setup()
+        runtime = make_runtime()
+        operator = config.setup(runtime)
         split = make_split()
         batch = make_payload([{"value": 1}, {"value": 2}])
 
@@ -129,7 +149,8 @@ class TestMapBatchesOperator:
             return table.slice(0, 1)
 
         config = MapBatchesOperatorConfig(map_batches_fn=shrink)
-        operator = config.setup()
+        runtime = make_runtime()
+        operator = config.setup(runtime)
         split = make_split()
         batch = make_payload([{"value": 1}, {"value": 2}])
 
@@ -141,7 +162,8 @@ class TestMapBatchesOperator:
             raise RuntimeError("boom")
 
         config = MapBatchesOperatorConfig(map_batches_fn=explode, skip_on_error=True)
-        operator = config.setup()
+        runtime = make_runtime()
+        operator = config.setup(runtime)
         split = make_split()
         batch = make_payload([{"value": 1}])
 
@@ -156,7 +178,8 @@ class TestFilterOperator:
             return record_value["value"] % 2 == 0
 
         config = FilterOperatorConfig(filter_fn=is_even)
-        operator = config.setup()
+        runtime = make_runtime()
+        operator = config.setup(runtime)
         split = make_split()
         batch = make_payload([{"value": 2}, {"value": 3}, {"value": 4}])
 
@@ -167,7 +190,8 @@ class TestFilterOperator:
 
     def test_filter_operator_drops_all_rows_returns_none(self):
         config = FilterOperatorConfig(filter_fn=lambda record: record.get("keep", False))
-        operator = config.setup()
+        runtime = make_runtime()
+        operator = config.setup(runtime)
         split = make_split()
         batch = make_payload([{"keep": False}])
 
@@ -184,8 +208,8 @@ class TestFileSink:
             format="json",
             buffer_size=1,
         )
-        config.worker_id = "sink_worker_0"
-        sink = config.setup()
+        runtime = make_runtime(worker_id="sink_worker_0")
+        sink = config.setup(runtime)
         split = make_split("sink-split")
         batch = make_payload([{"value": 1, "key": "k"}])
 

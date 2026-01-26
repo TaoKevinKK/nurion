@@ -33,175 +33,140 @@ _CACHE_DIR: Optional[Path] = None
 _S3_CONFIG: Optional[Dict[str, Any]] = None
 
 
-def reset_s3_config() -> None:
-    """Reset the cached S3 configuration. Useful for testing or reloading config."""
-    global _S3_CONFIG
-    _S3_CONFIG = None
-
-
-def _load_s3_config_from_env() -> Optional[Dict[str, Any]]:
-    """Load S3 configuration from environment variables."""
-    key = os.environ.get("AWS_ACCESS_KEY_ID", "")
-    secret = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
-
-    if key and secret:
-        config = {
-            "key": key,
-            "secret": secret,
-            "endpoint_url": os.environ.get(
-                "AWS_ENDPOINT_URL", os.environ.get("FSSPEC_S3_ENDPOINT_URL", "")
-            ),
-            "region_name": os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
-            "source": "environment",
-        }
-        logger.info(
-            f"Loaded S3 config from environment variables: endpoint={config['endpoint_url']}, region={config['region_name']}"
-        )
-        return config
-    return None
-
-
-def _safe_path_exists(path: Path) -> bool:
-    """Check if path exists, handling PermissionError in sandboxed environments."""
-    try:
-        return path.exists()
-    except PermissionError:
-        return False
-
-
-def _load_s3_config_from_aws(profile: str = "default") -> Optional[Dict[str, Any]]:
-    """Load S3 configuration from AWS config files (~/.aws/credentials, ~/.aws/config)."""
-    aws_creds_paths = [
-        Path.home() / ".aws/credentials",
-        Path("/root/.aws/credentials"),
-    ]
-    aws_config_paths = [
-        Path.home() / ".aws/config",
-        Path("/root/.aws/config"),
-    ]
-
-    key, secret, region, endpoint = "", "", "us-east-1", ""
-
-    # Load credentials
-    for creds_path in aws_creds_paths:
-        if _safe_path_exists(creds_path):
-            config = configparser.ConfigParser()
-            config.read(creds_path)
-            if profile in config:
-                section = config[profile]
-                key = section.get("aws_access_key_id", "")
-                secret = section.get("aws_secret_access_key", "")
-                if key and secret:
-                    logger.debug(f"Loaded AWS credentials from {creds_path} [{profile}]")
-                    break
-
-    # Load config (region, endpoint)
-    for config_path in aws_config_paths:
-        if _safe_path_exists(config_path):
-            config = configparser.ConfigParser()
-            config.read(config_path)
-            # AWS config uses "profile xxx" sections for non-default profiles
-            section_name = profile if profile == "default" else f"profile {profile}"
-            if section_name in config:
-                section = config[section_name]
-                region = section.get("region", region)
-                endpoint = section.get("endpoint_url", endpoint)
-                logger.debug(f"Loaded AWS config from {config_path} [{section_name}]")
-                break
-
-    if key and secret:
-        result = {
-            "key": key,
-            "secret": secret,
-            "endpoint_url": endpoint,
-            "region_name": region,
-            "source": f"aws_config:{profile}",
-        }
-        logger.info(
-            f"Loaded S3 config from AWS config [{profile}]: endpoint={endpoint}, region={region}"
-        )
-        return result
-    return None
-
-
-def _load_s3_config_from_rclone(remote_name: str = "s3") -> Optional[Dict[str, Any]]:
-    """Load S3 configuration from rclone config."""
-    rclone_paths = [
-        Path.home() / ".config/rclone/rclone.conf",
-        Path("/root/.config/rclone/rclone.conf"),
-    ]
-
-    for rclone_config in rclone_paths:
-        if _safe_path_exists(rclone_config):
-            config = configparser.ConfigParser()
-            config.read(rclone_config)
-
-            if remote_name in config:
-                section = config[remote_name]
-                result = {
-                    "key": section.get("access_key_id", ""),
-                    "secret": section.get("secret_access_key", ""),
-                    "endpoint_url": section.get("endpoint", ""),
-                    "region_name": section.get("region", "us-east-1"),
-                    "source": f"rclone:{remote_name}",
-                }
-                logger.info(
-                    f"Loaded S3 config from {rclone_config} [{remote_name}]: endpoint={result['endpoint_url']}, region={result['region_name']}"
-                )
-                return result
-    return None
-
-
 def _load_s3_config(
     rclone_remote: Optional[str] = None,
     aws_profile: str = "default",
 ) -> Dict[str, Any]:
-    """Load S3 configuration from multiple sources.
-
-    Priority order:
-    1. Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, etc.)
-    2. AWS config files (~/.aws/credentials, ~/.aws/config)
-    3. rclone config (~/.config/rclone/rclone.conf)
-
-    Args:
-        rclone_remote: Remote name in rclone config. If None, uses
-                       SOLSTICE_S3_REMOTE env var or "s3" as default.
-        aws_profile: Profile name in AWS config (default: "default")
-
-    Returns:
-        Dict with keys: key, secret, endpoint_url, region_name, source
-    """
+    """Load S3 configuration once from env/aws/rclone."""
     if rclone_remote is None:
         rclone_remote = os.environ.get("SOLSTICE_S3_REMOTE", "s3")
+
     global _S3_CONFIG
     if _S3_CONFIG is not None:
         return _S3_CONFIG
 
-    # Try environment variables first
-    config = _load_s3_config_from_env()
-    if config and config.get("key") and config.get("secret"):
-        _S3_CONFIG = config
+    env_key = os.environ.get("AWS_ACCESS_KEY_ID", "")
+    env_secret = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
+    env_endpoint = os.environ.get("AWS_ENDPOINT_URL") or os.environ.get(
+        "FSSPEC_S3_ENDPOINT_URL", ""
+    )
+    env_region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
+
+    if env_key and env_secret:
+        _S3_CONFIG = {
+            "key": env_key,
+            "secret": env_secret,
+            "endpoint_url": env_endpoint,
+            "region_name": env_region,
+            "source": "environment",
+        }
+        logger.info(
+            "Loaded S3 config from environment variables: endpoint=%s, region=%s",
+            _S3_CONFIG["endpoint_url"],
+            _S3_CONFIG["region_name"],
+        )
         return _S3_CONFIG
 
-    # Try AWS config files
-    config = _load_s3_config_from_aws(aws_profile)
-    if config and config.get("key") and config.get("secret"):
-        _S3_CONFIG = config
+    key = ""
+    secret = ""
+    region = env_region
+    endpoint = env_endpoint
+
+    aws_creds_paths = [
+        Path.home() / ".aws/credentials",
+        Path("/root/.aws/credentials"),
+    ]
+    for creds_path in aws_creds_paths:
+        try:
+            if not creds_path.exists():
+                continue
+        except PermissionError:
+            continue
+        config = configparser.ConfigParser()
+        config.read(creds_path)
+        if aws_profile in config:
+            section = config[aws_profile]
+            key = section.get("aws_access_key_id", "")
+            secret = section.get("aws_secret_access_key", "")
+            if key and secret:
+                logger.debug("Loaded AWS credentials from %s [%s]", creds_path, aws_profile)
+                break
+
+    aws_config_paths = [
+        Path.home() / ".aws/config",
+        Path("/root/.aws/config"),
+    ]
+    for config_path in aws_config_paths:
+        try:
+            if not config_path.exists():
+                continue
+        except PermissionError:
+            continue
+        config = configparser.ConfigParser()
+        config.read(config_path)
+        section_name = aws_profile if aws_profile == "default" else f"profile {aws_profile}"
+        if section_name in config:
+            section = config[section_name]
+            region = section.get("region", region)
+            endpoint = section.get("endpoint_url", endpoint)
+            logger.debug("Loaded AWS config from %s [%s]", config_path, section_name)
+            break
+
+    if key and secret:
+        _S3_CONFIG = {
+            "key": key,
+            "secret": secret,
+            "endpoint_url": endpoint,
+            "region_name": region,
+            "source": f"aws_config:{aws_profile}",
+        }
+        logger.info(
+            "Loaded S3 config from AWS config [%s]: endpoint=%s, region=%s",
+            aws_profile,
+            endpoint,
+            region,
+        )
         return _S3_CONFIG
 
-    # Try rclone config
-    config = _load_s3_config_from_rclone(rclone_remote)
-    if config and config.get("key") and config.get("secret"):
-        _S3_CONFIG = config
-        return _S3_CONFIG
+    rclone_paths = [
+        Path.home() / ".config/rclone/rclone.conf",
+        Path("/root/.config/rclone/rclone.conf"),
+    ]
+    for rclone_config in rclone_paths:
+        try:
+            if not rclone_config.exists():
+                continue
+        except PermissionError:
+            continue
+        config = configparser.ConfigParser()
+        config.read(rclone_config)
+        if rclone_remote in config:
+            section = config[rclone_remote]
+            key = section.get("access_key_id", "")
+            secret = section.get("secret_access_key", "")
+            if key and secret:
+                _S3_CONFIG = {
+                    "key": key,
+                    "secret": secret,
+                    "endpoint_url": section.get("endpoint", ""),
+                    "region_name": section.get("region", "us-east-1"),
+                    "source": f"rclone:{rclone_remote}",
+                }
+                logger.info(
+                    "Loaded S3 config from %s [%s]: endpoint=%s, region=%s",
+                    rclone_config,
+                    rclone_remote,
+                    _S3_CONFIG["endpoint_url"],
+                    _S3_CONFIG["region_name"],
+                )
+                return _S3_CONFIG
 
-    # No config found, return empty config
     logger.warning("No S3 configuration found from any source (env, aws, rclone)")
     _S3_CONFIG = {
         "key": "",
         "secret": "",
         "endpoint_url": "",
-        "region_name": "us-east-1",
+        "region_name": env_region,
         "source": "none",
     }
     return _S3_CONFIG
@@ -244,16 +209,20 @@ def get_s3_storage_options(
     return options
 
 
-def _parse_s3_url(path: str) -> tuple[str, str]:
-    """Parse an s3:// URL into (bucket, key)."""
+def restore_s3_object(path: str, days: int = 2) -> bool:
+    """Request a restore for an archived S3 object if needed.
+
+    Returns True if a restore request was submitted, False otherwise.
+    """
+    if not path.startswith("s3://"):
+        return False
+
     parsed = urlparse(path)
     if parsed.scheme != "s3" or not parsed.netloc:
         raise ValueError(f"Invalid S3 path: {path}")
-    return parsed.netloc, parsed.path.lstrip("/")
+    bucket = parsed.netloc
+    key = parsed.path.lstrip("/")
 
-
-def _get_s3_client():
-    """Create a boto3 S3 client with short timeouts."""
     import boto3
     from botocore.config import Config
 
@@ -263,24 +232,12 @@ def _get_s3_client():
         options = get_s3_storage_options()
         region_name = options.get("client_kwargs", {}).get("region_name")
 
-    return boto3.client(
+    client = boto3.client(
         "s3",
         region_name=region_name,
         endpoint_url=endpoint_url,
         config=Config(connect_timeout=3, read_timeout=5, retries={"max_attempts": 2}),
     )
-
-
-def restore_s3_object(path: str, days: int = 2) -> bool:
-    """Request a restore for an archived S3 object if needed.
-
-    Returns True if a restore request was submitted, False otherwise.
-    """
-    if not path.startswith("s3://"):
-        return False
-
-    bucket, key = _parse_s3_url(path)
-    client = _get_s3_client()
 
     try:
         head = client.head_object(Bucket=bucket, Key=key)
@@ -375,80 +332,11 @@ def get_lance_storage_options(
     return options
 
 
-def get_cache_dir() -> Path:
-    """Get or create the cache directory for downloaded files."""
-    global _CACHE_DIR
-    if _CACHE_DIR is None:
-        cache_base = os.environ.get("SOLSTICE_CACHE_DIR", "/tmp/solstice_cache")
-        _CACHE_DIR = Path(cache_base)
-        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return _CACHE_DIR
-
-
 def is_remote_path(path: str) -> bool:
     """Check if a path is a remote URL (s3://, gs://, http://, etc.)."""
     if not path:
         return False
     return path.startswith(("s3://", "gs://", "http://", "https://", "az://"))
-
-
-def _get_cache_path(remote_url: str) -> Path:
-    """Generate a deterministic cache path for a remote URL."""
-    url_hash = hashlib.md5(remote_url.encode()).hexdigest()[:16]
-    parsed = urlparse(remote_url)
-    filename = Path(parsed.path).name or "file"
-    cache_dir = get_cache_dir()
-    return cache_dir / f"{url_hash}_{filename}"
-
-
-def download_file(remote_url: str, local_path: Optional[Path] = None) -> Path:
-    """Download a file from a remote URL to local storage.
-
-    Args:
-        remote_url: The remote URL (s3://, http://, https://, etc.)
-        local_path: Optional local path to save to. If None, uses cache.
-
-    Returns:
-        Path to the local file.
-    """
-    if local_path is None:
-        local_path = _get_cache_path(remote_url)
-
-    # Check if already cached
-    if local_path.exists():
-        logger.debug(f"Using cached file: {local_path}")
-        return local_path
-
-    local_path.parent.mkdir(parents=True, exist_ok=True)
-
-    logger.info(f"Downloading {remote_url} to {local_path}")
-
-    if remote_url.startswith(("http://", "https://")):
-        # Use requests for HTTP/HTTPS URLs (more reliable than fsspec/aiohttp for some endpoints)
-        import requests
-
-        with requests.get(remote_url, stream=True, timeout=300) as r:
-            r.raise_for_status()
-            with open(local_path, "wb") as local_file:
-                for chunk in r.iter_content(chunk_size=8 * 1024 * 1024):
-                    if chunk:
-                        local_file.write(chunk)
-    else:
-        # Use fsspec for S3, GCS, and other protocols
-        import fsspec
-
-        storage_options = get_s3_storage_options() if remote_url.startswith("s3://") else {}
-
-        with fsspec.open(remote_url, "rb", **storage_options) as remote_file:
-            with open(local_path, "wb") as local_file:
-                while True:
-                    chunk = remote_file.read(8 * 1024 * 1024)  # 8MB chunks
-                    if not chunk:
-                        break
-                    local_file.write(chunk)
-
-    logger.debug(f"Downloaded {remote_url} ({local_path.stat().st_size} bytes)")
-    return local_path
 
 
 @contextmanager
@@ -469,41 +357,82 @@ def ensure_local_file(
         Path to the local file.
     """
     if not is_remote_path(path):
-        # Local file - just return the path
         local_path = Path(path)
         if not local_path.exists():
             raise FileNotFoundError(f"Local file not found: {path}")
         yield local_path
         return
 
-    # Remote file - download it
-    if use_cache:
-        local_path = download_file(path)
-        yield local_path
-        # Don't delete cached files
-    else:
-        # Use temp file without caching
-        with tempfile.NamedTemporaryFile(
-            suffix=Path(urlparse(path).path).suffix or ".tmp",
-            delete=False,
-        ) as tmp:
-            tmp_path = Path(tmp.name)
+    def _download(remote_url: str, target_path: Path) -> Path:
+        if target_path.exists():
+            try:
+                if target_path.stat().st_size > 0:
+                    logger.debug(f"Using cached file: {target_path}")
+                    return target_path
+                logger.warning(f"Cached file is empty, re-downloading: {target_path}")
+                target_path.unlink()
+            except OSError as e:
+                logger.warning(f"Failed to stat cached file {target_path}: {e}")
 
-        try:
-            download_file(path, tmp_path)
-            yield tmp_path
-        finally:
-            # Clean up temp file
-            if tmp_path.exists():
-                tmp_path.unlink()
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Downloading {remote_url} to {target_path}")
+
+        if remote_url.startswith(("http://", "https://")):
+            import requests
+
+            with requests.get(remote_url, stream=True, timeout=300) as r:
+                r.raise_for_status()
+                with open(target_path, "wb") as local_file:
+                    for chunk in r.iter_content(chunk_size=8 * 1024 * 1024):
+                        if chunk:
+                            local_file.write(chunk)
+        else:
+            import fsspec
+
+            storage_options = get_s3_storage_options() if remote_url.startswith("s3://") else {}
+            with fsspec.open(remote_url, "rb", **storage_options) as remote_file:
+                with open(target_path, "wb") as local_file:
+                    while True:
+                        chunk = remote_file.read(8 * 1024 * 1024)
+                        if not chunk:
+                            break
+                        local_file.write(chunk)
+
+        logger.debug(f"Downloaded {remote_url} ({target_path.stat().st_size} bytes)")
+        return target_path
+
+    if use_cache:
+        global _CACHE_DIR
+        if _CACHE_DIR is None:
+            cache_base = os.environ.get("SOLSTICE_CACHE_DIR", "/tmp/solstice_cache")
+            _CACHE_DIR = Path(cache_base)
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        url_hash = hashlib.md5(path.encode()).hexdigest()[:16]
+        filename = Path(urlparse(path).path).name or "file"
+        local_path = _CACHE_DIR / f"{url_hash}_{filename}"
+        yield _download(path, local_path)
+        return
+
+    with tempfile.NamedTemporaryFile(
+        suffix=Path(urlparse(path).path).suffix or ".tmp",
+        delete=False,
+    ) as tmp:
+        tmp_path = Path(tmp.name)
+
+    try:
+        _download(path, tmp_path)
+        yield tmp_path
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
 
 
 def clear_cache() -> None:
     """Clear the download cache."""
     import shutil
 
-    cache_dir = get_cache_dir()
+    cache_dir = Path(os.environ.get("SOLSTICE_CACHE_DIR", "/tmp/solstice_cache"))
     if cache_dir.exists():
         shutil.rmtree(cache_dir)
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Cleared cache directory: {cache_dir}")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Cleared cache directory: {cache_dir}")

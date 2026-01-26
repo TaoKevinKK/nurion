@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from solstice.queue import TansuBrokerManager, TansuQueueClient
-    from solstice.core.stage_config import QueueEndpoint
+    from solstice.core.models import QueueEndpoint
     from solstice.webui.state.producer import StateProducer
     from solstice.webui.state.manager import JobStateManager
     from solstice.webui.storage import JobStorage

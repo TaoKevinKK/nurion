@@ -27,7 +27,7 @@ import pyarrow as pa
 
 from solstice.core.job import Job, JobConfig
 from solstice.core.models import Split, SplitPayload
-from solstice.core.operator import Operator, OperatorConfig
+from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime
 from solstice.core.stage import Stage
 from solstice.operators.sources.source import SourceMaster
 from solstice.queue import QueueType
@@ -58,8 +58,8 @@ TestSourceConfig.master_class = None  # Will be set below
 class TestSourceOperator(Operator):
     """Test source operator that generates test data."""
 
-    def __init__(self, config: TestSourceConfig):
-        super().__init__(config)
+    def __init__(self, config: TestSourceConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self._generated = 0
 
     def generate_splits(self) -> List[Split]:
@@ -175,8 +175,8 @@ PassthroughConfig.operator_class = None  # Will be set below
 class PassthroughOperator(Operator):
     """Passthrough operator that forwards data without modification."""
 
-    def __init__(self, config: PassthroughConfig):
-        super().__init__(config)
+    def __init__(self, config: PassthroughConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self._processed = 0
 
     def process_split(
@@ -220,8 +220,8 @@ SlowTransformConfig.operator_class = None  # Will be set below
 class SlowTransformOperator(Operator):
     """Slow transform operator for testing backpressure."""
 
-    def __init__(self, config: SlowTransformConfig):
-        super().__init__(config)
+    def __init__(self, config: SlowTransformConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
 
     def process_split(
         self, split: Split, payload: Optional[SplitPayload]
@@ -267,8 +267,8 @@ class FilterOperator(Operator):
     The filter is deterministic based on ID, so results are reproducible.
     """
 
-    def __init__(self, config: FilterConfig):
-        super().__init__(config)
+    def __init__(self, config: FilterConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self._input_count = 0
         self._output_count = 0
 
@@ -329,8 +329,8 @@ class ExplodeOperator(Operator):
     is added to distinguish copies (0, 1, 2, ..., factor-1).
     """
 
-    def __init__(self, config: ExplodeConfig):
-        super().__init__(config)
+    def __init__(self, config: ExplodeConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self._input_count = 0
         self._output_count = 0
 
@@ -405,8 +405,8 @@ FilterExplodeConfig.operator_class = None  # Will be set below
 class FilterExplodeOperator(Operator):
     """Combined filter-then-explode operator for complex row count changes."""
 
-    def __init__(self, config: FilterExplodeConfig):
-        super().__init__(config)
+    def __init__(self, config: FilterExplodeConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self._input_count = 0
         self._after_filter_count = 0
         self._output_count = 0

@@ -49,11 +49,10 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 import ray
 
 from solstice.core.stage_master import StageMaster
-from solstice.core.stage_config import StageConfig
 from solstice.state.slatedb_store import SlateDBPartitionStateStore
 
 if TYPE_CHECKING:
-    from solstice.core.stage import Stage
+    from solstice.core.stage import Stage, StageRuntime
     from solstice.core.split_payload_store import SplitPayloadStore
 
 
@@ -86,10 +85,10 @@ class CCIterateMaster(StageMaster):
         self,
         job_id: str,
         stage: "Stage",
-        config: StageConfig,
         payload_store: "SplitPayloadStore",
+        runtime: "StageRuntime",
     ):
-        super().__init__(job_id, stage, config, payload_store)
+        super().__init__(job_id, stage, payload_store, runtime)
 
         # Read iteration config from operator config
         op_config = stage.operator_config

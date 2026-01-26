@@ -17,6 +17,7 @@
 import pyarrow as pa
 import pytest
 
+from tests.conftest import make_operator_runtime
 from solstice.core.models import Split, SplitPayload
 from solstice.operators.dedupe import (
     HashDedupeConfig,
@@ -58,7 +59,7 @@ class TestHashDedupeOperator:
     def test_dedupe_single_key(self, sample_split, sample_payload):
         """Test deduplication by single key."""
         config = HashDedupeConfig(dedup_keys=["user_id"], num_partitions=4)
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
 
         result = operator.process_split(sample_split, sample_payload)
 
@@ -79,7 +80,7 @@ class TestHashDedupeOperator:
     def test_dedupe_multiple_keys(self, sample_split, sample_payload):
         """Test deduplication by multiple keys."""
         config = HashDedupeConfig(dedup_keys=["user_id", "event_id"], num_partitions=4)
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
 
         result = operator.process_split(sample_split, sample_payload)
 
@@ -107,7 +108,7 @@ class TestHashDedupeOperator:
         payload = SplitPayload(data=table, split_id="test")
 
         config = HashDedupeConfig(dedup_keys=["user_id"], num_partitions=4)
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
 
         result = operator.process_split(sample_split, payload)
 
@@ -132,7 +133,7 @@ class TestHashDedupeOperator:
         payload = SplitPayload(data=table, split_id="test")
 
         config = HashDedupeConfig(dedup_keys=["user_id"], num_partitions=4)
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
 
         result = operator.process_split(sample_split, payload)
 
@@ -149,7 +150,7 @@ class TestHashDedupeOperator:
     def test_dedupe_empty_payload(self, sample_split):
         """Test with empty payload."""
         config = HashDedupeConfig(dedup_keys=["user_id"], num_partitions=4)
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
 
         result = operator.process_split(sample_split, None)
         assert result is None
@@ -163,7 +164,7 @@ class TestHashDedupeOperator:
         Without it, the operator logs a warning and only dedupes within the batch.
         """
         config = HashDedupeConfig(dedup_keys=["user_id"], num_partitions=4)
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
 
         # First batch
         table1 = pa.table(
@@ -211,6 +212,6 @@ class TestHashDedupeOperator:
     def test_dedupe_is_shuffle_operator(self):
         """Test that HashDedupeOperator is a ShuffleOperator."""
         config = HashDedupeConfig(dedup_keys=["user_id"])
-        operator = config.setup()
+        operator = config.setup(make_operator_runtime())
         assert isinstance(operator, ShuffleOperator)
         operator.close()

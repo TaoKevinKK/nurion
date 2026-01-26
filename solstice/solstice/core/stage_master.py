@@ -56,8 +56,7 @@ from solstice.queue import (
 )
 from solstice.utils.logging import create_ray_logger
 from solstice.core.split_payload_store import SplitPayloadStore
-from solstice.core.stage_config import (
-    StageConfig,
+from solstice.core.models import (
     FailurePolicy,
     FailureTracker,
     QueueEndpoint,
@@ -74,13 +73,12 @@ from solstice.core.managers import (
 )
 
 if TYPE_CHECKING:
-    from solstice.core.stage import Stage
+    from solstice.core.stage import Stage, StageRuntime
     from solstice.webui.state.producer import StateProducer
 
 # Re-export for backward compatibility
 __all__ = [
     "StageMaster",
-    "StageConfig",
     "StageWorker",
     "QueueEndpoint",
     "create_queue_endpoint",
@@ -109,25 +107,21 @@ class StageMaster:
         self,
         job_id: str,
         stage: "Stage",
-        config: StageConfig,
         payload_store: SplitPayloadStore,
+        runtime: "StageRuntime",
     ):
         self.job_id = job_id
         self.stage_id = stage.stage_id
         self.stage = stage
-        self.config = config
+        self.runtime = runtime
         self.logger = create_ray_logger(f"Master-{self.stage_id}")
 
-        # Upstream queue connection
-        self.upstream_endpoint = config.upstream_endpoint
-        self.upstream_topic = config.upstream_topic
-
-        # State push configuration (for WebUI metrics)
-        self.state_endpoint = config.state_endpoint
-        self.state_topic = config.state_topic
-
-        # Lineage tracking
-        self._lineage_sample_rate = config.lineage_sample_rate
+        # Upstream queue connection (from runtime)
+        self.upstream_endpoint = runtime.upstream_endpoint
+        self.upstream_topic = runtime.upstream_topic
+        self.state_endpoint = runtime.state_endpoint
+        self.state_topic = runtime.state_topic
+        self._lineage_sample_rate = runtime.lineage_sample_rate
 
         # SplitPayloadStore - shared across all stages
         self.payload_store = payload_store
@@ -158,10 +152,8 @@ class StageMaster:
 
         # Initialize managers (will be fully configured in start())
         self._partition_manager = PartitionManager(
-            stage_id=self.stage_id,
-            config=config,
-            upstream_endpoint=config.upstream_endpoint,
-            upstream_topic=config.upstream_topic,
+            stage=stage,
+            runtime=runtime,
         )
 
         # Worker and recovery managers created after output queue is ready
@@ -174,8 +166,8 @@ class StageMaster:
         partition_count = self._partition_manager.partition_count
         queue: QueueClient
 
-        if self.config.queue_type == QueueType.TANSU:
-            endpoint = self.config.shared_broker_endpoint
+        if self.runtime.queue_type == QueueType.TANSU:
+            endpoint = self.runtime.shared_broker_endpoint
             if not endpoint:
                 raise RuntimeError(
                     f"Stage {self.stage_id}: shared_broker_endpoint is required "
@@ -187,7 +179,7 @@ class StageMaster:
             queue.start()
 
             self._output_endpoint = QueueEndpoint(
-                queue_type=self.config.queue_type,
+                queue_type=self.runtime.queue_type,
                 host=endpoint.host,
                 port=endpoint.port,
                 storage_url=endpoint.storage_url,
@@ -209,7 +201,7 @@ class StageMaster:
             queue.start()
 
             self._output_endpoint = QueueEndpoint(
-                queue_type=self.config.queue_type,
+                queue_type=self.runtime.queue_type,
                 host="memory",
                 port=0,
                 storage_url=self._output_broker.get_broker_url(),
@@ -224,7 +216,7 @@ class StageMaster:
         self._worker_manager = WorkerManager(
             job_id=self.job_id,
             stage=self.stage,
-            config=self.config,
+            runtime=self.runtime,
             partition_manager=self._partition_manager,
             payload_store=self.payload_store,
             output_endpoint=self._output_endpoint,
@@ -243,12 +235,10 @@ class StageMaster:
         )
 
         self._backpressure_monitor = BackpressureMonitor(
-            stage_id=self.stage_id,
-            config=self.config,
+            stage=self.stage,
+            runtime=self.runtime,
             partition_manager=self._partition_manager,
             worker_manager=self._worker_manager,
-            upstream_endpoint=self.upstream_endpoint,
-            upstream_topic=self.upstream_topic,
             consumer_group=self._consumer_group,
             logger=self.logger,
         )
@@ -272,7 +262,7 @@ class StageMaster:
         assert self._recovery_manager is not None
 
         # Set target worker count for correct partition assignment
-        self._worker_manager.set_target_worker_count(self.config.min_workers)
+        self._worker_manager.set_target_worker_count(self.stage.min_parallelism)
 
         # Get partition count for worker assignment
         if self.upstream_endpoint and self.upstream_topic:
@@ -281,7 +271,7 @@ class StageMaster:
             partition_count = self._partition_manager.partition_count
 
         # Spawn minimum required workers
-        for _ in range(self.config.min_workers):
+        for _ in range(self.stage.min_parallelism):
             worker_id = await self._worker_manager.spawn_worker(
                 partition_count=partition_count,
                 is_min_worker=True,
@@ -470,8 +460,8 @@ class StageMaster:
                 job_id=self.job_id,
                 stage_id=self.stage_id,
                 operator_type=operator_name,
-                min_parallelism=self.config.min_workers,
-                max_parallelism=self.config.max_workers,
+                min_parallelism=self.stage.min_parallelism,
+                max_parallelism=self.stage.max_parallelism,
             )
             await self._state_producer.produce(msg)
         except Exception as e:

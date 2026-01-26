@@ -34,6 +34,7 @@ from typing import Any, ClassVar, Literal, Optional, Type
 import pyarrow as pa
 
 from solstice.core.models import Split, SplitPayload
+from solstice.core.operator import OperatorRuntime
 from solstice.operators.http.operator import HttpOperator, HttpOperatorConfig
 from solstice.operators.llm.utils import (
     build_multi_image_message,
@@ -158,8 +159,8 @@ class ExternalLLMOperator(HttpOperator):
         )
     """
 
-    def __init__(self, config: ExternalLLMOperatorConfig):
-        super().__init__(config)
+    def __init__(self, config: ExternalLLMOperatorConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self._config = config
 
     def process_split(

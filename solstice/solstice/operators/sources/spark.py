@@ -24,7 +24,7 @@ import pyarrow as pa
 import ray
 
 from solstice.core.models import Split, SplitPayload
-from solstice.core.operator import OperatorConfig
+from solstice.core.operator import OperatorConfig, OperatorRuntime, operator
 from solstice.core.source_operator import SourceOperator
 from solstice.operators.sources.source import SourceMaster
 
@@ -93,6 +93,7 @@ class SparkSourceConfig(OperatorConfig):
     """Tansu storage URL (memory://, s3://)."""
 
 
+@operator(SparkSourceConfig)
 class SparkSource(SourceOperator):
     """Source operator for reading Arrow data from Ray object store.
 
@@ -100,8 +101,8 @@ class SparkSource(SourceOperator):
     by SparkSourceMaster using raydp.
     """
 
-    def __init__(self, config: SparkSourceConfig):
-        super().__init__(config)
+    def __init__(self, config: SparkSourceConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
 
     def read(self, split: Split) -> Optional[SplitPayload]:
         """Read Arrow data from Ray object store.
@@ -150,10 +151,6 @@ class SparkSource(SourceOperator):
     def close(self) -> None:
         """Clean up resources."""
         pass
-
-
-# Set operator_class after class definition
-SparkSourceConfig.operator_class = SparkSource
 
 
 class SparkSourceMaster(SourceMaster):

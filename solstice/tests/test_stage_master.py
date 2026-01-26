@@ -26,15 +26,14 @@ from dataclasses import dataclass
 from typing import List
 from unittest.mock import MagicMock
 
-from solstice.queue import MemoryBroker, MemoryClient
+from solstice.queue import MemoryBroker, MemoryClient, QueueType
 from solstice.core.stage_master import (
     StageMaster,
-    StageConfig,
-    QueueType,
     QueueMessage,
     QueueEndpoint,
 )
-from solstice.core.operator import OperatorConfig, Operator
+from solstice.core.operator import OperatorConfig, Operator, OperatorRuntime, SemanticGuarantee
+from solstice.core.stage import StageRuntime
 
 # Note: Only async test classes/functions should use @pytest.mark.asyncio decorator
 
@@ -47,8 +46,8 @@ from solstice.core.operator import OperatorConfig, Operator
 class MockOperator(Operator):
     """Mock operator that passes through data."""
 
-    def __init__(self, config: "MockOperatorConfig"):
-        super().__init__(config)
+    def __init__(self, config: "MockOperatorConfig", runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self._closed = False
 
     def process_split(self, split, payload):
@@ -86,6 +85,23 @@ class MockStage:
     stage_id: str = "test_stage"
     operator_config: MockOperatorConfig = None
     upstream_stages: List[str] = None
+    # Parallelism settings
+    min_parallelism: int = 1
+    max_parallelism: int = 2
+    output_partitions: int = None
+    # Processing configuration
+    batch_size: int = 100
+    commit_batch_size: int = 5
+    # Backpressure thresholds
+    backpressure_threshold_lag: int = 5000
+    backpressure_threshold_queue_size: int = 1000
+    # Worker lifecycle
+    worker_ready_timeout_seconds: float = 30.0
+    worker_spawn_retry_delay_seconds: float = 2.0
+    # Worker resources
+    num_cpus: float = 1.0
+    num_gpus: float = 0.0
+    memory_mb: int = 0
 
     def __post_init__(self):
         if self.operator_config is None:
@@ -113,14 +129,17 @@ def mock_stage():
 
 
 @pytest.fixture
-def stage_config():
-    """Provide default stage config using MEMORY backend for unit tests."""
-    return StageConfig(
+def stage_runtime():
+    """Provide default stage runtime using MEMORY backend for unit tests."""
+    return StageRuntime(
         queue_type=QueueType.MEMORY,
-        min_workers=1,
-        max_workers=2,
-        batch_size=10,
-        partition_count=1,
+        shared_broker_endpoint=None,
+        upstream_endpoint=None,
+        upstream_topic=None,
+        state_endpoint=None,
+        state_topic=None,
+        semantic_guarantee=SemanticGuarantee.AT_LEAST_ONCE,
+        lineage_sample_rate=0.0,
     )
 
 
@@ -176,49 +195,6 @@ class TestQueueMessage:
 
 
 # ============================================================================
-# StageConfig Tests
-# ============================================================================
-
-
-class TestStageConfig:
-    """Tests for StageConfig."""
-
-    def test_default_values(self):
-        """Test default config values."""
-        config = StageConfig()
-
-        assert config.queue_type == QueueType.TANSU  # Default is RAY for distributed
-        assert config.min_workers == 1
-        assert config.max_workers == 4
-        assert config.batch_size == 100
-
-    def test_tansu_config(self):
-        """Test Tansu-specific config with shared broker endpoint."""
-        endpoint = QueueEndpoint(
-            queue_type=QueueType.TANSU,
-            host="localhost",
-            port=9092,
-            storage_url="s3://my-bucket/",
-        )
-        config = StageConfig(
-            queue_type=QueueType.TANSU,
-            shared_broker_endpoint=endpoint,
-        )
-
-        assert config.queue_type == QueueType.TANSU
-        assert config.shared_broker_endpoint is not None
-        assert config.shared_broker_endpoint.storage_url == "s3://my-bucket/"
-
-    def test_to_dict(self):
-        """Test config serialization."""
-        config = StageConfig(batch_size=50)
-        d = config.to_dict()
-
-        assert d["batch_size"] == 50
-        assert d["queue_type"] == "tansu"  # Default is tansu
-
-
-# ============================================================================
 # StageMaster Tests
 # ============================================================================
 
@@ -227,12 +203,12 @@ class TestStageMaster:
     """Tests for StageMaster."""
 
     @pytest.mark.asyncio
-    async def test_create_output_queue(self, mock_stage, stage_config, payload_store, ray_cluster):
+    async def test_create_output_queue(self, mock_stage, stage_runtime, payload_store, ray_cluster):
         """Test that master creates output queue."""
         master = StageMaster(
             job_id="test_job",
             stage=mock_stage,
-            config=stage_config,
+            runtime=stage_runtime,
             payload_store=payload_store,
         )
 
@@ -244,12 +220,12 @@ class TestStageMaster:
         await master.stop()
 
     @pytest.mark.asyncio
-    async def test_get_status(self, mock_stage, stage_config, payload_store, ray_cluster):
+    async def test_get_status(self, mock_stage, stage_runtime, payload_store, ray_cluster):
         """Test getting stage status."""
         master = StageMaster(
             job_id="test_job",
             stage=mock_stage,
-            config=stage_config,
+            runtime=stage_runtime,
             payload_store=payload_store,
         )
 
@@ -268,12 +244,12 @@ class TestStageMaster:
         await master.stop()
 
     @pytest.mark.asyncio
-    async def test_stop_idempotent(self, mock_stage, stage_config, payload_store, ray_cluster):
+    async def test_stop_idempotent(self, mock_stage, stage_runtime, payload_store, ray_cluster):
         """Test that stop can be called multiple times."""
         master = StageMaster(
             job_id="test_job",
             stage=mock_stage,
-            config=stage_config,
+            runtime=stage_runtime,
             payload_store=payload_store,
         )
 
@@ -282,14 +258,14 @@ class TestStageMaster:
         await master.stop()  # Should not raise
 
     @pytest.mark.asyncio
-    async def test_get_output_queue(self, mock_stage, stage_config, payload_store, ray_cluster):
+    async def test_get_output_queue(self, mock_stage, stage_runtime, payload_store, ray_cluster):
         """Test getting output queue for downstream."""
         from solstice.queue import QueueClient
 
         master = StageMaster(
             job_id="test_job",
             stage=mock_stage,
-            config=stage_config,
+            runtime=stage_runtime,
             payload_store=payload_store,
         )
 

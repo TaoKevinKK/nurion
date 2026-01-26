@@ -12,14 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Core data models for the streaming framework"""
+"""Core data models for the streaming framework.
 
+This module contains shared data classes:
+- Split/SplitPayload: Data processing units
+- Record: Single record flowing through pipeline
+- WorkerMetrics/StageMetrics: Runtime metrics
+- FailurePolicy/FailureTracker: Worker fault tolerance
+- QueueMessage/MessageType: Inter-stage message format
+- StageStatus: Stage runtime status
+- QueueEndpoint: Queue connection info
+"""
+
+import json
 import time
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 import pyarrow as pa
+
+from solstice.queue import QueueType
 
 
 @dataclass
@@ -330,3 +343,278 @@ class SplitPayload:
     @classmethod
     def _rows_from_records(cls, records: Sequence[Record]) -> List[Dict[str, Any]]:
         return [cls._record_to_row(record) for record in records]
+
+
+# =============================================================================
+# Failure Handling
+# =============================================================================
+
+
+@dataclass
+class FailurePolicy:
+    """Worker failure handling policy.
+
+    Based on the "Circuit Breaker with Sliding Window" pattern:
+    - Track failures within a time window (not cumulative)
+    - Use failure rate relative to worker count
+    - Apply exponential backoff for recovery attempts
+
+    Theory:
+    - Transient failures (network blips, GC pauses) should be tolerated
+    - Sustained failures indicate systemic issues and should fail-fast
+    - The sliding window prevents old failures from affecting current decisions
+    """
+
+    # Time window for failure rate calculation (seconds)
+    # Failures older than this are forgotten
+    window_seconds: float = 60.0
+
+    # Maximum allowed failures per worker within the window
+    # e.g., 2.0 means each worker can fail twice per minute on average
+    max_failures_per_worker: float = 2.0
+
+    # Minimum absolute failures before applying rate limit
+    # Prevents failing too early when there are few workers
+    min_failures_before_limit: int = 3
+
+    # Base delay between recovery attempts (seconds)
+    base_recovery_delay: float = 0.5
+
+    # Maximum delay (exponential backoff cap)
+    max_recovery_delay: float = 5.0
+
+
+class FailureTracker:
+    """Tracks worker failures and decides when to give up.
+
+    Uses a sliding window approach to distinguish between:
+    - Transient failures: Occasional failures that should be recovered
+    - Sustained failures: High failure rate indicating systemic issues
+    """
+
+    def __init__(self, policy: FailurePolicy, logger: Any) -> None:
+        self.policy = policy
+        self.logger = logger
+        self._failure_timestamps: List[float] = []
+        self._recovery_attempt: int = 0
+        self._peak_workers: int = 1  # Track highest worker count seen
+
+    def record_failures(self, count: int, current_worker_count: int) -> None:
+        """Record worker failures and prune old entries."""
+        now = time.time()
+
+        # Add new failures
+        self._failure_timestamps.extend([now] * count)
+
+        # Prune failures outside the window
+        cutoff = now - self.policy.window_seconds
+        self._failure_timestamps = [t for t in self._failure_timestamps if t > cutoff]
+
+        self.logger.debug(
+            f"Recorded {count} failures, {len(self._failure_timestamps)} in window, "
+            f"{current_worker_count} workers active"
+        )
+
+    def record_success(self) -> None:
+        """Record successful completion, reset backoff."""
+        self._recovery_attempt = 0
+
+    def should_give_up(self, current_worker_count: int) -> tuple[bool, str]:
+        """Decide if we should stop trying to recover.
+
+        Uses the higher of current workers or peak workers seen to avoid
+        failing too early when many workers fail simultaneously.
+
+        Returns:
+            (should_give_up, reason)
+        """
+        failure_count = len(self._failure_timestamps)
+
+        # Always allow some minimum failures before applying rate limit
+        if failure_count < self.policy.min_failures_before_limit:
+            return False, ""
+
+        # Track peak worker count to handle simultaneous failures fairly
+        # When all workers fail at once, we should still allow recovery attempts
+        self._peak_workers = max(
+            self._peak_workers,
+            current_worker_count,
+            failure_count,  # At least as many workers as failures seen
+        )
+
+        # Use peak workers for rate calculation
+        effective_workers = max(1, self._peak_workers)
+        max_allowed = self.policy.max_failures_per_worker * effective_workers
+
+        if failure_count >= max_allowed:
+            rate = failure_count / effective_workers
+            return True, (
+                f"Failure rate too high: {failure_count} failures / {effective_workers} workers "
+                f"= {rate:.1f} per worker (limit: {self.policy.max_failures_per_worker})"
+            )
+
+        return False, ""
+
+    def get_recovery_delay(self) -> float:
+        """Get delay before next recovery attempt (exponential backoff)."""
+        delay = self.policy.base_recovery_delay * (2**self._recovery_attempt)
+        delay = float(min(delay, self.policy.max_recovery_delay))
+        self._recovery_attempt += 1
+        return delay
+
+    def reset(self) -> None:
+        """Reset tracker state."""
+        self._failure_timestamps.clear()
+        self._recovery_attempt = 0
+
+
+# =============================================================================
+# Queue Messages
+# =============================================================================
+
+
+class MessageType:
+    """Message types for inter-stage communication."""
+
+    DATA = "data"  # Normal data message
+    EOF = "eof"  # End-of-stream marker - no more messages after this
+
+
+@dataclass
+class QueueMessage:
+    """Message format for inter-stage communication.
+
+    The actual data payload is stored in SplitPayloadStore,
+    only the reference key is passed through the queue.
+
+    Message types:
+    - DATA: Normal data message with payload
+    - EOF: End-of-stream marker, signals no more messages in this partition
+    """
+
+    message_id: str
+    split_id: str
+    payload_key: str  # Key to lookup SplitPayload in SplitPayloadStore
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    timestamp: float = field(default_factory=time.time)
+    message_type: str = MessageType.DATA  # DATA or EOF
+
+    def to_bytes(self) -> bytes:
+        return json.dumps(
+            {
+                "message_id": self.message_id,
+                "split_id": self.split_id,
+                "payload_key": self.payload_key,
+                "metadata": self.metadata,
+                "timestamp": self.timestamp,
+                "message_type": self.message_type,
+            }
+        ).encode()
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> "QueueMessage":
+        d = json.loads(data.decode())
+        # Handle backward compatibility - old messages without message_type
+        if "message_type" not in d:
+            d["message_type"] = MessageType.DATA
+        return cls(**d)
+
+    def is_eof(self) -> bool:
+        """Check if this is an end-of-stream marker."""
+        return self.message_type == MessageType.EOF
+
+    @classmethod
+    def create_eof(cls, partition: int) -> "QueueMessage":
+        """Create an EOF marker message for a partition."""
+        return cls(
+            message_id=f"eof_partition_{partition}",
+            split_id="",
+            payload_key="",
+            message_type=MessageType.EOF,
+            metadata={"partition": partition},
+        )
+
+
+# =============================================================================
+# Stage Status
+# =============================================================================
+
+
+@dataclass
+class StageStatus:
+    """Status of a stage."""
+
+    stage_id: str
+    worker_count: int
+    output_queue_size: int  # Real-time progress indicator (records in output queue)
+    is_running: bool
+    is_finished: bool
+    failed: bool = False
+    failure_message: Optional[str] = None
+    metrics: Dict[str, Any] = field(default_factory=dict)
+    backpressure_active: bool = False  # Backpressure status
+
+
+# =============================================================================
+# Queue Endpoint
+# =============================================================================
+
+
+@dataclass
+class QueueEndpoint:
+    """Queue connection info that can be serialized to workers.
+
+    Workers use this to create their own queue connections.
+    """
+
+    queue_type: QueueType
+    host: str = "localhost"
+    port: int = 9092
+    storage_url: str = "memory://"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "queue_type": self.queue_type.value,
+            "host": self.host,
+            "port": self.port,
+            "storage_url": self.storage_url,
+        }
+
+
+def create_queue_endpoint(
+    queue_type: QueueType,
+    host: str | None = None,
+    port: int | None = None,
+    storage_url: str | None = None,
+) -> QueueEndpoint:
+    """Factory to build a queue endpoint without scattering conditionals."""
+    return QueueEndpoint(
+        queue_type=queue_type,
+        host=host or "localhost",
+        port=port if port is not None else 9092,
+        storage_url=storage_url or "memory://",
+    )
+
+
+# =============================================================================
+# Utility Functions
+# =============================================================================
+
+
+def make_split_id(job_id: str, stage_id: str, partition: int, offset: int) -> str:
+    """Generate a deterministic split ID.
+
+    This ID is derived solely from immutable properties (job, stage, partition, offset)
+    so that retries after a crash produce the same ID. This enables downstream
+    deduplication for exactly-once semantics.
+
+    Args:
+        job_id: The job identifier
+        stage_id: The stage identifier
+        partition: The partition number being processed
+        offset: The offset of the input message in the upstream queue
+
+    Returns:
+        A deterministic split ID in the format "job:stage:pN:oM"
+    """
+    return f"{job_id}:{stage_id}:p{partition}:o{offset}"

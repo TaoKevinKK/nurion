@@ -59,7 +59,6 @@ from __future__ import annotations
 import asyncio
 import time
 from abc import abstractmethod
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Iterator, Optional
 
 from confluent_kafka import KafkaException
@@ -75,12 +74,11 @@ from solstice.core.models import Split
 from solstice.core.stage_master import (
     QueueEndpoint,
     QueueMessage,
-    QueueType,
-    StageConfig,
     StageStatus,
     StageMaster,
 )
 from solstice.queue import (
+    QueueType,
     QueueBroker,
     QueueClient,
     TansuQueueClient,
@@ -90,7 +88,7 @@ from solstice.queue import (
 from solstice.utils.logging import create_ray_logger
 
 if TYPE_CHECKING:
-    from solstice.core.stage import Stage
+    from solstice.core.stage import Stage, StageRuntime
     from solstice.core.split_payload_store import SplitPayloadStore
 
 # Import InjectedFaultError for testing - this is raised by FaultInjector
@@ -100,20 +98,6 @@ from solstice.testing.fault_injection import InjectedFaultError
 # InjectedFaultError is included for fault injection testing.
 # In production, Kafka/Tansu errors raise KafkaException.
 _RETRYABLE_EXCEPTIONS = (KafkaException, OSError, TimeoutError, InjectedFaultError)
-
-
-@dataclass
-class SourceConfig(StageConfig):
-    """Configuration for SourceMaster.
-
-    Source stages always use Tansu broker for the source queue (persistence).
-    """
-
-    # Override queue_type to always be TANSU for source queue
-    queue_type: QueueType = QueueType.TANSU
-
-    # Tansu storage URL (memory://, s3://)
-    tansu_storage_url: str = "memory://"
 
 
 class SourceMaster(StageMaster):
@@ -139,18 +123,14 @@ class SourceMaster(StageMaster):
         job_id: str,
         stage: "Stage",
         payload_store: "SplitPayloadStore",
-        config: Optional[SourceConfig] = None,
+        runtime: "StageRuntime",
         **kwargs,
     ):
-        # Source stages use their own source queue as "upstream"
-        # upstream_endpoint/topic are now in StageConfig (set to None for source)
-        config = config or SourceConfig()
-
         super().__init__(
             job_id=job_id,
             stage=stage,
-            config=config,
             payload_store=payload_store,
+            runtime=runtime,
         )
 
         # Source queue (for split metadata, distinct from output queue)
@@ -163,8 +143,8 @@ class SourceMaster(StageMaster):
         # Metrics
         self._splits_produced = 0
 
-        # Backpressure configuration (inherited from parent, but can be overridden)
-        self._backpressure_threshold_queue_size = config.backpressure_threshold_queue_size
+        # Backpressure configuration (from stage)
+        self._backpressure_threshold_queue_size = stage.backpressure_threshold_queue_size
 
         # Override logger
         self.logger = create_ray_logger(f"SourceMaster-{self.stage_id}")
@@ -178,7 +158,7 @@ class SourceMaster(StageMaster):
         Returns:
             QueueClient for producing/consuming messages.
         """
-        if self.config.queue_type == QueueType.MEMORY:
+        if self.runtime.queue_type == QueueType.MEMORY:
             # MEMORY: Create local broker (for testing only)
             broker = MemoryBroker()
             broker.start()
@@ -194,7 +174,7 @@ class SourceMaster(StageMaster):
                 storage_url="memory://",
             )
             # Create source queue with partitions matching source parallelism
-            source_partitions = self.config.max_workers
+            source_partitions = self.stage.max_parallelism
             client.create_topic(self._source_topic, partitions=source_partitions)
             self.logger.info(
                 f"Created Memory source queue for {self.stage_id} with {source_partitions} partition(s)"
@@ -202,7 +182,7 @@ class SourceMaster(StageMaster):
             return client
         else:
             # TANSU: Connect to shared broker (required)
-            endpoint = self.config.shared_broker_endpoint
+            endpoint = self.runtime.shared_broker_endpoint
             if not endpoint:
                 raise RuntimeError(
                     f"Source {self.stage_id}: shared_broker_endpoint is required for TANSU queue type"
@@ -221,7 +201,7 @@ class SourceMaster(StageMaster):
             )
 
             # Create source queue with partitions matching source parallelism
-            source_partitions = self.config.max_workers
+            source_partitions = self.stage.max_parallelism
             tansu_client.create_topic(self._source_topic, partitions=source_partitions)
             self.logger.info(
                 f"Connected to shared broker at {broker_url} for source {self.stage_id} "
@@ -268,14 +248,14 @@ class SourceMaster(StageMaster):
         assert self._worker_manager is not None
 
         # Update worker manager with source queue info (workers consume from source queue)
-        self._worker_manager.set_target_worker_count(self.config.min_workers)
+        self._worker_manager.set_target_worker_count(self.stage.min_parallelism)
         self._worker_manager.set_upstream_config(self._source_endpoint, self._source_topic)
 
         # Get partition count for worker assignment
         partition_count = await self._partition_manager.get_upstream_partition_count()
 
         # Spawn workers (min workers are required, so is_min_worker=True)
-        for i in range(self.config.min_workers):
+        for i in range(self.stage.min_parallelism):
             await self._worker_manager.spawn_worker(
                 partition_count=partition_count,
                 is_min_worker=True,
@@ -349,7 +329,7 @@ class SourceMaster(StageMaster):
         from solstice.core.stage_master import QueueMessage
 
         # Send EOF to each partition with retry logic
-        source_partitions = self.config.max_workers
+        source_partitions = self.stage.max_parallelism
 
         for partition in range(source_partitions):
             eof_message = QueueMessage.create_eof(partition=partition)
@@ -486,7 +466,7 @@ class SourceMaster(StageMaster):
         )
 
         # Distribute splits across partitions using round-robin
-        source_partitions = self.config.max_workers
+        source_partitions = self.stage.max_parallelism
         partition = self._splits_produced % source_partitions
 
         # Produce to source queue

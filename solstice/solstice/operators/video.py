@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from solstice.core.models import SplitPayload
-from solstice.core.operator import Operator, OperatorConfig
+from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime, operator
 from solstice.utils.remote import ensure_local_file
 
 import pyarrow as pa
@@ -137,11 +137,12 @@ class FFmpegSceneDetectConfig(OperatorConfig):
     """Minimum scene duration in seconds."""
 
 
+@operator(FFmpegSceneDetectConfig)
 class FFmpegSceneDetectOperator(Operator):
     """Detect scenes for each video referenced in a batch."""
 
-    def __init__(self, config: FFmpegSceneDetectConfig):
-        super().__init__(config)
+    def __init__(self, config: FFmpegSceneDetectConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self.scene_threshold = config.scene_threshold
         self.min_scene_duration = config.min_scene_duration
 
@@ -220,10 +221,6 @@ class FFmpegSceneDetectOperator(Operator):
         )
 
 
-# Set operator_class after class definition
-FFmpegSceneDetectConfig.operator_class = FFmpegSceneDetectOperator
-
-
 @dataclass
 class FFmpegSliceConfig(OperatorConfig):
     """Configuration for FFmpegSliceOperator."""
@@ -232,14 +229,15 @@ class FFmpegSliceConfig(OperatorConfig):
     """Minimum scene duration in seconds."""
 
 
+@operator(FFmpegSliceConfig)
 class FFmpegSliceOperator(Operator):
     """Materialize binary slices for each detected scene.
 
     Slices are stored as binary data (bytes) for Lance blob storage.
     """
 
-    def __init__(self, config: FFmpegSliceConfig):
-        super().__init__(config)
+    def __init__(self, config: FFmpegSliceConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self.min_duration = config.min_scene_duration
 
     def _build_slice_filename(self, record: Dict[str, Any]) -> str:
@@ -323,10 +321,6 @@ class FFmpegSliceOperator(Operator):
             pa.Table.from_pylist(outputs),
             split_id=f"{batch.split_id}:slice-{self.worker_id}",
         )
-
-
-# Set operator_class after class definition
-FFmpegSliceConfig.operator_class = FFmpegSliceOperator
 
 
 def attach_slice_hash(record_value: Dict[str, Any]) -> Dict[str, Any]:

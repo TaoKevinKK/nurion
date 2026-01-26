@@ -51,7 +51,7 @@ import pyarrow as pa
 from solstice.core.operator import master_callable
 
 from solstice.core.models import Split, SplitPayload
-from solstice.core.operator import Operator, OperatorConfig
+from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime, operator
 from solstice.operators.shuffle import ShuffleOperator, ShuffleOperatorConfig
 
 if TYPE_CHECKING:
@@ -72,9 +72,8 @@ class CCInitConfig(OperatorConfig):
     doc_id_1_column: str = "doc_id_1"
     doc_id_2_column: str = "doc_id_2"
 
-    operator_class: ClassVar[Type["CCInitOperator"]] = None  # type: ignore[assignment]  # Set below
 
-
+@operator(CCInitConfig)
 class CCInitOperator(Operator):
     """Initialize labels and generate initial messages from candidate pairs.
 
@@ -86,8 +85,8 @@ class CCInitOperator(Operator):
     This operator is STATELESS - it generates messages without storing state.
     """
 
-    def __init__(self, config: CCInitConfig):
-        super().__init__(config)
+    def __init__(self, config: CCInitConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self.init_config = config
 
     def process_split(
@@ -139,9 +138,6 @@ class CCInitOperator(Operator):
         return SplitPayload(data=result, split_id=split.split_id)
 
 
-CCInitConfig.operator_class = CCInitOperator
-
-
 @dataclass
 class CCIterateConfig(ShuffleOperatorConfig):
     """Configuration for CC iteration (reduce step).
@@ -174,6 +170,7 @@ class CCIterateConfig(ShuffleOperatorConfig):
             self.partition_keys = [self.doc_id_column]
 
 
+@operator(CCIterateConfig)
 class CCIterateOperator(ShuffleOperator):
     """Operator for iterative label propagation (reduce step).
 
@@ -195,8 +192,8 @@ class CCIterateOperator(ShuffleOperator):
     - `get_iteration_changes()` - Get total changes for convergence check
     """
 
-    def __init__(self, config: CCIterateConfig):
-        super().__init__(config)
+    def __init__(self, config: CCIterateConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self.iterate_config = config
 
         # Iteration tracking (in-memory for current batch, persisted to state store)
@@ -537,8 +534,6 @@ class CCIterateOperator(ShuffleOperator):
         return changes
 
 
-CCIterateConfig.operator_class = CCIterateOperator
-
 # Set master_class after imports to avoid circular imports
 from solstice.operators.cc_master import CCIterateMaster  # noqa: E402
 
@@ -561,9 +556,8 @@ class CCMessageConfig(OperatorConfig):
     label_column: str = "label"
     neighbor_column: str = "neighbor_id"
 
-    operator_class: ClassVar[Type["CCMessageOperator"]] = None  # type: ignore[assignment]  # Set below
 
-
+@operator(CCMessageConfig)
 class CCMessageOperator(Operator):
     """Stateless operator for generating messages (map step).
 
@@ -577,8 +571,8 @@ class CCMessageOperator(Operator):
     The pipeline should include edge information in the data flow.
     """
 
-    def __init__(self, config: CCMessageConfig):
-        super().__init__(config)
+    def __init__(self, config: CCMessageConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self.message_config = config
 
     def process_split(
@@ -635,9 +629,6 @@ class CCMessageOperator(Operator):
         )
 
 
-CCMessageConfig.operator_class = CCMessageOperator
-
-
 @dataclass
 class DedupeByClusterConfig(ShuffleOperatorConfig):
     """Configuration for deduplication by cluster.
@@ -652,13 +643,12 @@ class DedupeByClusterConfig(ShuffleOperatorConfig):
     doc_id_column: str = "doc_id"
     cluster_id_column: str = "label"
 
-    operator_class: ClassVar[Type["DedupeByClusterOperator"]] = None  # type: ignore[assignment]  # Set below
-
     def __post_init__(self):
         # Partition by cluster_id for grouping
         self.partition_keys = [self.cluster_id_column]
 
 
+@operator(DedupeByClusterConfig)
 class DedupeByClusterOperator(ShuffleOperator):
     """Stateless operator to keep one representative document per cluster.
 
@@ -672,8 +662,8 @@ class DedupeByClusterOperator(ShuffleOperator):
     This is the final stage of MinHash deduplication.
     """
 
-    def __init__(self, config: DedupeByClusterConfig):
-        super().__init__(config)
+    def __init__(self, config: DedupeByClusterConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self.cluster_config = config
 
     def process_data(self, table: pa.Table) -> Optional[pa.Table]:
@@ -702,6 +692,3 @@ class DedupeByClusterOperator(ShuffleOperator):
 
         # Return selected rows (without the partition column)
         return table.take(keep_rows)
-
-
-DedupeByClusterConfig.operator_class = DedupeByClusterOperator

@@ -17,7 +17,7 @@
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from solstice.core.operator import Operator, OperatorConfig
+from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime, operator
 from solstice.core.models import Split, SplitPayload
 
 
@@ -29,11 +29,12 @@ class FilterOperatorConfig(OperatorConfig):
     """Predicate function that returns True for records to keep."""
 
 
+@operator(FilterOperatorConfig)
 class FilterOperator(Operator):
     """Operator that filters records based on a predicate"""
 
-    def __init__(self, config: FilterOperatorConfig):
-        super().__init__(config)
+    def __init__(self, config: FilterOperatorConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
 
         if not callable(config.filter_fn):
             raise ValueError("filter_fn must be a callable returning bool")
@@ -56,7 +57,3 @@ class FilterOperator(Operator):
         except Exception as e:
             self.logger.error(f"Error filtering split {split.split_id}: {e}")
             return None
-
-
-# Set operator_class after class definition
-FilterOperatorConfig.operator_class = FilterOperator

@@ -18,7 +18,7 @@ from abc import abstractmethod
 from typing import Any, Dict, Optional
 
 from solstice.core.models import Split, SplitPayload
-from solstice.core.operator import Operator, OperatorConfig
+from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime
 
 
 class SourceOperator(Operator):
@@ -28,8 +28,8 @@ class SourceOperator(Operator):
     Subclasses should update the offset after reading data using `update_offset()`.
     """
 
-    def __init__(self, config: OperatorConfig):
-        super().__init__(config)
+    def __init__(self, config: OperatorConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         # Offset tracking for checkpoint/resume
         self._current_offset: Dict[str, Any] = {}
 

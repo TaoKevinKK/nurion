@@ -39,13 +39,13 @@ shuffle-dedupe step if needed.
 """
 
 from dataclasses import dataclass
-from typing import ClassVar, Dict, List, Optional, Set, Tuple, Type
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pyarrow as pa
 
 from solstice.core.models import Split, SplitPayload
-from solstice.core.operator import Operator, OperatorConfig
+from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime, operator
 from solstice.operators.minhash.compute import jaccard_similarity
 
 
@@ -67,9 +67,8 @@ class CandidatePairConfig(OperatorConfig):
     band_hash_column: str = "band_hash"
     signature_column: str = "signature"
 
-    operator_class: ClassVar[Type["CandidatePairOperator"]] = None  # type: ignore[assignment]  # Set below
 
-
+@operator(CandidatePairConfig)
 class CandidatePairOperator(Operator):
     """Stateless operator for generating candidate pairs from MinHash bands.
 
@@ -95,8 +94,8 @@ class CandidatePairOperator(Operator):
     so all documents with the same band_hash are in the same partition.
     """
 
-    def __init__(self, config: CandidatePairConfig):
-        super().__init__(config)
+    def __init__(self, config: CandidatePairConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self.candidate_config = config
 
     def process_split(
@@ -209,7 +208,3 @@ class CandidatePairOperator(Operator):
                 attempts += 1
 
             return pairs
-
-
-# Set the operator class reference
-CandidatePairConfig.operator_class = CandidatePairOperator
