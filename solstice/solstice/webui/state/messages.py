@@ -14,8 +14,15 @@
 
 """State message definitions for push-based metrics.
 
-All state changes and metrics are published as StateMessages to Tansu.
-This enables event sourcing - replay messages to rebuild state.
+Architecture:
+- WORKER_STATE: Real-time worker lifecycle and status (immediate produce/consume)
+- SPLIT_METRICS_BATCH: Atomic per-split processing metrics (batch produce/consume)
+
+Key design principles:
+1. Split metrics are atomic - no aggregation, just raw data
+2. Split metrics bind to partition (strong), worker (weak)
+3. Worker state is real-time for lifecycle management
+4. All rate calculations done at query time (Prometheus-style)
 """
 
 from __future__ import annotations
@@ -24,17 +31,11 @@ import json
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 class StateMessageType(str, Enum):
-    """Types of state messages.
-
-    Messages are categorized into:
-    - Lifecycle events: Happen once (job/stage/worker start/stop)
-    - Metrics: Periodic updates (throughput, counts, lag)
-    - Events: Sporadic occurrences (exceptions, backpressure)
-    """
+    """Types of state messages."""
 
     # Job lifecycle
     JOB_STARTED = "job_started"
@@ -49,41 +50,26 @@ class StateMessageType(str, Enum):
     WORKER_STARTED = "worker_started"
     WORKER_STOPPED = "worker_stopped"
 
-    # Metrics (periodic, rate-limited)
-    STAGE_METRICS = "stage_metrics"
-    WORKER_METRICS = "worker_metrics"
+    # Worker state (immediate) - lightweight status update
+    WORKER_STATE = "worker_state"
 
-    # Events (sporadic)
+    # Split metrics (batch) - atomic per-split data
+    SPLIT_METRICS_BATCH = "split_metrics_batch"
+
+    # Events
     EXCEPTION = "exception"
     BACKPRESSURE = "backpressure"
-    CHECKPOINT = "checkpoint"
-
-    # Lineage
-    SPLIT_PROCESSED = "split_processed"
 
 
 @dataclass
 class StateMessage:
-    """Unified message for job state and metrics.
-
-    All state changes and metrics are published as StateMessages.
-    This enables event sourcing: replay messages to rebuild state.
-
-    Attributes:
-        message_type: Type of state update
-        job_id: Job this message belongs to
-        source_id: Entity that produced this message (job_id, stage_id, or worker_id)
-        timestamp: When this message was created (Unix timestamp)
-        payload: Type-specific data
-        sequence: Optional sequence number for ordering (set by producer)
-    """
+    """Unified message for job state and metrics."""
 
     message_type: StateMessageType
     job_id: str
     source_id: str
     timestamp: float = field(default_factory=time.time)
     payload: Dict[str, Any] = field(default_factory=dict)
-    sequence: Optional[int] = None
 
     def to_bytes(self) -> bytes:
         """Serialize to bytes for Tansu produce."""
@@ -94,7 +80,6 @@ class StateMessage:
                 "source_id": self.source_id,
                 "timestamp": self.timestamp,
                 "payload": self.payload,
-                "sequence": self.sequence,
             }
         ).encode("utf-8")
 
@@ -108,7 +93,6 @@ class StateMessage:
             source_id=d["source_id"],
             timestamp=d["timestamp"],
             payload=d.get("payload", {}),
-            sequence=d.get("sequence"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -119,12 +103,112 @@ class StateMessage:
             "source_id": self.source_id,
             "timestamp": self.timestamp,
             "payload": self.payload,
-            "sequence": self.sequence,
         }
 
 
 # =============================================================================
-# Factory functions for common message types
+# Split Metrics - Atomic per-split data (batch produce/consume)
+# =============================================================================
+
+
+@dataclass
+class SplitMetric:
+    """Atomic metrics for a single split.
+
+    Labels (dimensions):
+        - stage_id: Which stage processed this
+        - partition_id: Which partition this split came from (strong binding)
+        - offset: Message offset in the partition
+        - worker_id: Which worker processed (weak binding, for debugging)
+
+    Metrics:
+        - process_time_ms: Time to process this split
+        - input_records: Records in input
+        - output_records: Records in output
+    """
+
+    stage_id: str
+    partition_id: int
+    offset: int
+    worker_id: str
+    process_time_ms: float
+    input_records: int = 0
+    output_records: int = 0
+    timestamp: float = field(default_factory=time.time)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "stage_id": self.stage_id,
+            "partition_id": self.partition_id,
+            "offset": self.offset,
+            "worker_id": self.worker_id,
+            "process_time_ms": self.process_time_ms,
+            "input_records": self.input_records,
+            "output_records": self.output_records,
+            "timestamp": self.timestamp,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> SplitMetric:
+        return cls(
+            stage_id=d["stage_id"],
+            partition_id=d["partition_id"],
+            offset=d["offset"],
+            worker_id=d["worker_id"],
+            process_time_ms=d["process_time_ms"],
+            input_records=d.get("input_records", 0),
+            output_records=d.get("output_records", 0),
+            timestamp=d.get("timestamp", time.time()),
+        )
+
+
+def split_metrics_batch_message(
+    job_id: str,
+    stage_id: str,
+    worker_id: str,
+    metrics: List[SplitMetric],
+) -> StateMessage:
+    """Create a SPLIT_METRICS_BATCH message."""
+    return StateMessage(
+        message_type=StateMessageType.SPLIT_METRICS_BATCH,
+        job_id=job_id,
+        source_id=worker_id,
+        payload={
+            "stage_id": stage_id,
+            "metrics": [m.to_dict() for m in metrics],
+        },
+    )
+
+
+# =============================================================================
+# Worker State - Real-time status (immediate produce/consume)
+# =============================================================================
+
+
+def worker_state_message(
+    job_id: str,
+    stage_id: str,
+    worker_id: str,
+    status: str,  # "RUNNING", "IDLE", "STOPPED"
+    assigned_partitions: List[int],
+    partition_offsets: Optional[Dict[int, int]] = None,
+) -> StateMessage:
+    """Create a WORKER_STATE message."""
+    return StateMessage(
+        message_type=StateMessageType.WORKER_STATE,
+        job_id=job_id,
+        source_id=worker_id,
+        payload={
+            "stage_id": stage_id,
+            "status": status,
+            "assigned_partitions": assigned_partitions,
+            "partition_offsets": partition_offsets or {},
+        },
+    )
+
+
+# =============================================================================
+# Job/Stage Lifecycle Messages
 # =============================================================================
 
 
@@ -134,14 +218,7 @@ def job_started_message(
     stages: list,
     config: Optional[Dict[str, Any]] = None,
 ) -> StateMessage:
-    """Create a JOB_STARTED message.
-
-    Args:
-        job_id: Job identifier
-        dag_edges: Pipeline DAG structure {stage_id: [upstream_stage_ids]}
-        stages: List of stage info dicts
-        config: Optional job configuration
-    """
+    """Create a JOB_STARTED message."""
     return StateMessage(
         message_type=StateMessageType.JOB_STARTED,
         job_id=job_id,
@@ -158,7 +235,6 @@ def job_completed_message(
     job_id: str,
     status: str = "COMPLETED",
     duration_ms: Optional[int] = None,
-    final_metrics: Optional[Dict[str, Any]] = None,
 ) -> StateMessage:
     """Create a JOB_COMPLETED or JOB_FAILED message."""
     msg_type = (
@@ -171,7 +247,6 @@ def job_completed_message(
         payload={
             "status": status,
             "duration_ms": duration_ms,
-            "final_metrics": final_metrics or {},
         },
     )
 
@@ -209,24 +284,9 @@ def stage_completed_message(
     )
 
 
-def stage_metrics_message(
-    job_id: str,
-    stage_id: str,
-    worker_count: int,
-) -> StateMessage:
-    """Create a STAGE_METRICS message.
-
-    Note: input_records and output_records are aggregated from WORKER_METRICS
-    by the state manager, not sent by stage master.
-    """
-    return StateMessage(
-        message_type=StateMessageType.STAGE_METRICS,
-        job_id=job_id,
-        source_id=stage_id,
-        payload={
-            "worker_count": worker_count,
-        },
-    )
+# =============================================================================
+# Worker Lifecycle Messages
+# =============================================================================
 
 
 def worker_started_message(
@@ -252,13 +312,8 @@ def worker_stopped_message(
     stage_id: str,
     worker_id: str,
     reason: str = "completed",
-    processed_count: int = 0,
-    error_count: int = 0,
-    input_records: int = 0,
-    output_records: int = 0,
-    processing_time: float = 0.0,
 ) -> StateMessage:
-    """Create a WORKER_STOPPED message with final metrics."""
+    """Create a WORKER_STOPPED message."""
     return StateMessage(
         message_type=StateMessageType.WORKER_STOPPED,
         job_id=job_id,
@@ -266,41 +321,13 @@ def worker_stopped_message(
         payload={
             "stage_id": stage_id,
             "reason": reason,
-            "processed_count": processed_count,
-            "error_count": error_count,
-            "input_records": input_records,
-            "output_records": output_records,
-            "processing_time": processing_time,
         },
     )
 
 
-def worker_metrics_message(
-    job_id: str,
-    stage_id: str,
-    worker_id: str,
-    input_records: int,
-    output_records: int,
-    processing_time: float,
-    processed_count: int = 0,
-    assigned_partitions: Optional[list] = None,
-    is_running: bool = True,
-) -> StateMessage:
-    """Create a WORKER_METRICS message."""
-    return StateMessage(
-        message_type=StateMessageType.WORKER_METRICS,
-        job_id=job_id,
-        source_id=worker_id,
-        payload={
-            "stage_id": stage_id,
-            "input_records": input_records,
-            "output_records": output_records,
-            "processing_time": processing_time,
-            "processed_count": processed_count,
-            "assigned_partitions": assigned_partitions or [],
-            "is_running": is_running,
-        },
-    )
+# =============================================================================
+# Event Messages
+# =============================================================================
 
 
 def exception_message(
@@ -333,7 +360,6 @@ def backpressure_message(
     stage_id: str,
     active: bool,
     queue_lag: int = 0,
-    slow_down_factor: float = 1.0,
 ) -> StateMessage:
     """Create a BACKPRESSURE message."""
     return StateMessage(
@@ -343,72 +369,5 @@ def backpressure_message(
         payload={
             "active": active,
             "queue_lag": queue_lag,
-            "slow_down_factor": slow_down_factor,
-        },
-    )
-
-
-def split_processed_message(
-    job_id: str,
-    stage_id: str,
-    worker_id: str,
-    split_id: str,
-    parent_split_ids: list,
-    partition_id: int,
-    # Timing
-    enqueue_time: float,
-    dequeue_time: float,
-    complete_time: float,
-    # Data
-    input_records: int,
-    output_records: int,
-    input_bytes: int,
-    output_bytes: int,
-    # Payload reference
-    payload_store_key: str,
-    payload_storage_path: Optional[str] = None,
-) -> StateMessage:
-    """Create a SPLIT_PROCESSED message for lineage tracking.
-
-    Args:
-        job_id: Job identifier
-        stage_id: Stage identifier
-        worker_id: Worker identifier
-        split_id: Split identifier
-        parent_split_ids: List of parent split IDs
-        partition_id: Partition this split was consumed from
-        enqueue_time: When split entered the queue (Unix timestamp)
-        dequeue_time: When worker started processing (Unix timestamp)
-        complete_time: When processing finished (Unix timestamp)
-        input_records: Number of input records
-        output_records: Number of output records
-        input_bytes: Size of input payload in bytes
-        output_bytes: Size of output payload in bytes
-        payload_store_key: Key in SplitPayloadStore for accessing the payload
-        payload_storage_path: Optional external storage path if persisted
-    """
-    return StateMessage(
-        message_type=StateMessageType.SPLIT_PROCESSED,
-        job_id=job_id,
-        source_id=worker_id,
-        payload={
-            "stage_id": stage_id,
-            "split_id": split_id,
-            "parent_split_ids": parent_split_ids,
-            "partition_id": partition_id,
-            # Timing
-            "enqueue_time": enqueue_time,
-            "dequeue_time": dequeue_time,
-            "complete_time": complete_time,
-            "queue_wait_time_ms": (dequeue_time - enqueue_time) * 1000,
-            "processing_time_ms": (complete_time - dequeue_time) * 1000,
-            # Data
-            "input_records": input_records,
-            "output_records": output_records,
-            "input_bytes": input_bytes,
-            "output_bytes": output_bytes,
-            # Payload reference
-            "payload_store_key": payload_store_key,
-            "payload_storage_path": payload_storage_path,
         },
     )

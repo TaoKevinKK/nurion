@@ -123,7 +123,6 @@ def main(job_id: str, wait_time: int):
     job.config.webui = WebUIConfig(
         enabled=True,
         storage_path=webui_storage,
-        prometheus_enabled=False,  # Disable for demo
         port=5000,
         lineage_sample_rate=1.0,  # Full lineage tracking
     )

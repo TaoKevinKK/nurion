@@ -34,8 +34,6 @@ class WebUIConfig:
     Attributes:
         enabled: Whether to enable WebUI
         storage_path: SlateDB storage path (local or s3://)
-        prometheus_enabled: Whether to export Prometheus metrics
-        prometheus_pushgateway: Optional Prometheus Pushgateway URL
         metrics_snapshot_interval_s: Interval between SlateDB metrics snapshots
         archive_on_completion: Whether to archive job data when complete
         port: Embedded WebUI base port (increment until free)
@@ -44,8 +42,6 @@ class WebUIConfig:
 
     enabled: bool = False
     storage_path: str = "/tmp/solstice-webui/"
-    prometheus_enabled: bool = True
-    prometheus_pushgateway: Optional[str] = None
     metrics_snapshot_interval_s: float = 30.0
     archive_on_completion: bool = True
     port: int = 5000

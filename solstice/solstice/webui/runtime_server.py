@@ -23,7 +23,7 @@ from typing import Optional
 import uvicorn
 
 from solstice.webui.app import create_webui_app
-from solstice.webui.storage.slatedb_storage import JobStorage
+from solstice.webui.storage import JobStorage
 from solstice.utils.logging import create_ray_logger
 
 
@@ -40,7 +40,11 @@ def _find_available_port(host: str, start_port: int, max_tries: int = 200) -> in
 
 
 class EmbeddedWebUIServer:
-    """Run WebUI inside the job driver process."""
+    """Run WebUI inside the job driver process.
+
+    Reads metrics from JobStorage (SlateDB) which is populated by
+    JobStateManager consuming from Tansu state topic.
+    """
 
     def __init__(
         self,
@@ -65,7 +69,12 @@ class EmbeddedWebUIServer:
 
         host = self.host
         port = _find_available_port(host, self.port_base)
-        app = create_webui_app(self.storage, title=f"Solstice Job {self.job_id}", base_path="")
+
+        app = create_webui_app(
+            self.storage,
+            title=f"Solstice Job {self.job_id}",
+            base_path="",
+        )
 
         config = uvicorn.Config(
             app,

@@ -143,17 +143,22 @@ def create_webui_app(
     async def stage_detail_page(job_id: str, stage_id: str, request: Request):
         """Stage detail page."""
         stage_data = {"stage_id": stage_id, "status": "NOT_FOUND"}
-        workers = []
-        partition_metrics = []
 
         job_data = storage.get_job_archive(job_id)
         if job_data:
             for s in job_data.get("stages", []):
                 if s.get("stage_id") == stage_id:
                     stage_data = s
-                    workers = s.get("workers", [])
-                    partition_metrics = s.get("partition_metrics", [])
                     break
+
+        # Get workers for this stage
+        workers = storage.list_workers(job_id, stage_id=stage_id, limit=500)
+
+        # Get partition offsets (Gauge metrics)
+        partition_offsets = storage.get_partition_offsets(job_id, stage_id=stage_id)
+
+        # Get throughput (rate calculations)
+        throughput = storage.get_throughput(job_id, stage_id=stage_id, time_range_s=60.0)
 
         return templates.TemplateResponse(
             "stage_detail.html",
@@ -162,7 +167,8 @@ def create_webui_app(
                 "job_id": job_id,
                 "stage": stage_data,
                 "workers": workers,
-                "partition_metrics": partition_metrics,
+                "partition_offsets": partition_offsets,
+                "throughput": throughput,
             },
         )
 
@@ -173,6 +179,9 @@ def create_webui_app(
         stages = job_data.get("stages", [])
         workers = storage.list_workers(job_id, limit=500)
 
+        # Get throughput for the whole job
+        throughput = storage.get_throughput(job_id, time_range_s=60.0)
+
         return templates.TemplateResponse(
             "workers.html",
             {
@@ -180,6 +189,7 @@ def create_webui_app(
                 "job": job_data,
                 "stages": stages,
                 "workers": workers,
+                "throughput": throughput,
             },
         )
 
@@ -188,12 +198,20 @@ def create_webui_app(
         """Worker detail page."""
         import time as time_module
 
+        now = time_module.time()
         worker_data = storage.get_worker_history(job_id, worker_id) or {
             "worker_id": worker_id,
             "stage_id": "",
             "status": "UNKNOWN",
         }
         worker_events = storage.list_worker_events(job_id, worker_id=worker_id, limit=50)
+
+        # Get rate metrics for this worker
+        worker_rates = {
+            "input_records_per_sec": storage.rate(job_id, worker_id, "input_records", 60.0),
+            "output_records_per_sec": storage.rate(job_id, worker_id, "output_records", 60.0),
+            "splits_per_sec": storage.rate(job_id, worker_id, "processed_count", 60.0),
+        }
 
         # Live debugging: query Ray actor info
         try:
@@ -218,7 +236,8 @@ def create_webui_app(
                 "job_id": job_id,
                 "worker": worker_data,
                 "worker_events": worker_events,
-                "now": time_module.time(),
+                "worker_rates": worker_rates,
+                "now": now,
             },
         )
 
@@ -263,82 +282,17 @@ def create_webui_app(
     # API Routes
     # =========================================================================
 
-    # Include API routers
+    from solstice.webui.api.jobs import router as jobs_router
+    from solstice.webui.api.stages import router as stages_router
+    from solstice.webui.api.workers import router as workers_router
     from solstice.webui.api.lineage import router as lineage_router
+    from solstice.webui.api.exceptions import router as exceptions_router
 
+    app.include_router(jobs_router, prefix="/api")
+    app.include_router(stages_router, prefix="/api")
+    app.include_router(workers_router, prefix="/api")
     app.include_router(lineage_router, prefix="/api")
-
-    @app.get("/api/jobs")
-    async def api_list_jobs():
-        """API: List all jobs."""
-        return {
-            "running": storage.list_jobs(status="RUNNING", limit=100),
-            "completed": storage.list_jobs(status="COMPLETED", limit=100),
-        }
-
-    @app.get("/api/jobs/{job_id}/stages")
-    async def api_list_stages(job_id: str):
-        """API: List stages for a job."""
-        from fastapi import HTTPException
-
-        job_data = storage.get_job_archive(job_id)
-        if not job_data:
-            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-
-        stages = job_data.get("stages", [])
-        transformed = []
-        for stage in stages:
-            metrics = stage.get("final_metrics", {})
-            # Only return status - client derives is_running/is_finished/failed from it
-            transformed.append(
-                {
-                    "stage_id": stage.get("stage_id", ""),
-                    "operator_type": stage.get("operator_type", ""),
-                    "status": stage.get("status", "PENDING"),
-                    "worker_count": stage.get("worker_count", 0) or metrics.get("worker_count", 0),
-                    "input_count": stage.get("input_records", 0) or metrics.get("input_records", 0),
-                    "output_count": stage.get("output_records", 0)
-                    or metrics.get("output_records", 0),
-                    "output_queue_size": stage.get("output_queue_size", 0)
-                    or metrics.get("output_buffer_size", 0),
-                }
-            )
-
-        return {
-            "job_id": job_id,
-            "stages": transformed,
-            "dag_edges": job_data.get("dag_edges", {}),
-        }
-
-    @app.get("/api/jobs/{job_id}/stages/{stage_id}/metrics-history")
-    async def api_stage_metrics_history(job_id: str, stage_id: str):
-        """Get metrics history for a stage.
-
-        Returns queue lag (pending records) over time for charting.
-        """
-        # Get all metrics history (use wide time range to get everything)
-        history = storage.get_metrics_history(job_id, stage_id, 0, float("inf"))
-
-        # Extract queue lag data for chart
-        chart_data = []
-        for m in history:
-            ts = m.get("timestamp", 0)
-            if ts > 0:  # Only include data with valid timestamps
-                # Calculate total lag from partition_metrics
-                partition_metrics = m.get("partition_metrics", {})
-                total_lag = sum(p.get("lag", 0) for p in partition_metrics.values())
-                chart_data.append(
-                    {
-                        "timestamp": ts,
-                        "queue_size": total_lag,
-                    }
-                )
-
-        return {
-            "job_id": job_id,
-            "stage_id": stage_id,
-            "data": chart_data,
-        }
+    app.include_router(exceptions_router, prefix="/api")
 
     @app.get("/health")
     async def health():

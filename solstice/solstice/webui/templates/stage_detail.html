@@ -32,7 +32,7 @@
     <section>
         <div class="metrics-grid">
             <div class="metric-card">
-                <div class="metric-value">{{ stage.worker_count|default(0) }}</div>
+                <div class="metric-value">{{ workers|length }}</div>
                 <div class="metric-label">Workers</div>
                 <div class="metric-sublabel">{{ stage.min_parallelism|default('?') }}-{{ stage.max_parallelism|default('?') }}</div>
             </div>
@@ -47,6 +47,25 @@
             <div class="metric-card">
                 <div class="metric-value">{{ (stage.output_count|default(stage.output_records if stage.output_records else 0)|default(0))|format_number }}</div>
                 <div class="metric-label">Output Records</div>
+            </div>
+        </div>
+    </section>
+    
+    <!-- Throughput (rate calculations) -->
+    <section>
+        <h2>Throughput (last 60s)</h2>
+        <div class="metrics-grid">
+            <div class="metric-card">
+                <div class="metric-value">{{ "%.1f"|format(throughput.total_input_rate|default(0)) }}</div>
+                <div class="metric-label">Input/sec</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">{{ "%.1f"|format(throughput.total_output_rate|default(0)) }}</div>
+                <div class="metric-label">Output/sec</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">{{ "%.1f"|format(throughput.total_splits_rate|default(0)) }}</div>
+                <div class="metric-label">Splits/sec</div>
             </div>
         </div>
     </section>
@@ -79,15 +98,18 @@
             <table>
                 <thead>
                     <tr>
-                        <th style="width: 30%;">Worker ID</th>
-                        <th style="width: 12%;">Status</th>
-                        <th class="number" style="width: 15%;">Processed</th>
+                        <th style="width: 25%;">Worker ID</th>
+                        <th style="width: 10%;">Status</th>
+                        <th class="number" style="width: 12%;">Input/s</th>
+                        <th class="number" style="width: 12%;">Output/s</th>
+                        <th class="number" style="width: 12%;">Processed</th>
                         <th style="width: 15%;">Partitions</th>
-                        <th style="width: 18%;">Links</th>
+                        <th style="width: 10%;">Links</th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for worker in workers %}
+                    {% set worker_throughput = throughput.workers|selectattr('worker_id', 'equalto', worker.worker_id)|first if throughput.workers else none %}
                     <tr>
                         <td class="monospace" style="font-size: 0.75rem;">
                             <a href="{{ base_path }}/jobs/{{ job_id }}/workers/{{ worker.worker_id }}">
@@ -96,6 +118,20 @@
                         </td>
                         <td>
                             <span class="badge badge-{{ worker.status|lower }}">{{ worker.status }}</span>
+                        </td>
+                        <td class="number">
+                            {% if worker_throughput %}
+                            {{ "%.1f"|format(worker_throughput.input_records_per_sec|default(0)) }}
+                            {% else %}
+                            -
+                            {% endif %}
+                        </td>
+                        <td class="number">
+                            {% if worker_throughput %}
+                            {{ "%.1f"|format(worker_throughput.output_records_per_sec|default(0)) }}
+                            {% else %}
+                            -
+                            {% endif %}
                         </td>
                         <td class="number">{{ worker.processed_count|default(0)|format_number }}</td>
                         <td class="monospace" style="font-size: 0.75rem;">
@@ -107,7 +143,7 @@
                         </td>
                         <td>
                             {% if worker.actor_id %}
-                            <a href="http://localhost:8265/#/actors/{{ worker.actor_id }}" target="_blank" class="small">Ray Actor ↗</a>
+                            <a href="http://localhost:8265/#/actors/{{ worker.actor_id }}" target="_blank" class="small">Ray ↗</a>
                             {% endif %}
                         </td>
                     </tr>
@@ -120,29 +156,29 @@
         {% endif %}
     </section>
     
-    <!-- Partition Metrics -->
-    {% if partition_metrics %}
+    <!-- Partition Offsets (Gauge metrics) -->
+    {% if partition_offsets %}
     <section>
-        <details>
-            <summary>Partition Metrics ({{ partition_metrics|length }})</summary>
+        <details open>
+            <summary>Partition Offsets</summary>
             <div class="table-container" style="max-height: 300px; overflow-y: auto;">
                 <table>
                     <thead>
                         <tr>
+                            <th style="width: 30%;">Worker</th>
                             <th style="width: 15%;">Partition</th>
-                            <th class="number" style="width: 25%;">Offset</th>
-                            <th class="number" style="width: 20%;">Lag</th>
-                            <th style="width: 40%;">Assigned Worker</th>
+                            <th class="number" style="width: 25%;">Current Offset</th>
                         </tr>
                     </thead>
                     <tbody>
-                        {% for pm in partition_metrics %}
+                        {% for worker_id, offsets in partition_offsets.items() %}
+                        {% for partition_id, offset in offsets.items() %}
                         <tr>
-                            <td>{{ pm.partition_id }}</td>
-                            <td class="number">{{ pm.offset|default(0)|format_number }}</td>
-                            <td class="number">{{ pm.lag|default(0)|format_number }}</td>
-                            <td class="monospace" style="font-size: 0.75rem;">{{ (pm.assigned_worker|default('-'))[:12] }}{% if pm.assigned_worker and pm.assigned_worker|length > 12 %}...{% endif %}</td>
+                            <td class="monospace" style="font-size: 0.75rem;">{{ worker_id[:16] }}...</td>
+                            <td>{{ partition_id }}</td>
+                            <td class="number">{{ offset|format_number }}</td>
                         </tr>
+                        {% endfor %}
                         {% endfor %}
                     </tbody>
                 </table>
@@ -151,11 +187,11 @@
     </section>
     {% endif %}
     
-    <!-- Queue History Chart -->
+    <!-- Throughput Chart -->
     <section>
-        <h3>Queue Size History</h3>
+        <h3>Throughput History</h3>
         <div style="height: 200px; position: relative;">
-            <canvas id="queueChart"></canvas>
+            <canvas id="throughputChart"></canvas>
         </div>
     </section>
     
@@ -173,32 +209,42 @@
     const stageId = '{{ stage.stage_id }}';
     const basePath = '{{ base_path }}';
     
-    // Queue history data
+    // Throughput history data
     const MAX_POINTS = 60;
-    let queueData = {
+    let throughputData = {
         labels: [],
-        datasets: [{
-            label: 'Queue Size',
-            data: [],
-            borderColor: 'rgb(75, 192, 192)',
-            backgroundColor: 'rgba(75, 192, 192, 0.1)',
-            fill: true,
-            tension: 0.3
-        }]
+        datasets: [
+            {
+                label: 'Input/sec',
+                data: [],
+                borderColor: 'rgb(59, 130, 246)',
+                backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                fill: false,
+                tension: 0.3
+            },
+            {
+                label: 'Output/sec',
+                data: [],
+                borderColor: 'rgb(34, 197, 94)',
+                backgroundColor: 'rgba(34, 197, 94, 0.1)',
+                fill: false,
+                tension: 0.3
+            }
+        ]
     };
     
     // Initialize chart
-    const ctx = document.getElementById('queueChart');
+    const ctx = document.getElementById('throughputChart');
     if (!ctx) return;
     
     const chart = new Chart(ctx, {
         type: 'line',
-        data: queueData,
+        data: throughputData,
         options: {
             responsive: true,
             maintainAspectRatio: false,
             plugins: {
-                legend: { display: false }
+                legend: { display: true, position: 'top' }
             },
             scales: {
                 x: { 
@@ -207,84 +253,58 @@
                 },
                 y: { 
                     beginAtZero: true,
-                    title: { display: true, text: 'Records' }
+                    title: { display: true, text: 'Records/sec' }
                 }
             },
             animation: { duration: 0 }
         }
     });
     
-    // Load historical data from API
-    async function loadHistoricalData() {
+    // Fetch throughput from API
+    async function fetchThroughput() {
         try {
-            const response = await fetch(`${basePath}/api/jobs/${jobId}/stages/${stageId}/metrics-history`);
+            const response = await fetch(`${basePath}/api/jobs/${jobId}/stages/${stageId}/throughput?time_range_s=60`);
             if (response.ok) {
-                const result = await response.json();
-                if (result.data && result.data.length > 0) {
-                    // Clear existing data
-                    queueData.labels = [];
-                    queueData.datasets[0].data = [];
-                    
-                    // Add historical data
-                    result.data.forEach(point => {
-                        const date = new Date(point.timestamp * 1000);
-                        queueData.labels.push(date.toLocaleTimeString());
-                        queueData.datasets[0].data.push(point.queue_size);
-                    });
-                    
-                    chart.update();
-                    return;
-                }
+                const data = await response.json();
+                return {
+                    input: data.total_input_rate || 0,
+                    output: data.total_output_rate || 0
+                };
             }
         } catch (e) {
-            console.log('Failed to load historical data:', e);
+            console.log('Failed to fetch throughput:', e);
         }
-        
-        // Fallback: add current value if no history
-        const currentQueueSize = {{ stage.output_queue_size|default(0) }};
-        const now = new Date().toLocaleTimeString();
-        queueData.labels.push(now);
-        queueData.datasets[0].data.push(currentQueueSize);
+        return { input: 0, output: 0 };
+    }
+    
+    // Add initial data point
+    async function initChart() {
+        const data = await fetchThroughput();
+        const time = new Date().toLocaleTimeString();
+        throughputData.labels.push(time);
+        throughputData.datasets[0].data.push(data.input);
+        throughputData.datasets[1].data.push(data.output);
         chart.update();
     }
     
-    // Load history on page load
-    loadHistoricalData();
+    initChart();
     
-    // Helper to read current queue size from the page
-    let currentQueueSize = {{ stage.output_queue_size|default(0) }};
-    function readQueueSizeFromPage() {
-        const metricCards = document.querySelectorAll('.metric-card');
-        if (metricCards.length >= 2) {
-            const queueCard = metricCards[1];
-            const valueEl = queueCard.querySelector('.metric-value');
-            if (valueEl) {
-                const text = valueEl.textContent.trim();
-                const num = parseFloat(text.replace(/[^\d.]/g, ''));
-                if (text.includes('K')) return num * 1000;
-                if (text.includes('M')) return num * 1000000;
-                if (text.includes('B')) return num * 1000000000;
-                return num || 0;
-            }
-        }
-        return currentQueueSize;
-    }
-    
-    // Update chart when HTMX refreshes the page (for live updates)
-    document.body.addEventListener('htmx:afterSwap', function(e) {
+    // Update chart when HTMX refreshes the page
+    document.body.addEventListener('htmx:afterSwap', async function(e) {
         if (e.detail.target && e.detail.target.classList.contains('compact')) {
-            setTimeout(() => {
-                currentQueueSize = readQueueSizeFromPage();
-                
-                const time = new Date().toLocaleTimeString();
-                if (queueData.labels.length >= MAX_POINTS) {
-                    queueData.labels.shift();
-                    queueData.datasets[0].data.shift();
-                }
-                queueData.labels.push(time);
-                queueData.datasets[0].data.push(currentQueueSize);
-                chart.update();
-            }, 100);
+            const data = await fetchThroughput();
+            const time = new Date().toLocaleTimeString();
+            
+            if (throughputData.labels.length >= MAX_POINTS) {
+                throughputData.labels.shift();
+                throughputData.datasets[0].data.shift();
+                throughputData.datasets[1].data.shift();
+            }
+            
+            throughputData.labels.push(time);
+            throughputData.datasets[0].data.push(data.input);
+            throughputData.datasets[1].data.push(data.output);
+            chart.update();
         }
     });
 })();

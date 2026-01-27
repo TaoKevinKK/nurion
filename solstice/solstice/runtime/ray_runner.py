@@ -362,7 +362,6 @@ class RayJobRunner:
             state_endpoint=self._state_push.endpoint,
             state_topic=self._state_push.topic,
             semantic_guarantee=self.job.config.semantic_guarantee,
-            lineage_sample_rate=self.job.config.webui.lineage_sample_rate,
         )
 
     def _stage_info(self, stage: "Stage") -> Dict[str, Any]:
@@ -739,7 +738,6 @@ class RayJobRunner:
             from solstice.webui.runtime_server import EmbeddedWebUIServer
 
             # Create JobWebUI using pre-created storage
-            # Pass state_manager for Prometheus export (push-based metrics)
             assert self._webui_storage is not None, "webui_storage not initialized"
             assert self._webui_attempt_id is not None, "webui_attempt_id not initialized"
             self._webui = JobWebUI(
@@ -747,7 +745,6 @@ class RayJobRunner:
                 self._webui_storage,
                 attempt_id=self._webui_attempt_id,
                 state_manager=self._state_push.state_manager,
-                prometheus_enabled=self.job.config.webui.prometheus_enabled,
             )
 
             # Start WebUI

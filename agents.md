@@ -279,18 +279,18 @@ For Solstice integration tests, you need:
        # Runtime context inherited from base: job_id, stage_id, worker_id
    
    class MyOperator(Operator):
-       def __init__(self, config: MyOperatorConfig):  # Only config!
-           super().__init__(config)
+       def __init__(self, config: MyOperatorConfig, runtime: OperatorRuntime):
+           super().__init__(config, runtime)
            self.my_config = config
        
        def process_split(self, split, payload):
-           # Access runtime context via properties (from config)
+           # Access runtime context via properties (from runtime)
            self.logger.info(f"Worker {self.worker_id} processing")
            # Access job_id, stage_id similarly
    
-   # Bad: Passing runtime context separately
+   # Bad: Adding extra constructor parameters or set methods
    class BadOperator(Operator):
-       def __init__(self, config, worker_id=None):  # Don't do this
+       def __init__(self, config, runtime, worker_id=None):  # Don't add extra params
            ...
        
        def set_state_store(self, store, partition):  # Don't do this
@@ -446,7 +446,7 @@ asyncio.run(main())
 from dataclasses import dataclass
 from typing import Optional, ClassVar, Type
 
-from solstice.core.operator import Operator, OperatorConfig
+from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime
 from solstice.core.models import Split, SplitPayload
 
 
@@ -461,8 +461,8 @@ class MyOperatorConfig(OperatorConfig):
 class MyOperator(Operator):
     """Example custom operator."""
     
-    def __init__(self, config: MyOperatorConfig):
-        super().__init__(config)
+    def __init__(self, config: MyOperatorConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self.multiplier = config.multiplier
 
     def process_split(

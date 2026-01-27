@@ -106,7 +106,7 @@ The logic that processes data. Operators are stateless and config-driven.
 from dataclasses import dataclass
 from typing import Optional, ClassVar, Type
 
-from solstice.core.operator import Operator, OperatorConfig
+from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime
 from solstice.core.models import Split, SplitPayload
 
 
@@ -118,8 +118,8 @@ class MyOperatorConfig(OperatorConfig):
 
 
 class MyOperator(Operator):
-    def __init__(self, config: MyOperatorConfig):
-        super().__init__(config)
+    def __init__(self, config: MyOperatorConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
         self.param = config.param
 
     def process_split(

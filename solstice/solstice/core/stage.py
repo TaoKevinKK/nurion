@@ -51,7 +51,6 @@ class StageRuntime:
         state_endpoint: WebUI state push endpoint
         state_topic: WebUI state topic name
         semantic_guarantee: AT_LEAST_ONCE or EXACTLY_ONCE
-        lineage_sample_rate: Sample rate for lineage tracking (0=off, 1=full)
     """
 
     queue_type: QueueType
@@ -61,7 +60,6 @@ class StageRuntime:
     state_endpoint: Optional["QueueEndpoint"] = None
     state_topic: Optional[str] = None
     semantic_guarantee: SemanticGuarantee = SemanticGuarantee.AT_LEAST_ONCE
-    lineage_sample_rate: float = 0.0
 
 
 # =============================================================================

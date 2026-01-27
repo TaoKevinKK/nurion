@@ -239,7 +239,7 @@ class StatePushManager:
                 stages=stages,
             )
             await self._producer.produce(msg)
-            self.logger.debug("Emitted JOB_STARTED event")
+            self.logger.info("Emitted JOB_STARTED event")
         except Exception as e:
             self.logger.warning(f"Failed to emit job started: {e}")
 

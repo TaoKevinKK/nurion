@@ -122,7 +122,6 @@ class TestSparkSourceV2Integration:
             state_endpoint=None,
             state_topic=None,
             semantic_guarantee=SemanticGuarantee.AT_LEAST_ONCE,
-            lineage_sample_rate=0.0,
         )
         master = SparkSourceV2Master(
             job_id="test-v2-output",
@@ -198,7 +197,6 @@ class TestSparkSourceV2Integration:
             state_endpoint=None,
             state_topic=None,
             semantic_guarantee=SemanticGuarantee.AT_LEAST_ONCE,
-            lineage_sample_rate=0.0,
         )
         master = SparkSourceV2Master(
             job_id="test-v2-parallel",
@@ -251,7 +249,6 @@ class TestSparkSourceV2Integration:
             state_endpoint=None,
             state_topic=None,
             semantic_guarantee=SemanticGuarantee.AT_LEAST_ONCE,
-            lineage_sample_rate=0.0,
         )
         master = SparkSourceV2Master(
             job_id="test-v2-large",

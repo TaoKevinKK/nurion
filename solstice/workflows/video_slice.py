@@ -45,11 +45,12 @@ import pyarrow as pa
 
 from solstice.core.job import Job, JobConfig, WebUIConfig
 from solstice.core.models import Split, SplitPayload
-from solstice.core.operator import Operator, OperatorConfig
+from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime
 from solstice.core.stage import Stage
 from solstice.operators.sinks import LanceSinkConfig
 from solstice.operators.sources import LanceTableSourceConfig
 from solstice.queue import QueueType
+from solstice.runtime.autoscaler import AutoscaleConfig
 from solstice.utils.remote import ensure_local_file, is_remote_path, restore_s3_object
 
 _OUTPUT_SCHEMA = pa.schema(
@@ -235,8 +236,13 @@ class VideoSliceOperator(Operator):
     Each input row (video) produces multiple output rows (frames).
     """
     
-    def __init__(self, config: VideoSliceConfig):
-        super().__init__(config)
+    def __init__(self, config: VideoSliceConfig, runtime: Optional[OperatorRuntime] = None):
+        # Support both old API (config only) and new API (config + runtime)
+        if runtime is None:
+            runtime = OperatorRuntime(
+                job_id="", stage_id="", worker_id="", partition_id=0
+            )
+        super().__init__(config, runtime)
         self.fps = config.fps
         self.video_path_field = config.video_path_field
         self.video_path_json_key = config.video_path_json_key
@@ -383,7 +389,7 @@ def create_job(
     Optional config parameters:
         - fps: Frames per second to extract (default: 2.0)
         - source_parallelism: Number of source workers reading Lance (default: 4)
-        - slice_parallelism: Number of slice workers (default: 150)
+        - slice_parallelism: Slice workers - int or tuple (min, max) for dynamic scaling (default: (4, 150))
         - split_size: Number of rows per split from source (default: 10)
         - max_rows: Maximum rows to process, for testing (default: None = unlimited)
         - video_path_field: Field containing video path (default: "data_paths")
@@ -391,7 +397,7 @@ def create_job(
         - skip_missing_videos: Skip missing videos (default: True)
         - jpeg_quality: JPEG quality 1-100 (default: 95)
         - use_cache: Cache downloaded remote videos locally (default: False)
-        - sink_parallelism: Number of sink workers (default: auto)
+        - sink_parallelism: Sink workers - int or tuple (min, max) for dynamic scaling (default: auto)
         - ray_address: Ray cluster address (default: "ray://localhost:8265")
         - webui_storage_path: SlateDB root path for WebUI (optional)
     
@@ -417,7 +423,8 @@ def create_job(
     # Extract optional parameters with defaults
     fps = config.get("fps", 2.0)
     source_parallelism = config.get("source_parallelism", 4)  # Parallel Lance readers
-    slice_parallelism = config.get("slice_parallelism", 150)
+    # slice_parallelism can be int or tuple (min, max) for dynamic scaling
+    slice_parallelism = config.get("slice_parallelism", (4, 150))
     split_size = config.get("split_size", 10)  # Smaller splits for video processing
     max_rows = config.get("max_rows")  # None = unlimited
     video_path_field = config.get("video_path_field", "data_paths")
@@ -426,9 +433,15 @@ def create_job(
     jpeg_quality = config.get("jpeg_quality", 95)
     use_cache = config.get("use_cache", False)
     webui_storage_path = config.get("webui_storage_path")
-    sink_parallelism = config.get("sink_parallelism", 0)
-    if not sink_parallelism:
-        sink_parallelism = max(4, min(32, slice_parallelism // 4))
+    # sink_parallelism can be int or tuple (min, max) for dynamic scaling
+    sink_parallelism = config.get("sink_parallelism", None)
+    # Auto-calculate sink parallelism based on slice parallelism
+    if sink_parallelism is None:
+        # Use slice max as reference for calculating sink range
+        slice_max = slice_parallelism[1] if isinstance(slice_parallelism, tuple) else slice_parallelism
+        sink_min = max(2, slice_max // 16)
+        sink_max = max(4, slice_max // 4)
+        sink_parallelism = (sink_min, sink_max)
     
     # Ray init kwargs - use "auto" to connect to existing cluster
     # when running as a Ray job, the cluster is already initialized
@@ -438,6 +451,7 @@ def create_job(
     
     # Create job with configuration
     # Use TANSU queue for distributed execution on Ray cluster
+    # Configure aggressive autoscaling for batch processing
     job = Job(
         job_id=job_id,
         config=JobConfig(
@@ -447,8 +461,14 @@ def create_job(
                 enabled=True,
                 storage_path=webui_storage_path or WebUIConfig.storage_path,
             ),
+            autoscale_config=AutoscaleConfig(
+                enabled=False,  # Disable autoscaling for now
+            ),
         ),
     )
+    
+    # Compute output_partitions for source stage based on slice_parallelism max
+    slice_max = slice_parallelism[1] if isinstance(slice_parallelism, tuple) else slice_parallelism
     
     # Stage 1: Source - Read from Lance table
     # Multiple source workers to read Lance fragments in parallel
@@ -460,7 +480,7 @@ def create_job(
             max_rows=max_rows,  # Limit at source level for efficiency
         ),
         parallelism=source_parallelism,  # Parallel Lance readers
-        output_partitions=slice_parallelism,  # Match downstream for parallel consumption
+        output_partitions=slice_max,  # Match downstream max for parallel consumption
         worker_resources={
             "num_cpus": 1,
             "memory": 4 * 1024**3,
@@ -468,6 +488,7 @@ def create_job(
     )
     
     # Stage 2: VideoSlice - Extract frames at specified FPS
+    # Supports dynamic scaling with tuple (min, max) parallelism
     slice_stage = Stage(
         stage_id="video_slice",
         operator_config=VideoSliceConfig(
@@ -479,7 +500,7 @@ def create_job(
             use_cache=use_cache,
             max_rows=max_rows,
         ),
-        parallelism=slice_parallelism,
+        parallelism=slice_parallelism,  # Can be int or tuple (min, max)
         worker_resources={
             "num_cpus": 2,
             "memory": 8 * 1024**3,  # 8GB per worker for video processing
@@ -487,6 +508,7 @@ def create_job(
     )
     
     # Stage 3: Sink - Write to Lance table
+    # Supports dynamic scaling with tuple (min, max) parallelism
     sink_stage = Stage(
         stage_id="sink",
         operator_config=LanceSinkConfig(
@@ -494,7 +516,7 @@ def create_job(
             buffer_size=10000,
             blob_columns=[],  # Inline binary bytes for image column
         ),
-        parallelism=sink_parallelism,
+        parallelism=sink_parallelism,  # Can be int or tuple (min, max)
         worker_resources={
             "num_cpus": 1,
             "memory": 4 * 1024**3,
@@ -507,9 +529,17 @@ def create_job(
     job.add_stage(sink_stage, upstream_stages=["video_slice"])
     
     logger.info(f"Created Video Slice job with {len(job.stages)} stages")
+    
+    # Format parallelism for logging
+    def fmt_parallelism(p):
+        if isinstance(p, tuple):
+            return f"({p[0]}-{p[1]} dynamic)"
+        return str(p)
+    
     logger.info(
         f"FPS: {fps}, Source parallelism: {source_parallelism}, "
-        f"Slice parallelism: {slice_parallelism}, Sink parallelism: {sink_parallelism}"
+        f"Slice parallelism: {fmt_parallelism(slice_parallelism)}, "
+        f"Sink parallelism: {fmt_parallelism(sink_parallelism)}"
     )
     logger.info(f"Input: {input_path}")
     logger.info(f"Output: {output_path}")
@@ -522,8 +552,8 @@ async def run_video_slice_job(
     output_path: str,
     fps: float = 2.0,
     source_parallelism: int = 4,
-    slice_parallelism: int = 150,
-    sink_parallelism: int = 0,
+    slice_parallelism: Any = (4, 150),  # int or tuple (min, max)
+    sink_parallelism: Any = None,  # int or tuple (min, max), None = auto
     ray_address: str = "ray://localhost:8265",
     webui_storage_path: Optional[str] = None,
     **kwargs,
@@ -536,8 +566,8 @@ async def run_video_slice_job(
         output_path: Output Lance table path
         fps: Frames per second to extract
         source_parallelism: Number of source workers reading Lance
-        slice_parallelism: Number of slice workers
-        sink_parallelism: Number of sink workers (0 = auto)
+        slice_parallelism: Slice workers - int for fixed, tuple (min, max) for dynamic
+        sink_parallelism: Sink workers - int for fixed, tuple (min, max) for dynamic, None = auto
         ray_address: Ray cluster address
         **kwargs: Additional config options (see create_job)
     
@@ -548,7 +578,7 @@ async def run_video_slice_job(
         ...     output_path="s3://bucket/frames.lance",
         ...     fps=2.0,
         ...     source_parallelism=4,
-        ...     slice_parallelism=8,
+        ...     slice_parallelism=(4, 64),  # Dynamic scaling 4-64 workers
         ... ))
     """
     import uuid
@@ -572,6 +602,14 @@ async def run_video_slice_job(
     await runner.run()
 
 
+def parse_parallelism(value: str):
+    """Parse parallelism value - can be 'N' for fixed or 'min-max' for dynamic."""
+    if '-' in value:
+        parts = value.split('-')
+        return (int(parts[0]), int(parts[1]))
+    return int(value)
+
+
 if __name__ == "__main__":
     import argparse
     
@@ -580,12 +618,17 @@ if __name__ == "__main__":
     parser.add_argument("--output", required=False, help="Output Lance table path")
     parser.add_argument("--fps", type=float, default=2.0, help="Frames per second")
     parser.add_argument("--source-parallelism", type=int, default=4, help="Source workers")
-    parser.add_argument("--slice-parallelism", type=int, default=150, help="Slice workers")
+    parser.add_argument(
+        "--slice-parallelism",
+        type=parse_parallelism,
+        default="4-150",
+        help="Slice workers: N for fixed, min-max for dynamic (e.g. '4-150')",
+    )
     parser.add_argument(
         "--sink-parallelism",
-        type=int,
-        default=0,
-        help="Sink workers (0=auto)",
+        type=parse_parallelism,
+        default=None,
+        help="Sink workers: N for fixed, min-max for dynamic (e.g. '2-32'), empty for auto",
     )
     parser.add_argument("--split-size", type=int, default=10, help="Rows per split")
     parser.add_argument("--max-rows", type=int, help="Max rows to process (for testing)")

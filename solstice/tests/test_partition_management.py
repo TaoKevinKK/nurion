@@ -53,7 +53,6 @@ def _make_runtime(
         state_endpoint=None,
         state_topic=None,
         semantic_guarantee=SemanticGuarantee.AT_LEAST_ONCE,
-        lineage_sample_rate=0.0,
     )
 
 

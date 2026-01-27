@@ -121,7 +121,6 @@ class StageMaster:
         self.upstream_topic = runtime.upstream_topic
         self.state_endpoint = runtime.state_endpoint
         self.state_topic = runtime.state_topic
-        self._lineage_sample_rate = runtime.lineage_sample_rate
 
         # SplitPayloadStore - shared across all stages
         self.payload_store = payload_store
@@ -224,7 +223,6 @@ class StageMaster:
             consumer_group=self._consumer_group,
             state_endpoint=self.state_endpoint,
             state_topic=self.state_topic,
-            lineage_sample_rate=self._lineage_sample_rate,
         )
 
         self._recovery_manager = RecoveryManager(
@@ -484,26 +482,8 @@ class StageMaster:
             self.logger.debug(f"Failed to emit stage completed: {e}")
 
     async def _emit_stage_metrics(self) -> None:
-        """Emit STAGE_METRICS event (rate-limited)."""
-        if not self._state_producer:
-            return
-
-        now = time.time()
-        if now - self._last_metrics_emit_time < 1.0:
-            return
-        self._last_metrics_emit_time = now
-
-        try:
-            from solstice.webui.state.messages import stage_metrics_message
-
-            msg = stage_metrics_message(
-                job_id=self.job_id,
-                stage_id=self.stage_id,
-                worker_count=self._worker_manager.worker_count if self._worker_manager else 0,
-            )
-            await self._state_producer.produce(msg)
-        except Exception as e:
-            self.logger.debug(f"Failed to emit stage metrics: {e}")
+        """Emit stage metrics (no-op, metrics come from workers)."""
+        pass
 
     # =========================================================================
     # Public Interface (for RayJobRunner and WebUI)

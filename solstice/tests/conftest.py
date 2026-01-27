@@ -82,7 +82,6 @@ def make_stage_runtime(
         state_endpoint=None,
         state_topic=None,
         semantic_guarantee=semantic_guarantee,
-        lineage_sample_rate=0.0,
     )
 
 

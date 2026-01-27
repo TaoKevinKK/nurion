@@ -588,6 +588,7 @@ class TansuQueueClient:
             consumer.poll(timeout=0.1)  # Required for initialization before seek
 
             # For consumers with a group_id, seek to committed offset for crash recovery
+            # For consumers without a group_id, always start from beginning
             if group_id:
                 tp = TopicPartition(topic, partition)
                 committed = consumer.committed([tp], timeout=10.0)
@@ -604,6 +605,12 @@ class TansuQueueClient:
                         f"Consumer for {topic}:{partition} (group={group_id}) "
                         f"starting from offset 0 (no committed offset)"
                     )
+            else:
+                # No group_id - always start from beginning (for state consumers)
+                consumer.seek(TopicPartition(topic, partition, 0))
+                self.logger.debug(
+                    f"Consumer for {topic}:{partition} (group=None) starting from offset 0"
+                )
 
             self.logger.debug(f"Created consumer for {topic}:{partition} (group={group_id})")
             self._consumers[consumer_key] = consumer

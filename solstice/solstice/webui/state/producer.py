@@ -69,9 +69,6 @@ class StateProducer:
 
         self.logger = create_ray_logger(f"StateProducer-{job_id}")
 
-        # Sequence counter
-        self._sequence = 0
-
         # Background task queue for fire-and-forget
         self._pending_produces: asyncio.Queue[StateMessage] = asyncio.Queue()
         self._background_task: Optional[asyncio.Task] = None
@@ -112,10 +109,6 @@ class StateProducer:
         This is fire-and-forget - it doesn't wait for the message
         to be sent to Tansu. Failures are logged but not raised.
         """
-        # Assign sequence number
-        self._sequence += 1
-        message.sequence = self._sequence
-
         # Queue for background produce
         await self._pending_produces.put(message)
 

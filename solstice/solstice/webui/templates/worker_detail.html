@@ -25,8 +25,9 @@
         </div>
     </header>
     
-    <!-- Worker Metrics -->
+    <!-- Worker Metrics (Counters - cumulative) -->
     <section>
+        <h2>Cumulative Metrics</h2>
         <div class="metrics-grid">
             <div class="metric-card">
                 <div class="metric-value">{{ worker.input_records|default(0)|format_number }}</div>
@@ -50,13 +51,24 @@
                 </div>
                 <div class="metric-label">Processing Time</div>
             </div>
+        </div>
+    </section>
+    
+    <!-- Throughput (rate calculations) -->
+    <section>
+        <h2>Throughput (last 60s)</h2>
+        <div class="metrics-grid">
             <div class="metric-card">
-                <div class="metric-value">{{ worker.cpu_percent|default(0) }}%</div>
-                <div class="metric-label">CPU</div>
+                <div class="metric-value">{{ "%.1f"|format(worker_rates.input_records_per_sec|default(0)) }}</div>
+                <div class="metric-label">Input/sec</div>
             </div>
             <div class="metric-card">
-                <div class="metric-value">{{ worker.memory_mb|default(0)|int }} MB</div>
-                <div class="metric-label">Memory</div>
+                <div class="metric-value">{{ "%.1f"|format(worker_rates.output_records_per_sec|default(0)) }}</div>
+                <div class="metric-label">Output/sec</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">{{ "%.2f"|format(worker_rates.splits_per_sec|default(0)) }}</div>
+                <div class="metric-label">Splits/sec</div>
             </div>
         </div>
     </section>
@@ -134,69 +146,48 @@
         </details>
     </section>
     
-    <!-- Processing Stats -->
+    <!-- Assigned Partitions with Offsets -->
+    {% if worker.assigned_partitions or worker.partition_offsets %}
     <section>
         <details open>
-            <summary>Processing Statistics</summary>
-            <div style="display: grid; grid-template-columns: auto 1fr; gap: 0.25rem 1rem; font-size: 0.85rem;">
-                <strong>Input Records:</strong> <span>{{ worker.input_records|default(0)|format_number }}</span>
-                <strong>Output Records:</strong> <span>{{ worker.output_records|default(0)|format_number }}</span>
-                <strong>Processing Time:</strong>
-                <span>
-                    {% if worker.processing_time %}
-                    {{ "%.3f"|format(worker.processing_time) }}s
-                    {% else %}
-                    -
-                    {% endif %}
-                </span>
-                {% if worker.processing_time and worker.input_records %}
-                <strong>Throughput:</strong>
-                <span>{{ "%.1f"|format(worker.input_records / worker.processing_time) }} records/s</span>
-                {% endif %}
-            </div>
-        </details>
-    </section>
-    
-    <!-- Assigned Partitions -->
-    {% if worker.assigned_partitions %}
-    <section>
-        <details>
-            <summary>Assigned Partitions ({{ worker.assigned_partitions|length }})</summary>
-            <div style="display: flex; flex-wrap: wrap; gap: 0.25rem;">
-                {% for p in worker.assigned_partitions %}
-                <span class="badge" style="background: var(--pico-secondary-background);">{{ p }}</span>
-                {% endfor %}
-            </div>
-        </details>
-    </section>
-    {% endif %}
-    
-    <!-- Processed Splits -->
-    {% if worker.processed_splits %}
-    <section>
-        <details>
-            <summary>Processed Splits ({{ worker.processed_splits|length }})</summary>
-            <div style="max-height: 200px; overflow-y: auto;">
-                <table style="font-size: 0.8rem;">
+            <summary>Assigned Partitions</summary>
+            {% if worker.partition_offsets %}
+            <div class="table-container">
+                <table style="font-size: 0.85rem;">
                     <thead>
                         <tr>
-                            <th>Split ID</th>
-                            <th>Timestamp</th>
+                            <th>Partition</th>
+                            <th class="number">Current Offset</th>
                         </tr>
                     </thead>
                     <tbody>
-                        {% for split in worker.processed_splits %}
+                        {% for partition_id, offset in worker.partition_offsets.items() %}
                         <tr>
-                            <td class="monospace">{{ split.split_id[:32] }}...</td>
-                            <td>{{ split.timestamp|format_datetime if split.timestamp else '-' }}</td>
+                            <td>{{ partition_id }}</td>
+                            <td class="number">{{ offset|format_number }}</td>
                         </tr>
                         {% endfor %}
                     </tbody>
                 </table>
             </div>
+            {% elif worker.assigned_partitions %}
+            <div style="display: flex; flex-wrap: wrap; gap: 0.25rem;">
+                {% for p in worker.assigned_partitions %}
+                <span class="badge" style="background: var(--pico-secondary-background);">{{ p }}</span>
+                {% endfor %}
+            </div>
+            {% endif %}
         </details>
     </section>
     {% endif %}
+    
+    <!-- Throughput Chart -->
+    <section>
+        <h3>Throughput History</h3>
+        <div style="height: 200px; position: relative;">
+            <canvas id="workerThroughputChart"></canvas>
+        </div>
+    </section>
     
     <!-- Worker Events -->
     {% if worker_events %}
@@ -275,6 +266,7 @@
 
 {% block extra_scripts %}
 <script>
+// Log viewer component
 document.addEventListener('alpine:init', () => {
     Alpine.data('logViewer', (config) => ({
         logs: 'Loading logs...',
@@ -311,5 +303,109 @@ document.addEventListener('alpine:init', () => {
         }
     }));
 });
+
+// Throughput chart
+(function() {
+    const jobId = '{{ job_id }}';
+    const workerId = '{{ worker.worker_id }}';
+    const basePath = '{{ base_path }}';
+    
+    const MAX_POINTS = 60;
+    let throughputData = {
+        labels: [],
+        datasets: [
+            {
+                label: 'Input/sec',
+                data: [],
+                borderColor: 'rgb(59, 130, 246)',
+                fill: false,
+                tension: 0.3
+            },
+            {
+                label: 'Output/sec',
+                data: [],
+                borderColor: 'rgb(34, 197, 94)',
+                fill: false,
+                tension: 0.3
+            },
+            {
+                label: 'Splits/sec',
+                data: [],
+                borderColor: 'rgb(249, 115, 22)',
+                fill: false,
+                tension: 0.3
+            }
+        ]
+    };
+    
+    const ctx = document.getElementById('workerThroughputChart');
+    if (!ctx) return;
+    
+    const chart = new Chart(ctx, {
+        type: 'line',
+        data: throughputData,
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: true, position: 'top' }
+            },
+            scales: {
+                x: { display: true },
+                y: { 
+                    beginAtZero: true,
+                    title: { display: true, text: 'Rate' }
+                }
+            },
+            animation: { duration: 0 }
+        }
+    });
+    
+    // Fetch metrics from API
+    async function fetchMetrics() {
+        try {
+            const response = await fetch(`${basePath}/api/jobs/${jobId}/workers/${workerId}/metrics`);
+            if (response.ok) {
+                const data = await response.json();
+                return data.rates || {};
+            }
+        } catch (e) {
+            console.log('Failed to fetch metrics:', e);
+        }
+        return {};
+    }
+    
+    // Initialize with current values
+    async function initChart() {
+        const rates = await fetchMetrics();
+        const time = new Date().toLocaleTimeString();
+        throughputData.labels.push(time);
+        throughputData.datasets[0].data.push(rates.input_records_per_sec || 0);
+        throughputData.datasets[1].data.push(rates.output_records_per_sec || 0);
+        throughputData.datasets[2].data.push(rates.splits_per_sec || 0);
+        chart.update();
+    }
+    
+    initChart();
+    
+    // Update on HTMX refresh
+    document.body.addEventListener('htmx:afterSwap', async function(e) {
+        if (e.detail.target && e.detail.target.classList.contains('compact')) {
+            const rates = await fetchMetrics();
+            const time = new Date().toLocaleTimeString();
+            
+            if (throughputData.labels.length >= MAX_POINTS) {
+                throughputData.labels.shift();
+                throughputData.datasets.forEach(ds => ds.data.shift());
+            }
+            
+            throughputData.labels.push(time);
+            throughputData.datasets[0].data.push(rates.input_records_per_sec || 0);
+            throughputData.datasets[1].data.push(rates.output_records_per_sec || 0);
+            throughputData.datasets[2].data.push(rates.splits_per_sec || 0);
+            chart.update();
+        }
+    });
+})();
 </script>
 {% endblock %}

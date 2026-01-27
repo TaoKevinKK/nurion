@@ -226,7 +226,6 @@ class TestIcebergPipeline:
             state_endpoint=None,
             state_topic=None,
             semantic_guarantee=SemanticGuarantee.AT_LEAST_ONCE,
-            lineage_sample_rate=0.0,
         )
 
         payload_store = RaySplitPayloadStore(name="test-iceberg-store")

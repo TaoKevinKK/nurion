@@ -62,13 +62,13 @@ async def get_job_detail(job_id: str, request: Request) -> Dict[str, Any]:
         job_id: Job identifier
 
     Returns:
-        Detailed job information
+        Detailed job information including stages, dag_edges, etc.
 
     Raises:
         HTTPException: If job not found
     """
     storage = request.app.state.storage
-    job_data: Dict[str, Any] | None = storage.get_job(job_id)
+    job_data: Dict[str, Any] | None = storage.get_job_archive(job_id)
     if job_data:
         return job_data
     raise HTTPException(status_code=404, detail=f"Job {job_id} not found")

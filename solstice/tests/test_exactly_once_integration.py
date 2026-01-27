@@ -458,7 +458,6 @@ class TestConfigPropagation:
             state_endpoint=None,
             state_topic=None,
             semantic_guarantee=SemanticGuarantee.AT_LEAST_ONCE,
-            lineage_sample_rate=0.0,
         )
         assert runtime.semantic_guarantee == SemanticGuarantee.AT_LEAST_ONCE
 
@@ -471,7 +470,6 @@ class TestConfigPropagation:
             state_endpoint=None,
             state_topic=None,
             semantic_guarantee=SemanticGuarantee.EXACTLY_ONCE,
-            lineage_sample_rate=0.0,
         )
         assert runtime.semantic_guarantee == SemanticGuarantee.EXACTLY_ONCE
 

@@ -143,6 +143,46 @@ class JobStorageReader(Protocol):
         """Query metrics history."""
         ...
 
+    def get_metrics_samples(
+        self,
+        job_id: Optional[str],
+        worker_id: str,
+        start_time: float,
+        end_time: float,
+    ) -> List[Dict[str, Any]]:
+        """Get raw time-series samples (Counters/Gauges) for a worker."""
+        ...
+
+    def rate(
+        self,
+        job_id: Optional[str],
+        worker_id: str,
+        metric_name: str,
+        time_range_s: float = 60.0,
+    ) -> float:
+        """Calculate Prometheus-style rate for a Counter metric.
+
+        rate = (v2 - v1) / (t2 - t1)
+        """
+        ...
+
+    def get_partition_offsets(
+        self,
+        job_id: Optional[str],
+        stage_id: Optional[str] = None,
+    ) -> Dict[str, Dict[int, int]]:
+        """Get partition offsets (Gauge) for workers."""
+        ...
+
+    def get_throughput(
+        self,
+        job_id: Optional[str],
+        stage_id: Optional[str] = None,
+        time_range_s: float = 60.0,
+    ) -> Dict[str, Any]:
+        """Get throughput using rate() on Counter metrics."""
+        ...
+
     def list_exceptions(
         self,
         job_id: str,

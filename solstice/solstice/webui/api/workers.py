@@ -37,14 +37,7 @@ router = APIRouter(tags=["workers"])
 async def list_workers(job_id: str, request: Request) -> List[Dict[str, Any]]:
     """List all workers for a job."""
     storage = request.app.state.storage
-    worker_events = storage.list_worker_events(job_id, limit=1000)
-    # Group by worker_id and return latest status
-    workers_dict: Dict[str, Any] = {}
-    for event in worker_events:
-        worker_id = event.get("worker_id")
-        if worker_id not in workers_dict:
-            workers_dict[worker_id] = event
-    return list(workers_dict.values())
+    return storage.list_workers(job_id, limit=1000)
 
 
 @router.get("/jobs/{job_id}/workers/{worker_id}")
@@ -53,12 +46,53 @@ async def get_worker_detail(
     worker_id: str,
     request: Request,
 ) -> Dict[str, Any]:
-    """Get detailed worker information."""
+    """Get worker state (latest Counter/Gauge values)."""
     storage = request.app.state.storage
-    events: List[Dict[str, Any]] = storage.list_worker_events(job_id, worker_id=worker_id, limit=1)
-    if events:
-        return events[0]
+    history = storage.get_worker_history(job_id, worker_id)
+    if history:
+        return history
     raise HTTPException(status_code=404, detail=f"Worker {worker_id} not found")
+
+
+@router.get("/jobs/{job_id}/workers/{worker_id}/metrics")
+async def get_worker_metrics(
+    job_id: str,
+    worker_id: str,
+    request: Request,
+    start_time: float = Query(0, description="Start timestamp (Unix seconds)"),
+    end_time: float = Query(0, description="End timestamp (Unix seconds)"),
+) -> Dict[str, Any]:
+    """Get time-series samples and calculated rates for a worker.
+
+    Returns raw Counter/Gauge samples for charting, plus rate() calculations.
+    """
+    import time as time_module
+
+    now = time_module.time()
+
+    if end_time == 0:
+        end_time = now
+    if start_time == 0:
+        start_time = end_time - 300
+
+    storage = request.app.state.storage
+    time_range = end_time - start_time
+
+    samples = storage.get_metrics_samples(job_id, worker_id, start_time, end_time)
+    rates = {
+        "input_records_per_sec": storage.rate(job_id, worker_id, "input_records", time_range),
+        "output_records_per_sec": storage.rate(job_id, worker_id, "output_records", time_range),
+        "splits_per_sec": storage.rate(job_id, worker_id, "processed_count", time_range),
+    }
+
+    return {
+        "job_id": job_id,
+        "worker_id": worker_id,
+        "start_time": start_time,
+        "end_time": end_time,
+        "samples": samples,
+        "rates": rates,
+    }
 
 
 @router.get("/jobs/{job_id}/workers/{worker_id}/logs")

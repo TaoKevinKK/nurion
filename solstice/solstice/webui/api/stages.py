@@ -33,7 +33,7 @@ router = APIRouter(tags=["stages"])
 async def list_stages(job_id: str, request: Request) -> Dict[str, Any]:
     """List all stages for a job."""
     storage = request.app.state.storage
-    job_data = storage.get_job(job_id)
+    job_data = storage.get_job_archive(job_id)
     if job_data:
         return {
             "job_id": job_id,
@@ -51,7 +51,7 @@ async def get_stage_detail(
 ) -> Dict[str, Any]:
     """Get detailed stage information."""
     storage = request.app.state.storage
-    job_data: Dict[str, Any] | None = storage.get_job(job_id)
+    job_data: Dict[str, Any] | None = storage.get_job_archive(job_id)
     if job_data:
         stages = job_data.get("stages", [])
         for stage in stages:
@@ -109,15 +109,40 @@ async def list_stage_workers(
         List of worker info
     """
     storage = request.app.state.storage
-    # Fetch all worker events and filter by stage_id client-side
-    # (storage.list_worker_events doesn't support stage_id filtering)
-    worker_events = storage.list_worker_events(job_id, limit=500)
-    # Deduplicate by worker_id, keeping latest, filtered by stage
-    workers_dict: Dict[str, Any] = {}
-    for event in worker_events:
-        if event.get("stage_id") != stage_id:
-            continue
-        worker_id = event.get("worker_id")
-        if worker_id not in workers_dict:
-            workers_dict[worker_id] = event
-    return list(workers_dict.values())
+    # Use list_workers which is better optimized
+    workers = storage.list_workers(job_id, stage_id=stage_id, limit=500)
+    return workers
+
+
+@router.get("/jobs/{job_id}/stages/{stage_id}/offsets")
+async def get_stage_partition_offsets(
+    job_id: str,
+    stage_id: str,
+    request: Request,
+) -> Dict[str, Any]:
+    """Get partition offsets (Gauge) for all workers in a stage."""
+    storage = request.app.state.storage
+    offsets = storage.get_partition_offsets(job_id, stage_id=stage_id)
+    return {
+        "job_id": job_id,
+        "stage_id": stage_id,
+        "worker_offsets": offsets,
+    }
+
+
+@router.get("/jobs/{job_id}/stages/{stage_id}/throughput")
+async def get_stage_throughput(
+    job_id: str,
+    stage_id: str,
+    request: Request,
+    time_range_s: float = Query(60.0, description="Time range for rate calculation"),
+) -> Dict[str, Any]:
+    """Get throughput using Prometheus-style rate() on Counter metrics.
+
+    rate = (v2 - v1) / (t2 - t1)
+    """
+    storage = request.app.state.storage
+    result = storage.get_throughput(job_id, stage_id=stage_id, time_range_s=time_range_s)
+    result["job_id"] = job_id
+    result["stage_id"] = stage_id
+    return result

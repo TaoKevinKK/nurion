@@ -14,11 +14,9 @@
 
 """Job WebUI - per-job WebUI instance."""
 
-import asyncio
 import os
 from typing import TYPE_CHECKING, Optional
 
-from solstice.webui.collectors.metrics import PrometheusCollector
 from solstice.webui.storage import JobStorage
 from solstice.utils.logging import create_ray_logger
 
@@ -30,9 +28,7 @@ if TYPE_CHECKING:
 class JobWebUI:
     """WebUI instance for a single Solstice job.
 
-    This component:
-    1. Stores job configuration
-    2. Starts Prometheus exporter (if enabled)
+    This component stores job configuration at startup.
 
     Note: Metrics collection, worker tracking, and job archiving are handled
     by JobStateManager (push-based architecture).
@@ -44,7 +40,6 @@ class JobWebUI:
         storage: JobStorage,
         attempt_id: str,
         state_manager: Optional["JobStateManager"] = None,
-        prometheus_enabled: bool = True,
     ):
         """Initialize job WebUI.
 
@@ -53,7 +48,6 @@ class JobWebUI:
             storage: SlateDB storage instance
             attempt_id: Unique attempt ID for this run
             state_manager: JobStateManager for reading metrics (push-based)
-            prometheus_enabled: Whether to export Prometheus metrics
         """
         self.job_runner = job_runner
         self.storage = storage
@@ -63,24 +57,12 @@ class JobWebUI:
 
         self.logger = create_ray_logger(f"JobWebUI-{self.job_id}")
 
-        # Prometheus collector (optional)
-        self.prometheus_collector: Optional[PrometheusCollector] = None
-        if prometheus_enabled and state_manager:
-            self.prometheus_collector = PrometheusCollector(state_manager, self.job_id)
-
-        # Background tasks
-        self._collector_tasks: list = []
-
         self.logger.info("Job WebUI initialized")
 
     async def start(self) -> None:
         """Start the WebUI components."""
         # Store configuration at job start
         self._store_configuration()
-
-        # Start Prometheus collector if enabled
-        if self.prometheus_collector:
-            self._collector_tasks.append(asyncio.create_task(self.prometheus_collector.run_loop()))
 
         self.logger.info("Job WebUI started")
 
@@ -92,13 +74,14 @@ class JobWebUI:
             # Build stage configs
             stage_configs = {}
             for stage_id, master in job_runner._masters.items():
+                stage = master.stage
                 stage_configs[stage_id] = {
-                    "operator_type": type(master.stage.operator_config).__name__,
-                    "min_parallelism": master.config.min_workers,
-                    "max_parallelism": master.config.max_workers,
-                    "num_cpus": master.config.num_cpus,
-                    "num_gpus": master.config.num_gpus,
-                    "memory_mb": master.config.memory_mb,
+                    "operator_type": type(stage.operator_config).__name__,
+                    "min_parallelism": stage.min_parallelism,
+                    "max_parallelism": stage.max_parallelism,
+                    "num_cpus": stage.num_cpus,
+                    "num_gpus": stage.num_gpus,
+                    "memory_mb": stage.memory_mb,
                 }
 
             config_data = {
@@ -124,20 +107,4 @@ class JobWebUI:
 
     async def stop(self) -> None:
         """Stop the WebUI components."""
-        self.logger.info("Stopping Job WebUI")
-
-        # Stop Prometheus collector
-        if self.prometheus_collector:
-            self.prometheus_collector.stop()
-
-        # Wait for tasks to complete
-        for task in self._collector_tasks:
-            if not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-
-        self._collector_tasks.clear()
         self.logger.info("Job WebUI stopped")

@@ -62,7 +62,6 @@ class WorkerManager:
         consumer_group: str,
         state_endpoint: Optional[QueueEndpoint] = None,
         state_topic: Optional[str] = None,
-        lineage_sample_rate: float = 0.0,
     ):
         self._job_id = job_id
         self._stage = stage
@@ -76,7 +75,6 @@ class WorkerManager:
         self._logger = create_ray_logger(f"WorkerMgr-{stage.stage_id}")
         self._state_endpoint = state_endpoint
         self._state_topic = state_topic
-        self._lineage_sample_rate = lineage_sample_rate
 
         # Worker state
         self._workers: Dict[str, ray.actor.ActorHandle] = {}
@@ -213,7 +211,6 @@ class WorkerManager:
             output_topic=self._output_topic,
             state_endpoint=self._state_endpoint,
             state_topic=self._state_topic,
-            lineage_sample_rate=self._lineage_sample_rate,
             batch_size=self._stage.batch_size,
             commit_batch_size=self._stage.commit_batch_size,
         )

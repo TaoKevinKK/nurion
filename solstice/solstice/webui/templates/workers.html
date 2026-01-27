@@ -45,6 +45,25 @@
         </div>
     </section>
     
+    <!-- Throughput Summary (rate calculations) -->
+    <section>
+        <h2>Throughput (last 60s)</h2>
+        <div class="metrics-grid">
+            <div class="metric-card">
+                <div class="metric-value">{{ "%.1f"|format(throughput.total_input_rate|default(0)) }}</div>
+                <div class="metric-label">Input/sec</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">{{ "%.1f"|format(throughput.total_output_rate|default(0)) }}</div>
+                <div class="metric-label">Output/sec</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-value">{{ "%.1f"|format(throughput.total_splits_rate|default(0)) }}</div>
+                <div class="metric-label">Splits/sec</div>
+            </div>
+        </div>
+    </section>
+    
     <!-- Workers Table by Stage -->
     <section>
         <h2>Workers by Stage</h2>
@@ -67,18 +86,20 @@
                 <table>
                     <thead>
                         <tr>
-                            <th style="width: 20%;">Worker ID</th>
-                            <th style="width: 10%;">Status</th>
-                            <th class="number" style="width: 15%;">Start Time</th>
-                            <th class="number" style="width: 10%;">Duration</th>
+                            <th style="width: 18%;">Worker ID</th>
+                            <th style="width: 8%;">Status</th>
+                            <th class="number" style="width: 10%;">Input/s</th>
+                            <th class="number" style="width: 10%;">Output/s</th>
                             <th class="number" style="width: 10%;">Input</th>
                             <th class="number" style="width: 10%;">Output</th>
-                            <th style="width: 15%;">Partitions</th>
-                            <th style="width: 10%;">Action</th>
+                            <th class="number" style="width: 10%;">Duration</th>
+                            <th style="width: 14%;">Partitions</th>
+                            <th style="width: 8%;">Action</th>
                         </tr>
                     </thead>
                     <tbody>
                         {% for worker in stage_workers|sort(attribute='start_time', reverse=true) %}
+                        {% set worker_throughput = throughput.workers|selectattr('worker_id', 'equalto', worker.worker_id)|first if throughput.workers else none %}
                         <tr>
                             <td class="monospace" style="font-size: 0.8rem;">
                                 <a href="{{ base_path }}/jobs/{{ job.job_id }}/workers/{{ worker.worker_id }}">
@@ -88,13 +109,22 @@
                             <td>
                                 <span class="badge badge-{{ worker.status|lower }}">{{ worker.status }}</span>
                             </td>
-                            <td class="number" style="font-size: 0.8rem;">
-                                {% if worker.start_time %}
-                                {{ worker.start_time|format_datetime }}
+                            <td class="number">
+                                {% if worker_throughput %}
+                                {{ "%.1f"|format(worker_throughput.input_records_per_sec|default(0)) }}
                                 {% else %}
                                 -
                                 {% endif %}
                             </td>
+                            <td class="number">
+                                {% if worker_throughput %}
+                                {{ "%.1f"|format(worker_throughput.output_records_per_sec|default(0)) }}
+                                {% else %}
+                                -
+                                {% endif %}
+                            </td>
+                            <td class="number">{{ worker.input_records|default(0)|format_number }}</td>
+                            <td class="number">{{ worker.output_records|default(0)|format_number }}</td>
                             <td class="number" style="font-size: 0.8rem;">
                                 {% if worker.end_time and worker.start_time %}
                                 {{ (worker.end_time - worker.start_time)|format_duration }}
@@ -104,8 +134,6 @@
                                 -
                                 {% endif %}
                             </td>
-                            <td class="number">{{ worker.input_records|default(0)|format_number }}</td>
-                            <td class="number">{{ worker.output_records|default(0)|format_number }}</td>
                             <td class="monospace" style="font-size: 0.75rem;">
                                 {% if worker.assigned_partitions %}
                                 {{ worker.assigned_partitions|join(', ') }}
