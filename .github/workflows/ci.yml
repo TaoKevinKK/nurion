@@ -52,33 +52,25 @@ jobs:
         validateSingleCommit: false
 
   # ============================================================================
-  # Build artifacts that can be shared across jobs
+  # Build artifacts that can be shared across jobs (with caching)
   # ============================================================================
   
   build-raydp:
     name: Build RayDP (JARs + Wheel)
     runs-on: ubuntu-latest
-    outputs:
-      should_run: ${{ steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push' }}
     
     steps:
     - uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
     
-    - name: Get changed files
-      id: changed-files
-      uses: tj-actions/changed-files@v45
+    - name: Cache raydp wheel
+      id: cache-raydp
+      uses: actions/cache@v4
       with:
-        files: |
-          lib/raydp/**
-    
-    - name: Skip if no RayDP changes
-      if: steps.changed-files.outputs.any_changed == 'false' && github.event_name == 'pull_request'
-      run: echo "No RayDP files changed, skipping build..."
+        path: /tmp/raydp-wheel/
+        key: raydp-wheel-${{ hashFiles('lib/raydp/**') }}
     
     - name: Set up Java 11
-      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
+      if: steps.cache-raydp.outputs.cache-hit != 'true'
       uses: actions/setup-java@v4
       with:
         distribution: 'temurin'
@@ -86,99 +78,79 @@ jobs:
         cache: 'maven'
         cache-dependency-path: 'lib/raydp/java/pom.xml'
     
-    - name: Build raydp JARs
-      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
-      run: |
-        cd lib/raydp/java
-        mvn clean package -DskipTests -q
-        
-        mkdir -p ../jars
-        cp raydp-main/target/raydp-1.7.0-SNAPSHOT.jar ../jars/
-        cp shims/common/target/raydp-shims-common-1.7.0-SNAPSHOT.jar ../jars/
-        cp shims/spark340/target/raydp-shims-spark340-1.7.0-SNAPSHOT.jar ../jars/
-        cp shims/spark350/target/raydp-shims-spark350-1.7.0-SNAPSHOT.jar ../jars/
-        
-        echo "Built JARs:"
-        ls -la ../jars/
-    
     - name: Install uv
-      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
+      if: steps.cache-raydp.outputs.cache-hit != 'true'
       uses: astral-sh/setup-uv@v4
       with:
         version: "latest"
     
-    - name: Set up Python 3.12
-      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
-      run: uv python install 3.12
-    
     - name: Build raydp wheel
-      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
+      if: steps.cache-raydp.outputs.cache-hit != 'true'
       run: |
         cd lib/raydp
+        # Build wheel (includes JAR compilation via _build_hooks.py)
         uvx --from build pyproject-build --wheel
         echo "Built wheel:"
         ls -la dist/
+        # Verify JARs are included
+        unzip -l dist/*.whl | grep -E "\.jar$"
+        # Copy to cache directory
+        mkdir -p /tmp/raydp-wheel/
+        cp dist/*.whl /tmp/raydp-wheel/
     
     - name: Upload wheel artifact
-      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       uses: actions/upload-artifact@v4
       with:
         name: raydp-wheel
-        path: lib/raydp/dist/*.whl
+        path: /tmp/raydp-wheel/*.whl
         retention-days: 1
 
   build-tansu-py:
     name: Build tansu-py Wheel
     runs-on: ubuntu-latest
-    outputs:
-      should_run: ${{ steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push' }}
     
     steps:
     - uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
     
-    - name: Get changed files
-      id: changed-files
-      uses: tj-actions/changed-files@v45
+    - name: Cache tansu-py wheel
+      id: cache-tansu
+      uses: actions/cache@v4
       with:
-        files: |
-          lib/tansu-py/**
-    
-    - name: Skip if no tansu-py changes
-      if: steps.changed-files.outputs.any_changed == 'false' && github.event_name == 'pull_request'
-      run: echo "No tansu-py files changed, skipping wheel build..."
+        path: /tmp/tansu-py-wheel/
+        key: tansu-py-wheel-${{ hashFiles('lib/tansu-py/**') }}
     
     - name: Set up Rust
-      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
+      if: steps.cache-tansu.outputs.cache-hit != 'true'
       uses: dtolnay/rust-toolchain@stable
     
     - name: Rust cache
-      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
+      if: steps.cache-tansu.outputs.cache-hit != 'true'
       uses: Swatinem/rust-cache@v2
       with:
         workspaces: "lib/tansu-py -> target"
     
     - name: Install uv
-      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
+      if: steps.cache-tansu.outputs.cache-hit != 'true'
       uses: astral-sh/setup-uv@v4
       with:
         version: "latest"
     
     - name: Build tansu-py wheel
-      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
+      if: steps.cache-tansu.outputs.cache-hit != 'true'
       run: |
         cd lib/tansu-py
         uvx maturin build --release
         echo "Built wheel:"
         ls -la target/wheels/
+        # Copy to cache directory
+        mkdir -p /tmp/tansu-py-wheel/
+        cp target/wheels/*.whl /tmp/tansu-py-wheel/
     
     - name: Upload wheel artifact
-      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       uses: actions/upload-artifact@v4
       with:
         name: tansu-py-wheel
-        path: lib/tansu-py/target/wheels/*.whl
+        path: /tmp/tansu-py-wheel/*.whl
         retention-days: 1
 
   # ============================================================================
@@ -188,7 +160,7 @@ jobs:
   lint:
     name: Code Quality Check
     runs-on: ubuntu-latest
-    needs: [build-tansu-py]
+    needs: [build-raydp, build-tansu-py]
     if: always() && !cancelled()
     
     steps:
@@ -212,12 +184,13 @@ jobs:
       if: steps.changed-files.outputs.any_changed == 'false' && github.event_name == 'pull_request'
       run: echo "No relevant files changed, skipping..."
     
-    - name: Download tansu-py wheel
+    - name: Download pre-built wheels
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       uses: actions/download-artifact@v4
       with:
-        name: tansu-py-wheel
-        path: /tmp/tansu-py-wheels/
+        pattern: '*-wheel'
+        path: /tmp/wheels/
+        merge-multiple: true
       continue-on-error: true
     
     - name: Install uv
@@ -250,7 +223,7 @@ jobs:
       run: |
         cd solstice
         # CI mode: use pre-built wheels via --find-links, skip editable sources
-        uv sync --dev --python 3.12 --no-sources --find-links /tmp/tansu-py-wheels/
+        uv sync --dev --python 3.12 --no-sources --find-links /tmp/wheels/
         uv run --no-sync ruff check solstice/
         uv run --no-sync ruff format --check solstice/
     
@@ -349,20 +322,13 @@ jobs:
       if: steps.changed-files.outputs.any_changed == 'false' && github.event_name == 'pull_request'
       run: echo "No Solstice/lib files changed, skipping..."
     
-    - name: Download raydp wheel
+    - name: Download pre-built wheels
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       uses: actions/download-artifact@v4
       with:
-        name: raydp-wheel
-        path: /tmp/raydp-wheels/
-      continue-on-error: true
-
-    - name: Download tansu-py wheel
-      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
-      uses: actions/download-artifact@v4
-      with:
-        name: tansu-py-wheel
-        path: /tmp/tansu-py-wheels/
+        pattern: '*-wheel'
+        path: /tmp/wheels/
+        merge-multiple: true
       continue-on-error: true
     
     - name: Install uv
@@ -382,7 +348,7 @@ jobs:
       run: |
         cd solstice
         # CI mode: use pre-built wheels via --find-links, skip editable sources
-        uv sync --dev --python 3.12 --no-sources --find-links /tmp/tansu-py-wheels/ --find-links /tmp/raydp-wheels/
+        uv sync --dev --python 3.12 --no-sources --find-links /tmp/wheels/
     
     - name: Run unit tests
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
@@ -390,18 +356,14 @@ jobs:
         cd solstice
         uv run --no-sync pytest tests/ -v --tb=short -m "not integration and not distributed and not workflow and not chaos and not stability"
     
-    - name: Print Ray logs on failure
+    - name: Upload Ray logs on failure
       if: failure()
-      run: |
-        echo "=== Ray Session Logs ==="
-        if [ -d /tmp/ray ]; then
-          find /tmp/ray -name "*.log" -type f 2>/dev/null | head -20 | while read f; do
-            echo "=== $f ==="
-            tail -200 "$f" 2>/dev/null || true
-          done
-        else
-          echo "No Ray logs found in /tmp/ray"
-        fi
+      uses: actions/upload-artifact@v4
+      with:
+        name: ray-logs-unit-${{ github.run_id }}
+        path: /tmp/ray/
+        retention-days: 1
+        if-no-files-found: ignore
 
   # ============================================================================
   # Solstice integration tests (requires Aether, Spark JARs)
@@ -411,7 +373,7 @@ jobs:
     name: Solstice Integration Tests
     runs-on: ubuntu-latest
     needs: [build-raydp, build-tansu-py]
-    if: always() && !cancelled() && (needs.build-raydp.outputs.should_run == 'true' || needs.build-tansu-py.outputs.should_run == 'true')
+    if: always() && !cancelled()
     
     steps:
     - name: Free up disk space
@@ -430,18 +392,12 @@ jobs:
       with:
         fetch-depth: 0
     
-    - name: Download raydp wheel
+    - name: Download pre-built wheels
       uses: actions/download-artifact@v4
       with:
-        name: raydp-wheel
-        path: /tmp/raydp-wheels/
-      continue-on-error: true
-    
-    - name: Download tansu-py wheel
-      uses: actions/download-artifact@v4
-      with:
-        name: tansu-py-wheel
-        path: /tmp/tansu-py-wheels/
+        pattern: '*-wheel'
+        path: /tmp/wheels/
+        merge-multiple: true
       continue-on-error: true
     
     - name: Set up Java 11
@@ -485,25 +441,21 @@ jobs:
       run: |
         cd solstice
         # CI mode: use pre-built wheels via --find-links, skip editable sources
-        uv sync --dev --python 3.12 --no-sources --find-links /tmp/tansu-py-wheels/ --find-links /tmp/raydp-wheels/
+        uv sync --dev --python 3.12 --no-sources --find-links /tmp/wheels/
     
     - name: Run integration tests
       run: |
         cd solstice
         uv run --no-sync pytest tests/ -v --tb=short -m "integration"
     
-    - name: Print Ray logs on failure
+    - name: Upload Ray logs on failure
       if: failure()
-      run: |
-        echo "=== Ray Session Logs ==="
-        if [ -d /tmp/ray ]; then
-          find /tmp/ray -name "*.log" -type f 2>/dev/null | head -20 | while read f; do
-            echo "=== $f ==="
-            tail -200 "$f" 2>/dev/null || true
-          done
-        else
-          echo "No Ray logs found in /tmp/ray"
-        fi
+      uses: actions/upload-artifact@v4
+      with:
+        name: ray-logs-integration-${{ github.run_id }}
+        path: /tmp/ray/
+        retention-days: 1
+        if-no-files-found: ignore
     
     - name: Stop services
       if: always()
@@ -538,20 +490,13 @@ jobs:
       if: steps.changed-files.outputs.any_changed == 'false' && github.event_name == 'pull_request'
       run: echo "No Solstice/lib files changed, skipping..."
     
-    - name: Download raydp wheel
+    - name: Download pre-built wheels
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       uses: actions/download-artifact@v4
       with:
-        name: raydp-wheel
-        path: /tmp/raydp-wheels/
-      continue-on-error: true
-
-    - name: Download tansu-py wheel
-      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
-      uses: actions/download-artifact@v4
-      with:
-        name: tansu-py-wheel
-        path: /tmp/tansu-py-wheels/
+        pattern: '*-wheel'
+        path: /tmp/wheels/
+        merge-multiple: true
       continue-on-error: true
     
     - name: Install uv
@@ -571,7 +516,7 @@ jobs:
       run: |
         cd solstice
         # CI mode: use pre-built wheels via --find-links, skip editable sources
-        uv sync --dev --python 3.12 --no-sources --find-links /tmp/tansu-py-wheels/ --find-links /tmp/raydp-wheels/
+        uv sync --dev --python 3.12 --no-sources --find-links /tmp/wheels/
     
     - name: Run distributed tests
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
@@ -579,18 +524,14 @@ jobs:
         cd solstice
         uv run --no-sync pytest tests/ -v --tb=short -m "distributed"
     
-    - name: Print Ray logs on failure
+    - name: Upload Ray logs on failure
       if: failure()
-      run: |
-        echo "=== Ray Session Logs ==="
-        if [ -d /tmp/ray ]; then
-          find /tmp/ray -name "*.log" -type f 2>/dev/null | head -20 | while read f; do
-            echo "=== $f ==="
-            tail -200 "$f" 2>/dev/null || true
-          done
-        else
-          echo "No Ray logs found in /tmp/ray"
-        fi
+      uses: actions/upload-artifact@v4
+      with:
+        name: ray-logs-distributed-${{ github.run_id }}
+        path: /tmp/ray/
+        retention-days: 1
+        if-no-files-found: ignore
 
   # ============================================================================
   # Solstice stability tests (deterministic fault injection)
@@ -619,20 +560,13 @@ jobs:
       if: steps.changed-files.outputs.any_changed == 'false' && github.event_name == 'pull_request'
       run: echo "No Solstice/lib files changed, skipping..."
     
-    - name: Download raydp wheel
+    - name: Download pre-built wheels
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       uses: actions/download-artifact@v4
       with:
-        name: raydp-wheel
-        path: /tmp/raydp-wheels/
-      continue-on-error: true
-
-    - name: Download tansu-py wheel
-      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
-      uses: actions/download-artifact@v4
-      with:
-        name: tansu-py-wheel
-        path: /tmp/tansu-py-wheels/
+        pattern: '*-wheel'
+        path: /tmp/wheels/
+        merge-multiple: true
       continue-on-error: true
     
     - name: Install uv
@@ -652,7 +586,7 @@ jobs:
       run: |
         cd solstice
         # CI mode: use pre-built wheels via --find-links, skip editable sources
-        uv sync --dev --python 3.12 --no-sources --find-links /tmp/tansu-py-wheels/ --find-links /tmp/raydp-wheels/
+        uv sync --dev --python 3.12 --no-sources --find-links /tmp/wheels/
     
     - name: Run stability tests
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
@@ -660,18 +594,14 @@ jobs:
         cd solstice
         uv run --no-sync pytest tests/ -v --tb=short -m "stability" --timeout=1200
     
-    - name: Print Ray logs on failure
+    - name: Upload Ray logs on failure
       if: failure()
-      run: |
-        echo "=== Ray Session Logs ==="
-        if [ -d /tmp/ray ]; then
-          find /tmp/ray -name "*.log" -type f 2>/dev/null | head -20 | while read f; do
-            echo "=== $f ==="
-            tail -200 "$f" 2>/dev/null || true
-          done
-        else
-          echo "No Ray logs found in /tmp/ray"
-        fi
+      uses: actions/upload-artifact@v4
+      with:
+        name: ray-logs-stability-${{ github.run_id }}
+        path: /tmp/ray/
+        retention-days: 1
+        if-no-files-found: ignore
 
   # ============================================================================
   # Solstice workflow tests (end-to-end pipeline tests, slow)
@@ -720,20 +650,13 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y ffmpeg
     
-    - name: Download raydp wheel
+    - name: Download pre-built wheels
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       uses: actions/download-artifact@v4
       with:
-        name: raydp-wheel
-        path: /tmp/raydp-wheels/
-      continue-on-error: true
-
-    - name: Download tansu-py wheel
-      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
-      uses: actions/download-artifact@v4
-      with:
-        name: tansu-py-wheel
-        path: /tmp/tansu-py-wheels/
+        pattern: '*-wheel'
+        path: /tmp/wheels/
+        merge-multiple: true
       continue-on-error: true
     
     - name: Install uv
@@ -753,7 +676,7 @@ jobs:
       run: |
         cd solstice
         # CI mode: use pre-built wheels via --find-links, skip editable sources
-        uv sync --dev --python 3.12 --no-sources --find-links /tmp/tansu-py-wheels/ --find-links /tmp/raydp-wheels/
+        uv sync --dev --python 3.12 --no-sources --find-links /tmp/wheels/
     
     - name: Run workflow tests
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
@@ -761,18 +684,14 @@ jobs:
         cd solstice
         uv run --no-sync pytest tests/ -v --tb=short -m "workflow" --timeout=1200
     
-    - name: Print Ray logs on failure
+    - name: Upload Ray logs on failure
       if: failure()
-      run: |
-        echo "=== Ray Session Logs ==="
-        if [ -d /tmp/ray ]; then
-          find /tmp/ray -name "*.log" -type f 2>/dev/null | head -20 | while read f; do
-            echo "=== $f ==="
-            tail -200 "$f" 2>/dev/null || true
-          done
-        else
-          echo "No Ray logs found in /tmp/ray"
-        fi
+      uses: actions/upload-artifact@v4
+      with:
+        name: ray-logs-workflow-${{ github.run_id }}
+        path: /tmp/ray/
+        retention-days: 1
+        if-no-files-found: ignore
     
     - name: Cleanup test artifacts
       if: always()
@@ -810,20 +729,13 @@ jobs:
       if: steps.changed-files.outputs.any_changed == 'false' && github.event_name == 'pull_request'
       run: echo "No Solstice/lib files changed, skipping..."
     
-    - name: Download raydp wheel
+    - name: Download pre-built wheels
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       uses: actions/download-artifact@v4
       with:
-        name: raydp-wheel
-        path: /tmp/raydp-wheels/
-      continue-on-error: true
-
-    - name: Download tansu-py wheel
-      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
-      uses: actions/download-artifact@v4
-      with:
-        name: tansu-py-wheel
-        path: /tmp/tansu-py-wheels/
+        pattern: '*-wheel'
+        path: /tmp/wheels/
+        merge-multiple: true
       continue-on-error: true
     
     - name: Install uv
@@ -843,7 +755,7 @@ jobs:
       run: |
         cd solstice
         # CI mode: use pre-built wheels via --find-links, skip editable sources
-        uv sync --dev --python 3.12 --no-sources --find-links /tmp/tansu-py-wheels/ --find-links /tmp/raydp-wheels/
+        uv sync --dev --python 3.12 --no-sources --find-links /tmp/wheels/
 
     - name: Run chaos tests
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
@@ -851,15 +763,11 @@ jobs:
         cd solstice
         uv run --no-sync pytest tests/ -v --tb=short -m "chaos" --timeout=600
     
-    - name: Print Ray logs on failure
+    - name: Upload Ray logs on failure
       if: failure()
-      run: |
-        echo "=== Ray Session Logs ==="
-        if [ -d /tmp/ray ]; then
-          find /tmp/ray -name "*.log" -type f 2>/dev/null | head -20 | while read f; do
-            echo "=== $f ==="
-            tail -200 "$f" 2>/dev/null || true
-          done
-        else
-          echo "No Ray logs found in /tmp/ray"
-        fi
+      uses: actions/upload-artifact@v4
+      with:
+        name: ray-logs-chaos-${{ github.run_id }}
+        path: /tmp/ray/
+        retention-days: 1
+        if-no-files-found: ignore

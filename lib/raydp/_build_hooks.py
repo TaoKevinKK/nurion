@@ -28,7 +28,8 @@ from shutil import copy2
 from setuptools.command.build_py import build_py as _build_py
 from setuptools.command.sdist import sdist as _sdist
 
-JARS_TARGET = os.path.join("raydp", "jars")
+# JAR files go to jars/ directory (which maps to raydp.jars via package-dir)
+JARS_TARGET = "jars"
 
 
 class BuildWithJars(_build_py):

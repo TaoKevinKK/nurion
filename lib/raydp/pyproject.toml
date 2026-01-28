@@ -39,7 +39,7 @@ build-backend = "setuptools.build_meta"
 
 # Use explicit package configuration since raydp is at the root level
 [tool.setuptools]
-packages = ["raydp", "raydp.spark", "raydp.dataset", "raydp.jars"]
+packages = ["raydp", "raydp.spark", "raydp.jars"]
 package-dir = {"raydp" = "."}
 
 [tool.setuptools.package-data]
