@@ -203,6 +203,64 @@ async def memory_client():
         broker.stop()
 
 
+# ============================================================================
+# Tansu SQLite fixtures for persistence tests
+# ============================================================================
+
+
+@pytest.fixture
+def tansu_sqlite_storage_url(tmp_path):
+    """Provide a SQLite storage URL for persistent Tansu storage.
+
+    Note: SQLite URL format is sqlite:///absolute/path/file.db (three slashes for absolute path)
+
+    Usage:
+        def test_persistence(tansu_sqlite_storage_url):
+            broker = TansuBrokerManager(storage_url=tansu_sqlite_storage_url, ...)
+    """
+    db_path = tmp_path / "tansu.db"
+    # Use file:// URL format with absolute path (three slashes)
+    yield f"sqlite:///{db_path}"
+
+
+@pytest.fixture
+def memory_broker_and_client():
+    """Provide a fresh MemoryBroker and MemoryClient pair (sync version)."""
+    broker = MemoryBroker(gc_interval_seconds=3600)  # Disable auto-GC
+    broker.start()
+    client = MemoryClient(broker)
+    client.start()
+    yield broker, client
+    client.stop()
+    broker.stop()
+
+
+@pytest.fixture
+def tansu_broker_and_client():
+    """Provide a Tansu broker and client pair with memory storage."""
+    import socket
+
+    # Find a free port dynamically
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        port = s.getsockname()[1]
+
+    # Start broker with shorter timeout for tests
+    broker = TansuBrokerManager(storage_url="memory://tansu/", port=port, startup_timeout=5.0)
+    broker.start()
+
+    # Create and start client
+    client = TansuQueueClient(broker.get_broker_url())
+    client.start()
+
+    yield broker, client
+
+    # Cleanup
+    client.stop()
+    broker.stop()
+    time.sleep(0.1)  # Brief pause for cleanup
+
+
 @pytest.fixture(scope="session", autouse=True)
 def ensure_spark_testdata():
     """Ensure Spark test data files exist before any tests run."""

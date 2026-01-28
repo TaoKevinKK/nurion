@@ -1,7 +1,5 @@
 {
   "excludes": [
-    "java/",
-    "tansu-py/",
     "tests/",
     "*.lance",
     "*.mp4",

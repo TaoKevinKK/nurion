@@ -37,6 +37,12 @@ nurion/
 │   ├── alembic/             # Database migrations
 │   └── tests/
 │
+├── lib/                     # Shared libraries
+│   ├── tansu-py/            # PyO3 bindings for Tansu message broker
+│   └── raydp/               # Spark on Ray integration
+│       ├── raydp/           # Python package
+│       └── java/            # Spark Java/Scala components
+│
 ├── solstice/                # Data processing framework
 │   ├── solstice/
 │   │   ├── core/            # Core abstractions (Job, Stage, Operator)
@@ -47,8 +53,6 @@ nurion/
 │   │   │   └── filter.py    # Filter operators
 │   │   ├── queue/           # Queue backends (Tansu, Memory)
 │   │   └── runtime/         # Ray runtime and autoscaling
-│   ├── raydp/               # Spark on Ray integration
-│   ├── java/                # Spark Java/Scala components
 │   ├── workflows/           # Example workflows
 │   ├── tests/
 │   ├── design-docs/         # Design documents (architecture decisions)
@@ -156,7 +160,7 @@ For Solstice integration tests, you need:
 1. **Java 11**: For Spark components
 2. **Tansu**: Message broker (`curl -fsSL https://pub-8bc1f1d3d1984bdfb056d0bc0bf97c3d.r2.dev/tansu/tansu -o /usr/local/bin/tansu && chmod +x /usr/local/bin/tansu`)
 3. **Aether services**: `cd aether && docker compose up -d`
-4. **RayDP JARs**: `cd solstice/java && mvn clean package -DskipTests -q`
+4. **RayDP JARs**: `cd lib/raydp/java && mvn clean package -DskipTests -q`
 
 ## Agent Working Tips
 

@@ -10,7 +10,8 @@ requires-python = ">=3.12"
 license = {text = "Apache-2.0"}
 
 dependencies = [
-    "tansu-py",  # Embedded Kafka-compatible broker (built from tansu-py/)
+    "tansu-py",  # Embedded Kafka-compatible broker (built from lib/tansu-py/)
+    "raydp",     # Spark on Ray integration (built from lib/raydp/)
     "ray[default]==2.48.0",
     "pyarrow>=18.1.0",
     "pandas>=2.0.0",
@@ -66,16 +67,18 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
 
+# Local development: editable sources for tansu-py and raydp
+# CI uses `uv sync --no-sources` to skip these and install pre-built wheels instead
 [tool.uv.sources]
-tansu-py = { path = "tansu-py", editable = true }
+tansu-py = { path = "../lib/tansu-py", editable = true }
+raydp = { path = "../lib/raydp", editable = true }
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["solstice*", "workflows*", "raydp*"]
+include = ["solstice*", "workflows*"]
 
 [tool.setuptools.package-data]
 solstice = ["py.typed", "webui/templates/**/*", "webui/static/**/*"]
-raydp = ["jars/*.jar"]
 
 [tool.black]
 line-length = 100
@@ -93,7 +96,6 @@ warn_redundant_casts = true
 warn_unused_ignores = false  # Avoid noise during gradual typing
 show_error_codes = true
 exclude = [
-    "^raydp/",  # Third-party Spark integration, harder to type
     "^tests/",  # Tests don't need strict typing
 ]
 

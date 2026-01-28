@@ -473,6 +473,7 @@ def create_test_pipeline(
     job_id: Optional[str] = None,
     queue_type: QueueType = QueueType.TANSU,
     transform_config: Optional[OperatorConfig] = None,
+    tansu_storage_url: str = "memory://",
 ) -> Job:
     """Create a standard test pipeline for distributed correctness tests.
 
@@ -489,6 +490,7 @@ def create_test_pipeline(
         job_id: Optional job ID (auto-generated if not provided)
         queue_type: Queue type to use (TANSU or MEMORY)
         transform_config: Optional custom transform config
+        tansu_storage_url: Storage URL for Tansu backend (memory://, sqlite://, s3://)
 
     Returns:
         Configured Job instance
@@ -502,7 +504,7 @@ def create_test_pipeline(
 
     job = Job(
         job_id=job_id,
-        config=JobConfig(queue_type=queue_type),
+        config=JobConfig(queue_type=queue_type, tansu_storage_url=tansu_storage_url),
     )
 
     # Source stage

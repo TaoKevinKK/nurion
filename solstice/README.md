@@ -79,12 +79,15 @@ Instead, it is focused on:
 ## Components
 
 - **solstice/**: Core streaming framework - Ray-based distributed processing
-- **raydp/**: Run Spark on Ray with distributed execution  
-- **java/**: Scala/Java components for Spark integration
-- **tansu-py/**: PyO3 bindings for embedded Tansu message broker
 - **workflows/**: Example workflows
 - **design-docs/**: Architecture and design documents
 - **todo/**: Feature implementation tracking
+
+### Shared Libraries (in `/lib`)
+
+- **lib/tansu-py/**: PyO3 bindings for embedded Tansu message broker
+- **lib/raydp/**: Run Spark on Ray with distributed execution
+- **lib/raydp/java/**: Scala/Java components for Spark integration
 
 ## Quick Start
 

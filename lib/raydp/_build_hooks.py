@@ -43,7 +43,10 @@ class BuildWithJars(_build_py):
 
     def setup_jars(self):
         """Set up JAR files for packaging."""
-        CORE_DIR = os.path.abspath("java")
+        # Java directory is a subdirectory of the raydp package
+        CORE_DIR = os.path.abspath(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "java")
+        )
 
         # Build JAR files using Maven
         self.build_jars(CORE_DIR)

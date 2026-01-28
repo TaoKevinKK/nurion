@@ -64,9 +64,9 @@ EXCLUDE_FILES = {
     "__init__.py",  # Usually very short, optional
 }
 
-# Directories that may have ASF license (raydp)
+# Directories that may have ASF license (raydp in lib/)
 ASF_LICENSE_DIRS = {
-    "raydp",
+    "raydp",  # lib/raydp has ASF license
 }
 
 

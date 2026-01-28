@@ -15,13 +15,16 @@
 """Queue and network fault tests for distributed Solstice pipelines.
 
 These are P1 tests that verify:
-- Tansu broker restart recovery
+- Tansu broker restart recovery (with SQLite persistence)
 - Connection timeout handling
 - Slow network / backpressure behavior
 - Produce/fetch retry on failure
 
 All tests use real Ray clusters and Tansu queues (no mocks).
 Data volumes: 10,000+ records with complex operators.
+
+Note: Broker restart tests use SQLite storage to ensure data persists
+across restarts. Memory-backed storage loses all data on restart.
 """
 
 import asyncio
@@ -66,18 +69,16 @@ class TestQueueFaultRecovery:
             pass
 
     @pytest.mark.asyncio
-    @pytest.mark.timeout(90)
-    async def test_tansu_broker_restart(self, ray_cluster):
-        """Tansu broker restart: auto-reconnect, no data loss.
+    @pytest.mark.timeout(120)
+    async def test_tansu_broker_restart(self, ray_cluster, tansu_sqlite_storage_url):
+        """Tansu broker restart: auto-reconnect, no data loss with SQLite storage.
 
-        Note: This test verifies that after broker restart, the pipeline
-        can reconnect and continue processing without losing data that was
-        already committed to the sink before the restart.
+        This test verifies that after broker restart with SQLite persistence:
+        1. Queue data persists across broker restarts
+        2. Pipeline can reconnect and continue processing
+        3. All data is eventually processed without loss
 
-        LIMITATION: With memory-backed storage, all queue data is lost when
-        broker restarts. This test verifies that:
-        1. Data already processed before restart is preserved in sink
-        2. Pipeline can complete after broker reconnection
+        Uses SQLite storage backend to ensure data durability.
         """
         NUM_RECORDS = 1500  # Smaller dataset for faster test
         FILTER_MODULO = 4
@@ -85,6 +86,9 @@ class TestQueueFaultRecovery:
         validator = DataValidator()
 
         source_data = generate_test_data_with_checksum(NUM_RECORDS)
+        expected_count = validator.calculate_filter_expected_count(
+            NUM_RECORDS, FILTER_MODULO, FILTER_REMAINDER
+        )
 
         job = create_test_pipeline(
             num_records=NUM_RECORDS,
@@ -98,6 +102,7 @@ class TestQueueFaultRecovery:
                 modulo=FILTER_MODULO,
                 remainder=FILTER_REMAINDER,
             ),
+            tansu_storage_url=tansu_sqlite_storage_url,  # Use SQLite for persistence
         )
 
         runner = RayJobRunner(job)
@@ -117,45 +122,63 @@ class TestQueueFaultRecovery:
             collector = ray.get_actor(self.collector_name)
             records_before_restart = ray.get(collector.count.remote())
 
-            # Restart the broker
+            # Restart the broker by creating a new instance
+            # Note: We create a new broker instance instead of restarting the same one
+            # because the underlying Rust/Tokio runtime may have residual state
             try:
                 if runner._shared_broker is not None:
-                    runner._shared_broker.stop()
-                    await asyncio.sleep(0.5)  # Longer wait for clean shutdown
-                    runner._shared_broker.start()
+                    from solstice.queue.tansu import TansuBrokerManager
+
+                    old_broker = runner._shared_broker
+                    old_host = old_broker.host
+                    old_port = old_broker.port
+                    old_storage_url = old_broker.storage_url
+
+                    # Stop the old broker and wait for clean shutdown
+                    old_broker.stop()
+                    await asyncio.sleep(1.0)  # Wait for port to be released
+
+                    # Create and start a new broker instance on the same port
+                    # Using the same SQLite storage URL ensures data persistence
+                    new_broker = TansuBrokerManager(
+                        storage_url=old_storage_url,
+                        port=old_port,
+                        host=old_host,
+                    )
+                    new_broker.start()
                     await asyncio.sleep(0.5)  # Wait for broker to be ready
+
+                    # Replace the runner's broker reference
+                    runner._shared_broker = new_broker
                     broker_restarted = True
                 else:
                     pytest.skip("No shared broker available (using memory queue)")
             except Exception as e:
                 pytest.skip(f"Could not restart broker: {e}")
 
-            # Wait for pipeline to complete or timeout
-            # With memory storage, pipeline may not fully complete after restart
-            try:
-                await asyncio.wait_for(run_task, timeout=45)
-            except asyncio.TimeoutError:
-                pass  # Expected with memory-backed storage
+            # Wait for pipeline to complete
+            # With SQLite storage, pipeline should complete successfully after restart
+            await asyncio.wait_for(run_task, timeout=60)
         finally:
             await runner.stop()
 
         if broker_restarted:
             sink_data = get_sink_records(self.collector_name)
 
-            # With memory-backed storage, broker restart loses queue data.
-            # Verify that data committed BEFORE restart is preserved.
-            # Allow some tolerance for timing issues
-            min_expected = max(1, records_before_restart - 10)
-            assert len(sink_data) >= min_expected, (
-                f"Data committed before restart was lost: "
-                f"had {records_before_restart}, now have {len(sink_data)}"
+            # With SQLite storage, all data should be processed
+            # Allow some tolerance for at-least-once semantics (may have duplicates)
+            assert len(sink_data) >= expected_count, (
+                f"Data loss detected: expected at least {expected_count}, got {len(sink_data)}"
             )
 
-            # Verify all records match the filter pattern (duplicates OK)
+            # Verify all records match the filter pattern
             for record in sink_data:
                 assert record["id"] % FILTER_MODULO == FILTER_REMAINDER, (
                     f"Record {record['id']} doesn't match filter pattern"
                 )
+
+            # Verify data integrity with checksums
+            assert validator.verify_checksums(source_data, sink_data)
 
     @pytest.mark.asyncio
     async def test_tansu_connection_timeout(self, ray_cluster):

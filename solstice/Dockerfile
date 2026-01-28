@@ -4,6 +4,9 @@
 # 
 # This is a base image - solstice code is NOT included.
 # Mount or copy solstice code at runtime.
+#
+# Build from nurion root directory:
+#   docker build -f solstice/Dockerfile -t solstice-base .
 
 FROM ubuntu:24.04
 
@@ -37,9 +40,9 @@ ENV PATH="/root/.local/bin:${JAVA_HOME}/bin:${PATH}"
 
 WORKDIR /app
 
-# Copy only what's needed for building (tansu-py and java)
-COPY tansu-py /app/build/tansu-py
-COPY java /app/build/java
+# Copy only what's needed for building (tansu-py and java from lib/)
+COPY lib/tansu-py /app/build/tansu-py
+COPY lib/raydp/java /app/build/java
 
 # Install Rust, build tansu-py, then cleanup Rust completely (all in one layer)
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
@@ -56,11 +59,11 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
 # Build RayDP JARs, then cleanup Maven artifacts (all in one layer)
 RUN cd /app/build/java && \
     mvn clean package -DskipTests -q && \
-    mkdir -p /app/raydp/jars && \
-    cp raydp-main/target/raydp-*.jar /app/raydp/jars/ && \
-    cp shims/common/target/raydp-shims-*.jar /app/raydp/jars/ && \
-    cp shims/spark340/target/raydp-shims-*.jar /app/raydp/jars/ && \
-    cp shims/spark350/target/raydp-shims-*.jar /app/raydp/jars/ && \
+    mkdir -p /app/lib/raydp/jars && \
+    cp raydp-main/target/raydp-*.jar /app/lib/raydp/jars/ && \
+    cp shims/common/target/raydp-shims-*.jar /app/lib/raydp/jars/ && \
+    cp shims/spark340/target/raydp-shims-*.jar /app/lib/raydp/jars/ && \
+    cp shims/spark350/target/raydp-shims-*.jar /app/lib/raydp/jars/ && \
     # Cleanup Maven build and source
     rm -rf /app/build && \
     rm -rf /root/.m2

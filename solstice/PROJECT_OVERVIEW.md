@@ -55,14 +55,18 @@ solstice/
 │   ├── webui/               # Debug WebUI
 │   └── utils/               # Utilities
 │
-├── raydp/                   # Spark on Ray integration
-├── java/                    # Scala/Java Spark components
-├── tansu-py/                # Tansu PyO3 bindings
 ├── workflows/               # Example workflows
 ├── examples/                # Example scripts
 ├── tests/                   # Test suite
 ├── design-docs/             # Architecture documents
 └── todo/                    # Feature tracking
+
+# Shared libraries (in nurion/lib/)
+lib/
+├── tansu-py/                # Tansu PyO3 bindings
+└── raydp/                   # Spark on Ray integration
+    ├── raydp/               # Python package
+    └── java/                # Scala/Java Spark components
 ```
 
 ## Core Concepts

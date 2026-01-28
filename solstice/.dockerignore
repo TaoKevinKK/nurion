@@ -42,12 +42,7 @@ todo/
 *.parquet
 
 # Build artifacts (will be rebuilt)
-java/*/target/
-tansu-py/target/
-raydp/jars/
-
-# Rust build cache (will be rebuilt)
-tansu-py/target/
+# Note: tansu-py and raydp are now in lib/ directory
 
 # Temporary files
 *.log

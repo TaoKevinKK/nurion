@@ -35,20 +35,8 @@ from solstice.queue import MemoryBroker, MemoryClient
 
 
 # ============================================================================
-# Fixtures
+# Local Fixtures (use fixtures from conftest.py where possible)
 # ============================================================================
-
-
-@pytest.fixture
-def memory_broker_and_client():
-    """Provide a fresh MemoryBroker and MemoryClient pair."""
-    broker = MemoryBroker(gc_interval_seconds=3600)  # Disable auto-GC
-    broker.start()
-    client = MemoryClient(broker)
-    client.start()
-    yield broker, client
-    client.stop()
-    broker.stop()
 
 
 @pytest.fixture
@@ -453,34 +441,8 @@ class TestMemoryClientProperties:
 
 # ============================================================================
 # Tansu Tests (Broker + Client)
+# Uses tansu_broker_and_client fixture from conftest.py
 # ============================================================================
-
-
-@pytest.fixture
-def tansu_broker_and_client():
-    """Provide a Tansu broker and client pair."""
-    import socket
-    from solstice.queue import TansuBrokerManager, TansuQueueClient
-
-    # Find a free port dynamically
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        port = s.getsockname()[1]
-
-    # Start broker with shorter timeout for tests
-    broker = TansuBrokerManager(storage_url="memory://tansu/", port=port, startup_timeout=5.0)
-    broker.start()
-
-    # Create and start client
-    client = TansuQueueClient(broker.get_broker_url())
-    client.start()
-
-    yield broker, client
-
-    # Cleanup
-    client.stop()
-    broker.stop()
-    time.sleep(0.1)  # Brief pause for cleanup
 
 
 @pytest.mark.slow
@@ -602,6 +564,309 @@ class TestTansuMultiClient:
 
         finally:
             client2.stop()
+
+
+# ============================================================================
+# Tansu SQLite Persistence Tests (Broker Restart Recovery)
+# Uses tansu_sqlite_storage_url fixture from conftest.py
+# ============================================================================
+
+
+@pytest.mark.slow
+class TestTansuSQLitePersistence:
+    """Tests for Tansu with SQLite storage backend.
+
+    These tests verify that data persists across broker restarts,
+    which is essential for fault tolerance and exactly-once semantics.
+    """
+
+    def test_data_persists_after_broker_restart(self, tansu_sqlite_storage_url):
+        """Test that messages persist after broker restart with SQLite storage."""
+        import socket
+        from solstice.queue import TansuBrokerManager, TansuQueueClient
+
+        # Find a free port
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("", 0))
+            port = s.getsockname()[1]
+
+        storage_url = tansu_sqlite_storage_url
+        topic = "persist-test"
+
+        # === Phase 1: Start broker, produce messages ===
+        broker1 = TansuBrokerManager(
+            storage_url=storage_url,
+            port=port,
+            startup_timeout=10.0,
+        )
+        broker1.start()
+        assert broker1.is_running()
+
+        client1 = TansuQueueClient(broker1.get_broker_url())
+        client1.start()
+
+        # Create topic and produce messages
+        client1.create_topic(topic)
+        for i in range(10):
+            offset = client1.produce(topic, f"msg-{i}".encode())
+            assert offset == i
+
+        # Verify messages are there
+        records = client1.fetch(topic, offset=0, max_records=100, timeout_ms=2000)
+        assert len(records) == 10
+
+        # Stop client and broker
+        client1.stop()
+        broker1.stop()
+        time.sleep(1.0)  # Wait for clean shutdown and port release
+
+        # === Phase 2: Restart broker, verify data persists ===
+        broker2 = TansuBrokerManager(
+            storage_url=storage_url,
+            port=port,
+            startup_timeout=10.0,
+        )
+        broker2.start()
+        assert broker2.is_running()
+
+        client2 = TansuQueueClient(broker2.get_broker_url())
+        client2.start()
+
+        # Fetch messages - they should still be there
+        records = client2.fetch(topic, offset=0, max_records=100, timeout_ms=2000)
+        assert len(records) == 10, f"Expected 10 messages after restart, got {len(records)}"
+
+        # Verify message content
+        for i, record in enumerate(records):
+            assert record.value == f"msg-{i}".encode()
+            assert record.offset == i
+
+        # Cleanup
+        client2.stop()
+        broker2.stop()
+
+    def test_committed_offset_persists_after_restart(self, tansu_sqlite_storage_url):
+        """Test that committed offsets persist after broker restart."""
+        import socket
+        from solstice.queue import TansuBrokerManager, TansuQueueClient
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("", 0))
+            port = s.getsockname()[1]
+
+        storage_url = tansu_sqlite_storage_url
+        topic = "offset-persist-test"
+        group = "test-consumer-group"
+
+        # === Phase 1: Produce messages and commit offset ===
+        broker1 = TansuBrokerManager(
+            storage_url=storage_url,
+            port=port,
+            startup_timeout=10.0,
+        )
+        broker1.start()
+
+        client1 = TansuQueueClient(broker1.get_broker_url())
+        client1.start()
+
+        client1.create_topic(topic)
+        for i in range(10):
+            client1.produce(topic, f"msg-{i}".encode())
+
+        # Process first 5 messages and commit
+        records = client1.fetch(topic, offset=0, max_records=5, timeout_ms=2000)
+        assert len(records) == 5
+        client1.commit_offset(group, topic, offset=5)
+
+        # Verify committed offset
+        committed = client1.get_committed_offset(group, topic)
+        assert committed == 5
+
+        client1.stop()
+        broker1.stop()
+        time.sleep(1.0)
+
+        # === Phase 2: Restart and verify offset persists ===
+        broker2 = TansuBrokerManager(
+            storage_url=storage_url,
+            port=port,
+            startup_timeout=10.0,
+        )
+        broker2.start()
+
+        client2 = TansuQueueClient(broker2.get_broker_url())
+        client2.start()
+
+        # Committed offset should persist
+        committed = client2.get_committed_offset(group, topic)
+        assert committed == 5, f"Expected committed offset 5, got {committed}"
+
+        # Resume from committed offset
+        records = client2.fetch(topic, offset=committed, max_records=100, timeout_ms=2000)
+        assert len(records) == 5  # Remaining 5 messages
+        assert records[0].value == b"msg-5"
+
+        client2.stop()
+        broker2.stop()
+
+    def test_continue_producing_after_restart(self, tansu_sqlite_storage_url):
+        """Test that we can continue producing after broker restart."""
+        import socket
+        from solstice.queue import TansuBrokerManager, TansuQueueClient
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("", 0))
+            port = s.getsockname()[1]
+
+        storage_url = tansu_sqlite_storage_url
+        topic = "continue-produce-test"
+
+        # === Phase 1: Produce first batch ===
+        broker1 = TansuBrokerManager(
+            storage_url=storage_url,
+            port=port,
+            startup_timeout=10.0,
+        )
+        broker1.start()
+
+        client1 = TansuQueueClient(broker1.get_broker_url())
+        client1.start()
+
+        client1.create_topic(topic)
+        for i in range(5):
+            client1.produce(topic, f"batch1-msg-{i}".encode())
+
+        latest = client1.get_latest_offset(topic)
+        assert latest == 5
+
+        client1.stop()
+        broker1.stop()
+        time.sleep(1.0)
+
+        # === Phase 2: Restart and produce more ===
+        broker2 = TansuBrokerManager(
+            storage_url=storage_url,
+            port=port,
+            startup_timeout=10.0,
+        )
+        broker2.start()
+
+        client2 = TansuQueueClient(broker2.get_broker_url())
+        client2.start()
+
+        # Produce second batch
+        for i in range(5):
+            offset = client2.produce(topic, f"batch2-msg-{i}".encode())
+            assert offset == 5 + i  # Should continue from where we left off
+
+        # Verify all messages
+        records = client2.fetch(topic, offset=0, max_records=100, timeout_ms=2000)
+        assert len(records) == 10
+
+        # Verify content
+        for i in range(5):
+            assert records[i].value == f"batch1-msg-{i}".encode()
+            assert records[5 + i].value == f"batch2-msg-{i}".encode()
+
+        client2.stop()
+        broker2.stop()
+
+    def test_exactly_once_recovery_with_sqlite(self, tansu_sqlite_storage_url):
+        """Test exactly-once processing recovery after broker restart.
+
+        Simulates a crash during processing and verifies that:
+        1. Committed data is preserved
+        2. Processing can resume from committed offset
+        3. No data is lost or duplicated in the final result
+        """
+        import socket
+        from solstice.queue import TansuBrokerManager, TansuQueueClient
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("", 0))
+            port = s.getsockname()[1]
+
+        storage_url = tansu_sqlite_storage_url
+        input_topic = "input"
+        output_topic = "output"
+        group = "processor"
+
+        # === Phase 1: Setup and partial processing ===
+        broker1 = TansuBrokerManager(
+            storage_url=storage_url,
+            port=port,
+            startup_timeout=10.0,
+        )
+        broker1.start()
+
+        client1 = TansuQueueClient(broker1.get_broker_url())
+        client1.start()
+
+        client1.create_topic(input_topic)
+        client1.create_topic(output_topic)
+
+        # Produce 10 input messages
+        for i in range(10):
+            client1.produce(input_topic, f"input-{i}".encode())
+
+        # Process first 5 messages with atomic commit
+        offset = 0
+        for _ in range(5):
+            records = client1.fetch(input_topic, offset=offset, max_records=1, timeout_ms=2000)
+            if records:
+                # Process and produce output
+                client1.produce(output_topic, b"processed-" + records[0].value)
+                offset = records[0].offset + 1
+                # Commit after each message (atomic)
+                client1.commit_offset(group, input_topic, offset)
+
+        # Verify state before "crash"
+        assert client1.get_committed_offset(group, input_topic) == 5
+        output_records = client1.fetch(output_topic, offset=0, max_records=100, timeout_ms=2000)
+        assert len(output_records) == 5
+
+        # === CRASH! (stop without completing) ===
+        client1.stop()
+        broker1.stop()
+        time.sleep(1.0)
+
+        # === Phase 2: Recovery and continue processing ===
+        broker2 = TansuBrokerManager(
+            storage_url=storage_url,
+            port=port,
+            startup_timeout=10.0,
+        )
+        broker2.start()
+
+        client2 = TansuQueueClient(broker2.get_broker_url())
+        client2.start()
+
+        # Resume from committed offset
+        committed = client2.get_committed_offset(group, input_topic)
+        assert committed == 5, f"Expected committed offset 5, got {committed}"
+
+        # Continue processing remaining messages
+        offset = committed
+        while True:
+            records = client2.fetch(input_topic, offset=offset, max_records=1, timeout_ms=2000)
+            if not records:
+                break
+            client2.produce(output_topic, b"processed-" + records[0].value)
+            offset = records[0].offset + 1
+            client2.commit_offset(group, input_topic, offset)
+
+        # Verify final state
+        assert client2.get_committed_offset(group, input_topic) == 10
+
+        output_records = client2.fetch(output_topic, offset=0, max_records=100, timeout_ms=2000)
+        assert len(output_records) == 10, f"Expected 10 output records, got {len(output_records)}"
+
+        # Verify no duplicates and correct content
+        for i, record in enumerate(output_records):
+            assert record.value == f"processed-input-{i}".encode()
+
+        client2.stop()
+        broker2.stop()
 
 
 # Import check

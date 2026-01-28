@@ -968,11 +968,11 @@ solstice/solstice/core/stage_master.py                 # Modified: host in Queue
 solstice/solstice/operators/sources/sparkv2.py         # New: V2 implementation
 solstice/solstice/operators/sources/__init__.py        # Modified: V2 exports
 
-solstice/java/raydp-main/src/main/scala/org/apache/spark/sql/raydp/
+lib/raydp/java/raydp-main/src/main/scala/org/apache/spark/sql/raydp/
 ├── SplitPayloadStoreWriter.scala                      # New: Direct Arrow data writer
 └── ObjectStoreWriter.scala                            # Modified: saveToStoreAndQueue()
 
-solstice/java/raydp-main/pom.xml                       # Modified: Kafka + Gson deps
+lib/raydp/java/raydp-main/pom.xml                       # Modified: Kafka + Gson deps
 
 solstice/tests/test_spark_source_v2.py                 # New: V2 tests
 ```

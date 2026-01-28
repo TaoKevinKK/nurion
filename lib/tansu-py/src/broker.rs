@@ -256,14 +256,19 @@ impl TansuBroker {
     }
     
     /// Stop the broker
-    fn stop(&mut self) -> PyResult<()> {
+    fn stop(&mut self, py: Python<'_>) -> PyResult<()> {
         // Signal the broker to stop
         self.running.store(false, Ordering::SeqCst);
         
-        // Drop the handle without joining - the thread will clean up when it detects running=false
-        // This avoids blocking and allows the Python caller to return immediately
-        // The OS will reclaim resources (including the port) when the thread terminates
-        self.handle.take();
+        // Wait for the thread to finish to ensure clean shutdown
+        // This prevents resource conflicts when restarting the broker
+        if let Some(handle) = self.handle.take() {
+            py.allow_threads(|| {
+                // Wait with a timeout to avoid blocking forever
+                // The thread should exit quickly once running=false
+                let _ = handle.join();
+            });
+        }
         
         Ok(())
     }

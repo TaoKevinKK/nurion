@@ -2549,6 +2549,25 @@ default = [
 ]
 
 [[package]]
+name = "raydp"
+version = "1.7.0"
+source = { editable = "lib/raydp" }
+dependencies = [
+    { name = "pandas" },
+    { name = "pyarrow" },
+    { name = "pyspark" },
+    { name = "ray", extra = ["default"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pandas", specifier = ">=1.0.0" },
+    { name = "pyarrow", specifier = ">=8.0.0" },
+    { name = "pyspark", specifier = ">=3.4.0" },
+    { name = "ray", extras = ["default"], specifier = ">=2.0.0" },
+]
+
+[[package]]
 name = "referencing"
 version = "0.37.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2849,6 +2868,7 @@ dependencies = [
     { name = "pylance" },
     { name = "pyspark" },
     { name = "ray", extra = ["default"] },
+    { name = "raydp" },
     { name = "slatedb" },
     { name = "sqlalchemy" },
     { name = "sse-starlette" },
@@ -2895,10 +2915,11 @@ requires-dist = [
     { name = "pylance", specifier = ">=0.38.0" },
     { name = "pyspark", specifier = "==3.5.6" },
     { name = "ray", extras = ["default"], specifier = "==2.48.0" },
+    { name = "raydp", editable = "lib/raydp" },
     { name = "slatedb", specifier = ">=0.8.1" },
     { name = "sqlalchemy", specifier = ">=2.0.0" },
     { name = "sse-starlette", specifier = ">=1.8.0" },
-    { name = "tansu-py", editable = "solstice/tansu-py" },
+    { name = "tansu-py", editable = "lib/tansu-py" },
     { name = "tenacity", specifier = ">=8.2.0" },
     { name = "uvicorn", specifier = ">=0.34.0" },
 ]
@@ -3015,7 +3036,7 @@ wheels = [
 [[package]]
 name = "tansu-py"
 version = "0.1.0"
-source = { editable = "solstice/tansu-py" }
+source = { editable = "lib/tansu-py" }
 
 [[package]]
 name = "tenacity"

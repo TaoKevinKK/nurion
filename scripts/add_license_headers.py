@@ -54,7 +54,7 @@ SCALA_JAVA_LICENSE_HEADER = """/*
 
 # Directories to exclude (they may have their own license headers)
 EXCLUDE_DIRS = {
-    "raydp",  # Has ASF license headers
+    "raydp",  # lib/raydp has ASF license headers
     "__pycache__",
     ".git",
     "node_modules",
