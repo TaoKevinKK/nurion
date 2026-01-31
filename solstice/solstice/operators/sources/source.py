@@ -266,10 +266,6 @@ class SourceMaster(StageMaster):
             f"{len(self._workers)} workers"
         )
 
-        # Notify workers that all splits have been produced (source queue is complete)
-        # Workers can exit once they've consumed all splits from the source queue
-        await self._notify_splits_complete()
-
     async def _produce_splits(self) -> None:
         """Generate splits and write to source queue with backpressure awareness."""
         self.logger.info(f"Generating splits for source {self.stage_id}")
@@ -410,19 +406,6 @@ class SourceMaster(StageMaster):
                 # Continue checking other downstream stages
 
         return False
-
-    async def _notify_splits_complete(self) -> None:
-        """Notify workers that all splits have been produced.
-
-        This allows workers to exit once they've consumed all splits.
-        Also sets the upstream_finished flag so recovered workers get notified.
-        """
-        self.logger.info(f"Notifying {len(self._workers)} workers: all splits produced")
-
-        # Use WorkerManager's method to notify workers AND set the flag
-        # This ensures recovered workers will also be notified
-        if self._worker_manager:
-            await self._worker_manager.notify_upstream_finished()
 
     async def _produce_split_with_retry(self, split: Split) -> None:
         """Produce a split with retry logic for transient failures."""

@@ -266,16 +266,23 @@ class WorkerManager:
 
         return False
 
-    async def cancel_worker(self, worker_id: str) -> None:
-        """Cancel a pending worker that couldn't start due to resource constraints."""
+    async def cancel_worker(self, worker_id: str) -> List[int]:
+        """Cancel a pending worker that couldn't start due to resource constraints.
+
+        Returns:
+            List of orphaned partitions that need to be recovered
+        """
         worker = self._workers.pop(worker_id, None)
         task = self._worker_tasks.pop(worker_id, None)
-        self._partition_manager.remove_worker(worker_id)
+        orphaned_partitions = self._partition_manager.remove_worker(worker_id)
 
         if worker is not None:
             try:
                 ray.kill(worker)
-                self._logger.info(f"Cancelled worker {worker_id} due to resource constraints")
+                self._logger.info(
+                    f"Cancelled worker {worker_id} due to resource constraints, "
+                    f"orphaned partitions: {orphaned_partitions}"
+                )
             except Exception as e:
                 self._logger.debug(f"Error killing worker {worker_id}: {e}")
 
@@ -284,6 +291,8 @@ class WorkerManager:
                 ray.cancel(task, force=True)
             except Exception:
                 pass
+
+        return orphaned_partitions
 
     async def stop_worker(self, worker_id: str, timeout: float = 10.0) -> bool:
         """Gracefully stop a worker.

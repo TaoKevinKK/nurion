@@ -39,6 +39,15 @@ from solstice.testing.fault_injection import (
     FAULT_BEFORE_PROCESS,
     FAULT_AFTER_PROCESS,
 )
+from tests.utils import (
+    DataValidator,
+    ExplodeConfig,
+    FilterConfig,
+    create_collector,
+    create_test_pipeline,
+    generate_test_data_with_checksum,
+    get_sink_records,
+)
 
 # Mapping from fault point to env var suffix
 _POINT_TO_SUFFIX = {
@@ -52,16 +61,6 @@ _POINT_TO_SUFFIX = {
     "state_store.put_batch": "STATE_STORE_PUT",
     "state_store.get": "STATE_STORE_GET",
 }
-
-from tests.utils import (
-    DataValidator,
-    ExplodeConfig,
-    FilterConfig,
-    create_collector,
-    create_test_pipeline,
-    generate_test_data_with_checksum,
-    get_sink_records,
-)
 
 # Mark all tests in this module
 pytestmark = [pytest.mark.stability]
@@ -101,7 +100,9 @@ class FaultInjectionTestBase:
         except Exception:
             pass
 
-    def set_fault(self, fault_point: str, after_count: int | None = None, probability: float | None = None) -> None:
+    def set_fault(
+        self, fault_point: str, after_count: int | None = None, probability: float | None = None
+    ) -> None:
         """Set a fault injection via environment variable."""
         suffix = _POINT_TO_SUFFIX.get(fault_point)
         if not suffix:
@@ -357,9 +358,7 @@ class TestOperatorFaultInjection(FaultInjectionTestBase):
         sink_data = get_sink_records(self.collector_name)
 
         # Verify idempotency: no duplicates
-        assert validator.verify_no_duplicates(sink_data), (
-            "Duplicates found - idempotency violated!"
-        )
+        assert validator.verify_no_duplicates(sink_data), "Duplicates found - idempotency violated!"
         # And completeness
         assert validator.verify_count(sink_data, expected_count), (
             f"Data loss after post-process failure: expected {expected_count}, got {len(sink_data)}"

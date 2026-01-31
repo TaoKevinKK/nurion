@@ -31,7 +31,6 @@ Output: Lance table with columns:
 """
 
 import asyncio
-import io
 import json
 import logging
 import os
@@ -61,6 +60,8 @@ _OUTPUT_SCHEMA = pa.schema(
         pa.field("original_video_path", pa.string()),
     ]
 )
+
+
 def _log_s3_head(bucket: str) -> None:
     """Best-effort S3 head check with short timeouts."""
     logger = logging.getLogger(__name__)
@@ -76,7 +77,6 @@ def _log_s3_head(bucket: str) -> None:
         logger.info(f"S3 head bucket ok: {bucket}")
     except Exception as e:
         logger.warning(f"S3 head bucket failed for {bucket}: {e}")
-
 
 
 def _check_file_exists(path: str) -> bool:
@@ -147,57 +147,64 @@ def _extract_frames_at_fps(
     quality: int = 95,
 ) -> List[Dict[str, Any]]:
     """Extract frames from video at specified FPS using ffmpeg.
-    
+
     Args:
         video_path: Path to the video file
         fps: Frames per second to extract
         output_format: Output image format (jpeg, png)
         quality: JPEG quality (1-100)
-    
+
     Returns:
         List of dicts with frame_index, frame_timestamp, image (bytes)
     """
     logger = logging.getLogger(__name__)
-    
+
     # Create temp directory for frames
     with tempfile.TemporaryDirectory() as tmpdir:
         output_pattern = Path(tmpdir) / "frame_%06d.jpg"
-        
+
         # Use ffmpeg to extract frames at specified fps
         cmd = [
             "ffmpeg",
             "-hide_banner",
-            "-loglevel", "error",
-            "-i", str(video_path),
-            "-vf", f"fps={fps}",
-            "-q:v", str(max(1, min(31, 32 - int(quality * 31 / 100)))),  # JPEG quality (1=best, 31=worst)
-            "-f", "image2",
+            "-loglevel",
+            "error",
+            "-i",
+            str(video_path),
+            "-vf",
+            f"fps={fps}",
+            "-q:v",
+            str(max(1, min(31, 32 - int(quality * 31 / 100)))),  # JPEG quality (1=best, 31=worst)
+            "-f",
+            "image2",
             str(output_pattern),
         ]
-        
+
         logger.debug(f"Running ffmpeg: {' '.join(cmd)}")
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-        
+
         if result.returncode != 0:
             logger.error(f"ffmpeg failed: {result.stderr}")
             raise RuntimeError(f"ffmpeg failed: {result.stderr}")
-        
+
         # Read extracted frames
         frames = []
         frame_files = sorted(Path(tmpdir).glob("frame_*.jpg"))
-        
+
         for idx, frame_file in enumerate(frame_files):
             timestamp = idx / fps  # Calculate timestamp based on fps
-            
+
             with open(frame_file, "rb") as f:
                 image_bytes = f.read()
-            
-            frames.append({
-                "frame_index": idx,
-                "frame_timestamp": round(timestamp, 3),
-                "image": image_bytes,
-            })
-        
+
+            frames.append(
+                {
+                    "frame_index": idx,
+                    "frame_timestamp": round(timestamp, 3),
+                    "image": image_bytes,
+                }
+            )
+
         logger.debug(f"Extracted {len(frames)} frames from {video_path}")
         return frames
 
@@ -205,43 +212,41 @@ def _extract_frames_at_fps(
 @dataclass
 class VideoSliceConfig(OperatorConfig):
     """Configuration for VideoSliceOperator."""
-    
+
     fps: float = 2.0
     """Frames per second to extract."""
-    
+
     video_path_field: str = "data_paths"
     """Field containing video path (JSON string or direct path)."""
-    
+
     video_path_json_key: str = "mkv"
     """Key in JSON to extract video path (if video_path_field is JSON)."""
-    
+
     skip_missing_videos: bool = True
     """If True, skip videos that don't exist instead of raising error."""
-    
+
     jpeg_quality: int = 95
     """JPEG quality for extracted frames (1-100)."""
-    
+
     use_cache: bool = False
     """Whether to cache downloaded remote videos locally."""
 
     max_rows: Optional[int] = None
     """Maximum rows to process (for testing). None = no limit."""
-    
+
     operator_class: ClassVar[Type["VideoSliceOperator"]]
 
 
 class VideoSliceOperator(Operator):
     """Operator that extracts frames from videos at specified FPS.
-    
+
     Each input row (video) produces multiple output rows (frames).
     """
-    
+
     def __init__(self, config: VideoSliceConfig, runtime: Optional[OperatorRuntime] = None):
         # Support both old API (config only) and new API (config + runtime)
         if runtime is None:
-            runtime = OperatorRuntime(
-                job_id="", stage_id="", worker_id="", partition_id=0
-            )
+            runtime = OperatorRuntime(job_id="", stage_id="", worker_id="", partition_id=0)
         super().__init__(config, runtime)
         self.fps = config.fps
         self.video_path_field = config.video_path_field
@@ -251,13 +256,13 @@ class VideoSliceOperator(Operator):
         self.use_cache = config.use_cache
         self.max_rows = config.max_rows
         self._processed_count = 0  # Track processed rows
-    
+
     def _get_video_path(self, row: Dict[str, Any]) -> Optional[str]:
         """Extract video path from row."""
         value = row.get(self.video_path_field)
         if not value:
             return None
-        
+
         # Try to parse as JSON
         if isinstance(value, str):
             try:
@@ -267,17 +272,17 @@ class VideoSliceOperator(Operator):
             except json.JSONDecodeError:
                 # Not JSON, treat as direct path
                 return value
-        
+
         return str(value) if value else None
-    
+
     def process_split(
         self, split: Split, payload: Optional[SplitPayload] = None
     ) -> Optional[SplitPayload]:
         if payload is None:
             raise ValueError("VideoSliceOperator requires a payload")
-        
+
         rows = payload.to_table().to_pylist()
-        
+
         # Apply max_rows limit if configured
         if self.max_rows is not None:
             remaining = self.max_rows - self._processed_count
@@ -285,18 +290,18 @@ class VideoSliceOperator(Operator):
                 self.logger.info(f"Reached max_rows limit ({self.max_rows}), skipping split")
                 return None
             rows = rows[:remaining]
-        
+
         self.logger.info(f"Processing {len(rows)} videos for split {split.split_id}")
-        
+
         output_records: List[Dict[str, Any]] = []
-        
+
         for row_idx, row in enumerate(rows):
             video_path = self._get_video_path(row)
-            
+
             if not video_path:
                 self.logger.warning(f"Row {row_idx}: No video path found, skipping")
                 continue
-            
+
             # Check if video exists
             if not _check_file_exists(video_path):
                 if self.skip_missing:
@@ -304,7 +309,7 @@ class VideoSliceOperator(Operator):
                     continue
                 else:
                     raise FileNotFoundError(f"Video not found: {video_path}")
-            
+
             try:
                 frames = _extract_frames_with_retry(
                     video_path,
@@ -317,9 +322,7 @@ class VideoSliceOperator(Operator):
                     if isinstance(image_bytes, memoryview):
                         image_bytes = image_bytes.tobytes()
                     if not isinstance(image_bytes, (bytes, bytearray)):
-                        raise ValueError(
-                            f"Expected binary image bytes, got {type(image_bytes)}"
-                        )
+                        raise ValueError(f"Expected binary image bytes, got {type(image_bytes)}")
                     output_records.append(
                         {
                             "frame_index": frame["frame_index"],
@@ -329,10 +332,8 @@ class VideoSliceOperator(Operator):
                         }
                     )
 
-                self.logger.info(
-                    f"Extracted {len(frames)} frames from {video_path}"
-                )
-                    
+                self.logger.info(f"Extracted {len(frames)} frames from {video_path}")
+
             except Exception as e:
                 if self.skip_missing:
                     if _is_glacier_access_error(e) and video_path.startswith("s3://"):
@@ -350,18 +351,16 @@ class VideoSliceOperator(Operator):
                     continue
                 else:
                     raise
-        
+
         # Update processed count
         self._processed_count += len(rows)
-        
+
         if not output_records:
             self.logger.warning(f"No frames extracted for split {split.split_id}")
             return None
-        
-        self.logger.info(
-            f"Produced {len(output_records)} frames for split {payload.split_id}"
-        )
-        
+
+        self.logger.info(f"Produced {len(output_records)} frames for split {payload.split_id}")
+
         return SplitPayload.from_arrow(
             pa.Table.from_pylist(output_records, schema=_OUTPUT_SCHEMA),
             split_id=f"{payload.split_id}:video-slice-{self.worker_id}",
@@ -378,14 +377,14 @@ def create_job(
 ) -> Job:
     """
     Create a video slicing job.
-    
+
     DAG structure:
         Source (Lance) -> VideoSlice -> Sink (Lance)
-    
+
     Required config parameters:
         - input: Input Lance table path (required)
         - output: Output Lance table path (required)
-    
+
     Optional config parameters:
         - fps: Frames per second to extract (default: 2.0)
         - source_parallelism: Number of source workers reading Lance (default: 4)
@@ -400,26 +399,26 @@ def create_job(
         - sink_parallelism: Sink workers - int or tuple (min, max) for dynamic scaling (default: auto)
         - ray_address: Ray cluster address (default: "ray://localhost:8265")
         - webui_storage_path: SlateDB root path for WebUI (optional)
-    
+
     Args:
         job_id: Unique job identifier
         config: Job configuration dictionary
-    
+
     Returns:
         Configured Job instance
     """
     logger = logging.getLogger(__name__)
     logger.info("Creating Video Slice job")
-    
+
     # Validate required parameters
     input_path = config.get("input")
     output_path = config.get("output")
-    
+
     if not input_path:
         raise ValueError("'input' parameter is required (Lance table path)")
     if not output_path:
         raise ValueError("'output' parameter is required (output path)")
-    
+
     # Extract optional parameters with defaults
     fps = config.get("fps", 2.0)
     source_parallelism = config.get("source_parallelism", 4)  # Parallel Lance readers
@@ -438,17 +437,19 @@ def create_job(
     # Auto-calculate sink parallelism based on slice parallelism
     if sink_parallelism is None:
         # Use slice max as reference for calculating sink range
-        slice_max = slice_parallelism[1] if isinstance(slice_parallelism, tuple) else slice_parallelism
+        slice_max = (
+            slice_parallelism[1] if isinstance(slice_parallelism, tuple) else slice_parallelism
+        )
         sink_min = max(2, slice_max // 16)
         sink_max = max(4, slice_max // 4)
         sink_parallelism = (sink_min, sink_max)
-    
+
     # Ray init kwargs - use "auto" to connect to existing cluster
     # when running as a Ray job, the cluster is already initialized
     ray_init_kwargs = {
         "address": "auto",
     }
-    
+
     # Create job with configuration
     # Use TANSU queue for distributed execution on Ray cluster
     # Configure aggressive autoscaling for batch processing
@@ -466,10 +467,10 @@ def create_job(
             ),
         ),
     )
-    
+
     # Compute output_partitions for source stage based on slice_parallelism max
     slice_max = slice_parallelism[1] if isinstance(slice_parallelism, tuple) else slice_parallelism
-    
+
     # Stage 1: Source - Read from Lance table
     # Multiple source workers to read Lance fragments in parallel
     source_stage = Stage(
@@ -486,7 +487,7 @@ def create_job(
             "memory": 4 * 1024**3,
         },
     )
-    
+
     # Stage 2: VideoSlice - Extract frames at specified FPS
     # Supports dynamic scaling with tuple (min, max) parallelism
     slice_stage = Stage(
@@ -506,7 +507,7 @@ def create_job(
             "memory": 8 * 1024**3,  # 8GB per worker for video processing
         },
     )
-    
+
     # Stage 3: Sink - Write to Lance table
     # Supports dynamic scaling with tuple (min, max) parallelism
     sink_stage = Stage(
@@ -522,20 +523,20 @@ def create_job(
             "memory": 4 * 1024**3,
         },
     )
-    
+
     # Build DAG: Source -> VideoSlice -> Sink
     job.add_stage(source_stage)
     job.add_stage(slice_stage, upstream_stages=["source"])
     job.add_stage(sink_stage, upstream_stages=["video_slice"])
-    
+
     logger.info(f"Created Video Slice job with {len(job.stages)} stages")
-    
+
     # Format parallelism for logging
     def fmt_parallelism(p):
         if isinstance(p, tuple):
             return f"({p[0]}-{p[1]} dynamic)"
         return str(p)
-    
+
     logger.info(
         f"FPS: {fps}, Source parallelism: {source_parallelism}, "
         f"Slice parallelism: {fmt_parallelism(slice_parallelism)}, "
@@ -543,7 +544,7 @@ def create_job(
     )
     logger.info(f"Input: {input_path}")
     logger.info(f"Output: {output_path}")
-    
+
     return job
 
 
@@ -560,7 +561,7 @@ async def run_video_slice_job(
 ) -> None:
     """
     Convenience function to run a video slicing job.
-    
+
     Args:
         input_path: Input Lance table path
         output_path: Output Lance table path
@@ -570,7 +571,7 @@ async def run_video_slice_job(
         sink_parallelism: Sink workers - int for fixed, tuple (min, max) for dynamic, None = auto
         ray_address: Ray cluster address
         **kwargs: Additional config options (see create_job)
-    
+
     Example:
         >>> import asyncio
         >>> asyncio.run(run_video_slice_job(
@@ -582,7 +583,7 @@ async def run_video_slice_job(
         ... ))
     """
     import uuid
-    
+
     config = {
         "input": input_path,
         "output": output_path,
@@ -594,25 +595,25 @@ async def run_video_slice_job(
         "webui_storage_path": webui_storage_path,
         **kwargs,
     }
-    
+
     job_id = f"video_slice_{uuid.uuid4().hex[:8]}"
     job = create_job(job_id, config)
-    
+
     runner = job.create_ray_runner()
     await runner.run()
 
 
 def parse_parallelism(value: str):
     """Parse parallelism value - can be 'N' for fixed or 'min-max' for dynamic."""
-    if '-' in value:
-        parts = value.split('-')
+    if "-" in value:
+        parts = value.split("-")
         return (int(parts[0]), int(parts[1]))
     return int(value)
 
 
 if __name__ == "__main__":
     import argparse
-    
+
     parser = argparse.ArgumentParser(description="Video Slicing Workflow")
     parser.add_argument("--input", required=False, help="Input Lance table path")
     parser.add_argument("--output", required=False, help="Output Lance table path")
@@ -647,9 +648,9 @@ if __name__ == "__main__":
         default=None,
         help="SlateDB root path for WebUI (e.g. s3://bucket/solstice/)",
     )
-    
+
     args = parser.parse_args()
-    
+
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
     logger.info("AWS_ACCESS_KEY_ID set: %s", bool(os.getenv("AWS_ACCESS_KEY_ID")))
@@ -657,22 +658,18 @@ if __name__ == "__main__":
     if args.webui_storage_path and args.webui_storage_path.startswith("s3://"):
         bucket = args.webui_storage_path[5:].split("/", 1)[0]
         _log_s3_head(bucket)
-    
+
     if args.test_video_path:
         try:
             frames = _extract_frames_with_retry(
                 args.test_video_path, fps=args.fps, jpeg_quality=args.jpeg_quality
             )
-            logger.info(
-                f"Test extracted {len(frames)} frames from {args.test_video_path}"
-            )
+            logger.info(f"Test extracted {len(frames)} frames from {args.test_video_path}")
         except Exception as e:
             if _is_glacier_access_error(e) and args.test_video_path.startswith("s3://"):
                 restored = restore_s3_object(args.test_video_path, days=2)
                 if restored:
-                    logger.warning(
-                        f"Requested Glacier restore (2 days) for {args.test_video_path}"
-                    )
+                    logger.warning(f"Requested Glacier restore (2 days) for {args.test_video_path}")
                 else:
                     logger.warning(
                         f"Glacier restore already in progress or not needed for {args.test_video_path}"

@@ -50,11 +50,23 @@ def create_test_data(path: str) -> int:
     """Create test documents with near-duplicates."""
     documents = [
         # Group 1: Near-duplicates (fox)
-        {"doc_id": "doc_001", "text": "The quick brown fox jumps over the lazy dog. Classic pangram."},
-        {"doc_id": "doc_002", "text": "The quick brown fox jumps over the lazy dog! A classic pangram."},
+        {
+            "doc_id": "doc_001",
+            "text": "The quick brown fox jumps over the lazy dog. Classic pangram.",
+        },
+        {
+            "doc_id": "doc_002",
+            "text": "The quick brown fox jumps over the lazy dog! A classic pangram.",
+        },
         # Group 2: Near-duplicates (ML)
-        {"doc_id": "doc_003", "text": "Machine learning is AI that enables computers to learn from data."},
-        {"doc_id": "doc_004", "text": "Machine learning is AI enabling computers to learn from data."},
+        {
+            "doc_id": "doc_003",
+            "text": "Machine learning is AI that enables computers to learn from data.",
+        },
+        {
+            "doc_id": "doc_004",
+            "text": "Machine learning is AI enabling computers to learn from data.",
+        },
         # Group 3: Unique
         {"doc_id": "doc_005", "text": "Python is a high-level programming language."},
         {"doc_id": "doc_006", "text": "Data engineering builds systems for data at scale."},
@@ -74,7 +86,6 @@ async def run_example():
     logger.info("=" * 60)
 
     from workflows.minhash_dedup import create_job
-    from solstice.operators.connected_components import CCIterateConfig
 
     with tempfile.TemporaryDirectory() as tmpdir:
         input_path = str(Path(tmpdir) / "input.lance")

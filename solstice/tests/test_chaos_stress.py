@@ -343,7 +343,9 @@ class TestLongRunningStability:
                         total_kills += 1
                 except Exception:
                     pass
-                await asyncio.sleep(random.uniform(5.0, 8.0))  # Conservative killing interval for stability
+                await asyncio.sleep(
+                    random.uniform(5.0, 8.0)
+                )  # Conservative killing interval for stability
 
         try:
             await runner.initialize()

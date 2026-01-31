@@ -342,6 +342,21 @@ class StageMaster:
                 elif completed:
                     self._recovery_manager.record_success()
 
+                    # Check if there are pending orphaned partitions that need recovery
+                    # This can happen when workers were cancelled due to resource constraints
+                    if self._recovery_manager.has_pending_orphaned_partitions:
+                        self.logger.info(
+                            f"Attempting to recover {len(self._recovery_manager.pending_orphaned_partitions)} "
+                            f"pending orphaned partitions after worker completion"
+                        )
+                        partition_count = (
+                            await self._partition_manager.get_upstream_partition_count()
+                        )
+                        result = await self._recovery_manager.recover_failed_workers(
+                            failed_worker_ids=[],  # No failed workers, just pending partitions
+                            partition_count=partition_count,
+                        )
+
                 if self._failed:
                     break
 

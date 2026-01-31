@@ -35,7 +35,6 @@ import os
 import pytest
 import ray
 
-from solstice.core.job import Job, JobConfig
 from solstice.core.operator import SemanticGuarantee
 from solstice.runtime.ray_runner import RayJobRunner
 from solstice.testing.fault_injection import (
@@ -44,7 +43,6 @@ from solstice.testing.fault_injection import (
     FAULT_QUEUE_FETCH,
     FAULT_QUEUE_COMMIT,
     FAULT_STATE_STORE_PUT,
-    FAULT_STATE_STORE_GET,
     FAULT_BEFORE_PROCESS,
     FAULT_AFTER_PROCESS,
     FAULT_BEFORE_MARK_PROCESSED,
@@ -55,7 +53,6 @@ from tests.utils import (
     DataValidator,
     ExplodeConfig,
     FilterConfig,
-    FilterExplodeConfig,
     create_collector,
     create_test_pipeline,
     create_multi_stage_pipeline,
@@ -114,7 +111,9 @@ class StabilityTestBase:
         except Exception:
             pass
 
-    def set_fault(self, fault_point: str, after_count: int | None = None, probability: float | None = None) -> None:
+    def set_fault(
+        self, fault_point: str, after_count: int | None = None, probability: float | None = None
+    ) -> None:
         """Set a fault injection via environment variable.
 
         Args:

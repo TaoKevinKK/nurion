@@ -32,7 +32,6 @@ Usage:
 import asyncio
 import logging
 import os
-import tempfile
 import time
 
 import click
@@ -50,23 +49,31 @@ def create_test_lance_table(table_path: str) -> None:
     """Create a local Lance table with public video URLs."""
     # Public videos
     videos = [
-        "-qwTw3PNXDE.mp4", "0wJO0eqVDho.mkv", "1UmhvUR_wtQ.mp4",
-        "2R-gGLtYmdc.mp4", "3EIixA3E-rI.mp4", "3ETxXjGlxRo.mp4",
-        "3WG6fgdFV74.mp4", "3jRDH1hSnpM.mp4", "4GIuKZbwl2w.mp4",
+        "-qwTw3PNXDE.mp4",
+        "0wJO0eqVDho.mkv",
+        "1UmhvUR_wtQ.mp4",
+        "2R-gGLtYmdc.mp4",
+        "3EIixA3E-rI.mp4",
+        "3ETxXjGlxRo.mp4",
+        "3WG6fgdFV74.mp4",
+        "3jRDH1hSnpM.mp4",
+        "4GIuKZbwl2w.mp4",
         "4kzJHyYtNhk.mp4",
     ]
     base_url = "https://pub-8bc1f1d3d1984bdfb056d0bc0bf97c3d.r2.dev/videos/raw"
-    
+
     records = []
     for i, video in enumerate(videos):
-        records.append({
-            "global_index": i,
-            "video_uid": video.rsplit(".", 1)[0],
-            "source_url": f"{base_url}/{video}",
-            "video_path": f"{base_url}/{video}",
-            "subset": "train" if i < 8 else "validation",
-        })
-    
+        records.append(
+            {
+                "global_index": i,
+                "video_uid": video.rsplit(".", 1)[0],
+                "source_url": f"{base_url}/{video}",
+                "video_path": f"{base_url}/{video}",
+                "subset": "train" if i < 8 else "validation",
+            }
+        )
+
     table = pa.Table.from_pylist(records)
     lance.write_dataset(table, table_path, mode="overwrite")
     logger.info(f"Created test table with {len(records)} videos")
@@ -78,27 +85,27 @@ def create_test_lance_table(table_path: str) -> None:
 def main(job_id: str, wait_time: int):
     """Run video slice workflow demo."""
     logging.basicConfig(level=logging.INFO)
-    
+
     # When using ray job submit, Ray is already initialized
     # If not initialized (local testing), initialize with address="auto"
     if not ray.is_initialized():
         ray.init(address="auto", ignore_reinit_error=True)
-    
+
     # Use /tmp directory for data (persists across Ray workers)
     # Job-specific data directory (changes per run)
     job_dir = f"/tmp/solstice_demo_{job_id}_{int(time.time())}"
     os.makedirs(job_dir, exist_ok=True)
-    
+
     input_path = os.path.join(job_dir, "input_videos.lance")
     output_path = os.path.join(job_dir, "output_slices.lance")
-    
+
     # SHARED WebUI storage path (same across all runs to show completed jobs)
     webui_storage = "/tmp/solstice-webui-storage"
     os.makedirs(webui_storage, exist_ok=True)
-    
+
     # Create input data
     create_test_lance_table(input_path)
-    
+
     # Configure job with lower resource requirements
     config = {
         "input": input_path,
@@ -115,10 +122,10 @@ def main(job_id: str, wait_time: int):
         "worker_num_cpus": 0.1,  # Very low CPU
         "worker_memory_mb": 128,
     }
-    
+
     # Create job
     job = create_job(job_id=job_id, config=config)
-    
+
     # Enable WebUI
     job.config.webui = WebUIConfig(
         enabled=True,
@@ -126,38 +133,40 @@ def main(job_id: str, wait_time: int):
         port=5000,
         lineage_sample_rate=1.0,  # Full lineage tracking
     )
-    
+
     logger.info("=" * 80)
     logger.info(f"Starting job {job_id}")
     logger.info(f"Input:  {input_path}")
     logger.info(f"Output: {output_path}")
     logger.info(f"WebUI Storage: {webui_storage} (shared for completed jobs)")
     logger.info("=" * 80)
-    
+
     runner = job.create_ray_runner()
-    
+
     async def run():
         await runner.initialize()
-        
+
         if runner.webui_port:
-            logger.info(f"WebUI available at: http://localhost:{runner.webui_port}{runner.webui_path}")
+            logger.info(
+                f"WebUI available at: http://localhost:{runner.webui_port}{runner.webui_path}"
+            )
             logger.info(f"Portal: http://localhost:{runner.webui_port}/solstice/")
-        
+
         try:
             status = await runner.run(timeout=600)
             logger.info(f"Job finished: {status}")
-            
+
             if wait_time > 0:
                 logger.info(f"Waiting {wait_time}s to keep WebUI active...")
                 await asyncio.sleep(wait_time)
-                
+
         finally:
             # Stop with timeout to avoid hanging
             try:
                 await asyncio.wait_for(runner.stop(), timeout=30)
             except asyncio.TimeoutError:
                 logger.warning("Stop timed out after 30s, forcing exit")
-    
+
     asyncio.run(run())
 
 

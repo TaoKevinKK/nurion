@@ -20,7 +20,3 @@ Uses pyproject.toml for metadata.
 from setuptools import setup
 
 setup()
-
-
-
-

@@ -32,7 +32,13 @@ import ray
 from solstice.core.split_payload_store import RaySplitPayloadStore
 from solstice.core.operator import OperatorRuntime, SemanticGuarantee
 from solstice.core.stage import StageRuntime
-from solstice.queue import QueueType, TansuBrokerManager, TansuQueueClient, MemoryBroker, MemoryClient
+from solstice.queue import (
+    QueueType,
+    TansuBrokerManager,
+    TansuQueueClient,
+    MemoryBroker,
+    MemoryClient,
+)
 from solstice.utils.network import find_free_port
 
 if TYPE_CHECKING:

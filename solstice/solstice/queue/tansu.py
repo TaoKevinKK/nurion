@@ -529,33 +529,30 @@ class TansuQueueClient:
 
         Returns:
             Dict mapping partition id to latest offset.
+            Note: This method returns partition count info, not actual offsets.
+            The offsets are set to 0 as placeholders since we only need
+            the partition count for worker assignment.
+
+        Raises:
+            ValueError: If admin client is not initialized or topic not found.
+            Exception: Any Kafka errors are propagated (fail fast).
         """
-        result: Dict[int, int] = {}
+        if self._admin_client is None:
+            raise ValueError("Admin client is None - cannot query partition offsets")
 
-        try:
-            consumer = self._get_consumer(topic, partition=0)
+        # Get cluster metadata to find partitions
+        metadata = self._admin_client.list_topics(topic, timeout=10.0)
+        if topic not in metadata.topics:
+            raise ValueError(f"Topic {topic} not found in metadata")
 
-            # Get cluster metadata to find partitions
-            metadata = consumer.list_topics(topic, timeout=10.0)
-            if topic not in metadata.topics:
-                return {0: 0}
+        topic_metadata = metadata.topics[topic]
+        partition_ids = list(topic_metadata.partitions.keys())
 
-            topic_metadata = metadata.topics[topic]
-            partition_ids = list(topic_metadata.partitions.keys())
+        self.logger.debug(f"Topic {topic} has {len(partition_ids)} partitions from admin metadata")
 
-            for p in partition_ids:
-                tp = TopicPartition(topic, p)
-                try:
-                    low, high = consumer.get_watermark_offsets(tp, timeout=10.0)
-                    result[p] = high
-                except Exception:
-                    result[p] = 0
-
-        except Exception as e:
-            self.logger.warning(f"Failed to get partition offsets: {e}")
-            return {0: 0}
-
-        return result if result else {0: 0}
+        # Return partition IDs with offset 0 as placeholder
+        # We only need the partition count, not actual offsets
+        return {p: 0 for p in partition_ids}
 
     # -------------------------------------------------------------------------
     # Internal Methods

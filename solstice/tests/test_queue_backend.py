@@ -31,7 +31,7 @@ import asyncio
 import pytest
 import time
 
-from solstice.queue import MemoryBroker, MemoryClient
+from solstice.queue import MemoryBroker
 
 
 # ============================================================================

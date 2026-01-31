@@ -32,6 +32,7 @@
   ],
   "env_vars": {
     "AWS_DEFAULT_REGION": "ap-southeast-2",
-    "AWS_REGION": "ap-southeast-2"
+    "AWS_REGION": "ap-southeast-2",
+    "RAY_DEDUP_LOGS": "0"
   }
 }

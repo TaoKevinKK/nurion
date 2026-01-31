@@ -266,7 +266,7 @@ class TestFaultInjection:
 
     def test_fault_before_mark_processed(self, clean_storage, temp_state_dir):
         """Fault before mark_processed: message is reprocessed on recovery.
-        
+
         Scenario:
         1. Process messages 0-4 successfully
         2. On message 5: process succeeds, fault before mark_processed
@@ -313,6 +313,7 @@ class TestFaultInjection:
                         )
                         # Simulate what StageWorker does
                         from solstice.testing.fault_injection import check_fault
+
                         check_fault(FAULT_BEFORE_MARK_PROCESSED)
                         op1.mark_processed(offset)
                         processed_before_crash += 1

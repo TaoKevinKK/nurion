@@ -467,11 +467,13 @@ class TestCCIterateStateStore:
             num_partitions=num_partitions,
             state_store_path=temp_state_store_path,
         )
-        operator = config.setup(make_operator_runtime(
-            job_id="test_job",
-            stage_id="cc_iterate",
-            worker_id="worker_0",
-        ))
+        operator = config.setup(
+            make_operator_runtime(
+                job_id="test_job",
+                stage_id="cc_iterate",
+                worker_id="worker_0",
+            )
+        )
 
         # Create data that will hash to MULTIPLE partitions
         # Using many docs increases chance of hitting multiple partitions

@@ -132,6 +132,9 @@ class StageWorker:
         self._upstream_finished = False
         self._partition_update_event = asyncio.Event()
 
+        # Counter for output partition distribution
+        self._output_counter = 0
+
         # Buffer for split metrics (batch produce)
         self._pending_split_metrics: List[Any] = []
 
@@ -417,12 +420,11 @@ class StageWorker:
 
         # Produce output if any
         if output_payload:
-            routing_key = partition_id
-            if is_source_message:
-                raw_split_index = message.metadata.get("split_index")
-                if isinstance(raw_split_index, int):
-                    routing_key = raw_split_index
-            output_partition = self._get_output_partition(routing_key)
+            # Use a per-worker counter for even distribution across output partitions
+            # This ensures all output partitions receive data regardless of how
+            # splits are distributed in the source queue
+            output_partition = self._get_output_partition(self._output_counter)
+            self._output_counter += 1
             payload_key = split_id
 
             self.payload_store.store(payload_key, output_payload)

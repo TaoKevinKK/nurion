@@ -30,7 +30,6 @@ from solstice.queue import MemoryBroker, MemoryClient, QueueType
 from solstice.core.stage_master import (
     StageMaster,
     QueueMessage,
-    QueueEndpoint,
 )
 from solstice.core.operator import OperatorConfig, Operator, OperatorRuntime, SemanticGuarantee
 from solstice.core.stage import StageRuntime

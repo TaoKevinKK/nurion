@@ -107,7 +107,7 @@ class TestQueueFaultRecovery:
 
         runner = RayJobRunner(job)
         broker_restarted = False
-        records_before_restart = 0
+        _records_before_restart = 0
 
         try:
             await runner.initialize()
@@ -120,7 +120,7 @@ class TestQueueFaultRecovery:
 
             # Record how many records were processed before restart
             collector = ray.get_actor(self.collector_name)
-            records_before_restart = ray.get(collector.count.remote())
+            _records_before_restart = ray.get(collector.count.remote())
 
             # Restart the broker by creating a new instance
             # Note: We create a new broker instance instead of restarting the same one

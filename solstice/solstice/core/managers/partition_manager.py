@@ -31,6 +31,7 @@ from solstice.utils.logging import create_ray_logger
 
 if TYPE_CHECKING:
     from solstice.core.stage import Stage, StageRuntime
+    from solstice.queue import QueueEndpoint
 
 
 class PartitionManager:
@@ -61,6 +62,10 @@ class PartitionManager:
 
         # Cached upstream queue client for partition queries
         self._upstream_queue: Optional[TansuQueueClient] = None
+
+        # Override upstream config (set by SourceMaster for source queue)
+        self._upstream_endpoint: Optional["QueueEndpoint"] = None
+        self._upstream_topic: Optional[str] = None
 
     @property
     def partition_count(self) -> int:
@@ -101,8 +106,13 @@ class PartitionManager:
         if self._upstream_partition_count is not None:
             return self._upstream_partition_count
 
+        # Check for upstream (use instance vars first, fall back to runtime)
+        # SourceMaster sets _upstream_endpoint/_upstream_topic directly
+        upstream_endpoint = self._upstream_endpoint or self._runtime.upstream_endpoint
+        upstream_topic = self._upstream_topic or self._runtime.upstream_topic
+
         # Source stages have no upstream
-        if not self._runtime.upstream_endpoint or not self._runtime.upstream_topic:
+        if not upstream_endpoint or not upstream_topic:
             self._upstream_partition_count = 1
             return 1
 
@@ -113,11 +123,10 @@ class PartitionManager:
             return 1
 
         try:
-            offsets = queue.get_all_partition_offsets(self._runtime.upstream_topic)
+            offsets = queue.get_all_partition_offsets(upstream_topic)
             self._upstream_partition_count = max(1, len(offsets))
             self._logger.debug(
-                f"Upstream topic {self._runtime.upstream_topic} has "
-                f"{self._upstream_partition_count} partition(s)"
+                f"Upstream topic {upstream_topic} has {self._upstream_partition_count} partition(s)"
             )
         except Exception as e:
             self._logger.warning(f"Failed to get upstream partition count: {e}")
@@ -127,7 +136,8 @@ class PartitionManager:
 
     async def _get_upstream_queue(self) -> Optional[TansuQueueClient]:
         """Get or create a client-only queue for upstream partition queries."""
-        endpoint = self._runtime.upstream_endpoint
+        # Use instance vars first, fall back to runtime
+        endpoint = self._upstream_endpoint or self._runtime.upstream_endpoint
         if not endpoint:
             return None
         if endpoint.queue_type != QueueType.TANSU:
