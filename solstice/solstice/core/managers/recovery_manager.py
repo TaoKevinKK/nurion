@@ -18,7 +18,12 @@ Responsibilities:
 - Track worker failures with sliding window
 - Calculate failure rates and determine recovery strategy
 - Exponential backoff for recovery attempts
-- Orchestrate worker recovery (spawn + partition assignment)
+- Orchestrate worker recovery (spawn replacement workers)
+
+WorkQueue Model:
+- No partition assignment needed
+- Workers compete for messages via claim()
+- Simpler recovery: just respawn workers
 """
 
 from __future__ import annotations
@@ -28,7 +33,6 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from solstice.core.models import FailurePolicy, FailureTracker
-from solstice.core.managers.partition_manager import PartitionManager
 from solstice.core.managers.worker_manager import WorkerManager
 from solstice.utils.logging import create_ray_logger
 
@@ -39,7 +43,6 @@ class RecoveryResult:
 
     spawned_count: int
     failed_to_spawn: int
-    orphaned_partitions_remaining: List[int]
     should_give_up: bool
     give_up_reason: Optional[str] = None
 
@@ -53,24 +56,25 @@ class RecoveryManager:
     - Applies exponential backoff for recovery attempts
     - Decides when to give up based on failure rate threshold
 
+    WorkQueue Model:
+    - No partition tracking needed
+    - Workers compete for messages via claim()
+    - Recovery just spawns replacement workers
+
     Thread-safe: all state modifications happen in the main asyncio loop.
     """
 
     def __init__(
         self,
         stage_id: str,
-        partition_manager: PartitionManager,
         worker_manager: WorkerManager,
         policy: Optional[FailurePolicy] = None,
     ):
         self._stage_id = stage_id
-        self._partition_manager = partition_manager
         self._worker_manager = worker_manager
         self._policy = policy or FailurePolicy()
         self._logger = create_ray_logger(f"RecoveryMgr-{stage_id}")
         self._tracker = FailureTracker(self._policy, self._logger)
-        # Track orphaned partitions that couldn't be recovered due to resource constraints
-        self._pending_orphaned_partitions: List[int] = []
 
     @property
     def failure_count(self) -> int:
@@ -81,16 +85,6 @@ class RecoveryManager:
     def is_in_recovery(self) -> bool:
         """Check if currently in recovery mode (backoff active)."""
         return self._tracker._recovery_attempt > 0
-
-    @property
-    def has_pending_orphaned_partitions(self) -> bool:
-        """Check if there are pending orphaned partitions waiting for recovery."""
-        return len(self._pending_orphaned_partitions) > 0
-
-    @property
-    def pending_orphaned_partitions(self) -> List[int]:
-        """Get list of pending orphaned partitions."""
-        return list(self._pending_orphaned_partitions)
 
     def record_failures(self, count: int, current_worker_count: int) -> None:
         """Record worker failures.
@@ -123,109 +117,53 @@ class RecoveryManager:
     async def recover_failed_workers(
         self,
         failed_worker_ids: List[str],
-        partition_count: int,
     ) -> RecoveryResult:
         """Attempt to recover failed workers.
 
-        This method:
-        1. Collects orphaned partitions from failed workers
-        2. Spawns replacement workers
-        3. Assigns orphaned partitions to new workers
-        4. Notifies new workers of upstream completion if applicable
+        With WorkQueue model, recovery is simpler:
+        1. Remove failed workers from tracking
+        2. Spawn replacement workers
+        3. Notify new workers of upstream completion if applicable
+
+        No partition assignment needed - workers compete for messages.
 
         Args:
             failed_worker_ids: IDs of workers that failed
-            partition_count: Total partition count for assignment
 
         Returns:
-            RecoveryResult with spawn stats and remaining orphaned partitions
+            RecoveryResult with spawn stats
         """
         delay = self.get_recovery_delay()
         failure_count = len(failed_worker_ids)
 
-        # Collect orphaned partitions from failed workers
-        orphaned_partitions = self._partition_manager.collect_orphaned_partitions(failed_worker_ids)
+        self._logger.info(f"Recovering {failure_count} failed workers (backoff: {delay:.1f}s)")
 
-        # Include any pending orphaned partitions from previous recovery attempts
-        # that couldn't be recovered due to resource constraints
-        if self._pending_orphaned_partitions:
-            self._logger.info(
-                f"Including {len(self._pending_orphaned_partitions)} pending orphaned partitions "
-                f"from previous recovery: {self._pending_orphaned_partitions}"
-            )
-            orphaned_partitions.extend(self._pending_orphaned_partitions)
-            self._pending_orphaned_partitions.clear()
-
-        self._logger.info(
-            f"Recovering {failure_count} failed workers (backoff: {delay:.1f}s), "
-            f"orphaned partitions: {orphaned_partitions}"
-        )
-
-        # Also remove from worker manager tracking
+        # Remove from worker manager tracking
         self._worker_manager.cleanup_workers(failed_worker_ids)
 
         # Spawn replacement workers
         spawned = 0
         failed_to_spawn = 0
 
-        # Pre-distribute orphaned partitions evenly across replacement workers
-        # Example: 6 partitions [0,1,2,3,4,5] with 3 workers -> [[0,3], [1,4], [2,5]]
-        # If no failed workers but we have pending partitions, spawn workers for them
-        workers_to_spawn = max(failure_count, len(orphaned_partitions))
-        partition_assignments: List[List[int]] = [[] for _ in range(workers_to_spawn)]
-        for i, partition in enumerate(orphaned_partitions):
-            partition_assignments[i % workers_to_spawn].append(partition)
-        orphaned_partitions.clear()
-
-        for worker_idx in range(workers_to_spawn):
+        for _ in range(failure_count):
             try:
-                # Assign pre-distributed partitions to this replacement worker
-                # Note: Use the list as-is, even if empty. Don't convert [] to None,
-                # as None would trigger assign_worker() which computes conflicting partitions.
-                partitions_for_worker = partition_assignments[worker_idx]
-
-                # Skip if no partitions to assign
-                if not partitions_for_worker:
-                    continue
-
-                worker_id = await self._worker_manager.spawn_worker(
-                    partition_count=partition_count,
-                    is_min_worker=False,
-                    assigned_partitions=partitions_for_worker,
-                )
+                worker_id = await self._worker_manager.spawn_worker(is_min_worker=False)
                 if worker_id is None:
-                    # Restore this worker's partitions to orphaned list if spawn failed
-                    orphaned_partitions.extend(partitions_for_worker)
                     failed_to_spawn += 1
                     continue
 
                 spawned += 1
-
-                self._logger.info(
-                    f"Assigned orphaned partitions {partitions_for_worker} to {worker_id}"
-                )
 
                 # Notify of upstream completion if applicable
                 await self._worker_manager.notify_worker_upstream_finished(worker_id)
 
             except Exception as e:
                 self._logger.warning(f"Failed to spawn replacement worker: {e}")
-                # Restore this worker's partitions to orphaned list
-                if partitions_for_worker:
-                    orphaned_partitions.extend(partitions_for_worker)
                 failed_to_spawn += 1
 
         if spawned > 0:
-            self._logger.info(f"Spawned {spawned}/{workers_to_spawn} replacement workers")
+            self._logger.info(f"Spawned {spawned}/{failure_count} replacement workers")
             await asyncio.sleep(delay)
-
-        # Save any remaining orphaned partitions for next recovery attempt
-        if orphaned_partitions:
-            self._pending_orphaned_partitions.extend(orphaned_partitions)
-            self._logger.warning(
-                f"Could not recover {len(orphaned_partitions)} partitions due to resource constraints, "
-                f"will retry on next failure: {orphaned_partitions}"
-            )
 
         # Check if we should give up
         should_give_up, reason = self.should_give_up(self._worker_manager.worker_count)
@@ -233,7 +171,6 @@ class RecoveryManager:
         return RecoveryResult(
             spawned_count=spawned,
             failed_to_spawn=failed_to_spawn,
-            orphaned_partitions_remaining=list(self._pending_orphaned_partitions),
             should_give_up=should_give_up,
             give_up_reason=reason,
         )

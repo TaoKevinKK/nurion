@@ -1,5 +1,5 @@
 # Solstice Base Runtime Image
-# Includes: Python 3.12, JVM 17, FFmpeg, Ray, tansu-py
+# Includes: Python 3.12, JVM 17, FFmpeg, Ray, workqueue-py
 # Based on Ubuntu 24.04
 # 
 # This is a base image - solstice code is NOT included.
@@ -40,21 +40,23 @@ ENV PATH="/root/.local/bin:${JAVA_HOME}/bin:${PATH}"
 
 WORKDIR /app
 
-# Copy only what's needed for building (tansu-py and java from lib/)
-COPY lib/tansu-py /app/build/tansu-py
+# Copy only what's needed for building (workqueue-rs and java from lib/)
+COPY lib/workqueue-rs /app/build/workqueue-rs
 COPY lib/raydp/java /app/build/java
 
-# Install Rust, build tansu-py, then cleanup Rust completely (all in one layer)
+# Install Rust and protoc, build workqueue-rs, then cleanup completely (all in one layer)
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
     export PATH="/root/.cargo/bin:$PATH" && \
     cargo install maturin && \
-    cd /app/build/tansu-py && \
+    apt-get update && apt-get install -y protobuf-compiler && \
+    cd /app/build/workqueue-rs && \
     maturin build --release && \
     uv pip install --system --no-cache target/wheels/*.whl && \
-    # Cleanup Rust and source completely
-    rm -rf /app/build/tansu-py && \
+    # Cleanup Rust, protoc and source completely
+    rm -rf /app/build/workqueue-rs && \
     rm -rf /root/.cargo && \
-    rm -rf /root/.rustup
+    rm -rf /root/.rustup && \
+    apt-get remove -y protobuf-compiler && apt-get autoremove -y
 
 # Build RayDP JARs, then cleanup Maven artifacts (all in one layer)
 RUN cd /app/build/java && \
@@ -90,14 +92,14 @@ RUN uv pip install --system --no-cache \
     "fsspec[s3]>=2024.6.0" \
     pylance>=0.38.0 \
     s3fs>=2024.6.0 \
-    confluent-kafka>=2.3.0
+    grpcio>=1.68.0
 
 # Verify installations and remove build dependencies
 RUN python -c "import ray; print(f'Ray: {ray.__version__}')" && \
-    python -c "import tansu_py; print('tansu_py: OK')" && \
+    python -c "import workqueue_py; print('workqueue_py: OK')" && \
     python -c "import pyarrow; print(f'PyArrow: {pyarrow.__version__}')" && \
     ffmpeg -version | head -1 && \
-    java -version 2>&1 | head -1 
+    java -version 2>&1 | head -1
 
 # Default working directory
 WORKDIR /app

@@ -26,12 +26,11 @@ from dataclasses import dataclass
 from typing import List
 from unittest.mock import MagicMock
 
-from solstice.queue import MemoryBroker, MemoryClient, QueueType
 from solstice.core.stage_master import (
     StageMaster,
     QueueMessage,
 )
-from solstice.core.operator import OperatorConfig, Operator, OperatorRuntime, SemanticGuarantee
+from solstice.core.operator import OperatorConfig, Operator, OperatorRuntime
 from solstice.core.stage import StageRuntime
 
 # Note: Only async test classes/functions should use @pytest.mark.asyncio decorator
@@ -109,18 +108,6 @@ class MockStage:
             self.upstream_stages = []
 
 
-@pytest_asyncio.fixture
-async def memory_client():
-    """Provide a fresh memory broker and client."""
-    broker = MemoryBroker()
-    broker.start()
-    client = MemoryClient(broker)
-    client.start()
-    yield client
-    client.stop()
-    broker.stop()
-
-
 @pytest.fixture
 def mock_stage():
     """Provide a mock stage."""
@@ -129,15 +116,11 @@ def mock_stage():
 
 @pytest.fixture
 def stage_runtime():
-    """Provide default stage runtime using MEMORY backend for unit tests."""
+    """Provide default stage runtime for unit tests."""
     return StageRuntime(
-        queue_type=QueueType.MEMORY,
-        shared_broker_endpoint=None,
-        upstream_endpoint=None,
-        upstream_topic=None,
-        state_endpoint=None,
-        state_topic=None,
-        semantic_guarantee=SemanticGuarantee.AT_LEAST_ONCE,
+        broker_endpoint=None,
+        upstream_queue_name=None,
+        state_queue_name=None,
     )
 
 
@@ -213,7 +196,7 @@ class TestStageMaster:
         await master.start()
 
         assert master._output_queue is not None
-        assert master._output_topic == "test_job_test_stage_output"
+        assert master._output_queue_name == "test_job_test_stage_output"
 
         await master.stop()
 
@@ -258,7 +241,7 @@ class TestStageMaster:
     @pytest.mark.asyncio
     async def test_get_output_queue(self, mock_stage, stage_runtime, payload_store, ray_cluster):
         """Test getting output queue for downstream."""
-        from solstice.queue import QueueClient
+        from solstice.queue import WorkQueueQueueClient
 
         master = StageMaster(
             job_id="test_job",
@@ -273,91 +256,8 @@ class TestStageMaster:
 
         queue = master.get_output_queue()
         assert queue is not None
-        assert isinstance(queue, QueueClient)
+        assert isinstance(queue, WorkQueueQueueClient)
 
         await master.stop()
 
 
-# ============================================================================
-# Exactly-Once Semantics Tests
-# ============================================================================
-
-
-class TestExactlyOnce:
-    """Tests for exactly-once processing semantics."""
-
-    @pytest.mark.asyncio
-    async def test_offset_tracking(self, memory_client):
-        """Test that offsets are tracked correctly."""
-        topic = "test_topic"
-        group = "test_group"
-
-        memory_client.create_topic(topic)
-
-        # Produce messages
-        for i in range(10):
-            msg = QueueMessage(
-                message_id=f"msg_{i}",
-                split_id=f"split_{i}",
-                payload_key=f"ref_{i}",
-            )
-            memory_client.produce(topic, msg.to_bytes())
-
-        # Simulate processing and committing
-        offset = memory_client.get_committed_offset(group, topic)
-        assert offset is None
-
-        records = memory_client.fetch(topic, offset=0, max_records=5)
-        assert len(records) == 5
-
-        # Commit after processing
-        new_offset = records[-1].offset + 1
-        memory_client.commit_offset(group, topic, new_offset)
-
-        # Verify committed offset
-        committed = memory_client.get_committed_offset(group, topic)
-        assert committed == new_offset
-
-        # Resume from committed offset
-        remaining = memory_client.fetch(topic, offset=committed)
-        assert len(remaining) == 5
-        assert remaining[0].offset == new_offset
-
-    @pytest.mark.asyncio
-    async def test_crash_recovery_simulation(self, memory_client):
-        """Simulate crash recovery with offset tracking."""
-        topic = "test_topic"
-        group = "test_group"
-
-        memory_client.create_topic(topic)
-
-        # Produce messages
-        for i in range(10):
-            msg = QueueMessage(
-                message_id=f"msg_{i}",
-                split_id=f"split_{i}",
-                payload_key=f"ref_{i}",
-            )
-            memory_client.produce(topic, msg.to_bytes())
-
-        # First "worker" processes some messages
-        offset = 0
-        records = memory_client.fetch(topic, offset=offset, max_records=3)
-        processed_ids = [QueueMessage.from_bytes(r.value).message_id for r in records]
-
-        # Commit offset
-        memory_client.commit_offset(group, topic, records[-1].offset + 1)
-
-        # "Crash" - lose in-memory state
-        del records, processed_ids
-
-        # "Restart" - resume from committed offset
-        committed = memory_client.get_committed_offset(group, topic)
-        remaining = memory_client.fetch(topic, offset=committed)
-
-        # Should get remaining 7 messages
-        assert len(remaining) == 7
-
-        # First remaining message should be msg_3
-        first_msg = QueueMessage.from_bytes(remaining[0].value)
-        assert first_msg.message_id == "msg_3"

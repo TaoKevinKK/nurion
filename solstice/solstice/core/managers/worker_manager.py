@@ -20,6 +20,11 @@ Responsibilities:
 - Stop/cancel workers
 - Wait for worker completion (event-driven)
 - Track worker tasks and handles
+
+WorkQueue Model:
+- No partition assignment needed
+- Workers compete for messages via claim()
+- Simpler worker management
 """
 
 from __future__ import annotations
@@ -33,7 +38,6 @@ import ray
 
 from solstice.core.models import QueueEndpoint
 from solstice.core.stage_worker import StageWorker, WorkerRuntime
-from solstice.core.managers.partition_manager import PartitionManager
 from solstice.utils.logging import create_ray_logger
 
 if TYPE_CHECKING:
@@ -55,37 +59,27 @@ class WorkerManager:
         job_id: str,
         stage: "Stage",
         runtime: "StageRuntime",
-        partition_manager: PartitionManager,
         payload_store: "SplitPayloadStore",
-        output_endpoint: Optional[QueueEndpoint],
-        output_topic: str,
-        consumer_group: str,
-        state_endpoint: Optional[QueueEndpoint] = None,
-        state_topic: Optional[str] = None,
+        broker_endpoint: Optional[QueueEndpoint],
+        output_queue_name: str,
+        state_queue_name: Optional[str] = None,
     ):
         self._job_id = job_id
         self._stage = stage
         self._stage_id = stage.stage_id
         self._runtime = runtime
-        self._partition_manager = partition_manager
         self._payload_store = payload_store
-        self._output_endpoint = output_endpoint
-        self._output_topic = output_topic
-        self._consumer_group = consumer_group
+        self._broker_endpoint = broker_endpoint
+        self._output_queue_name = output_queue_name
+        self._state_queue_name = state_queue_name
         self._logger = create_ray_logger(f"WorkerMgr-{stage.stage_id}")
-        self._state_endpoint = state_endpoint
-        self._state_topic = state_topic
 
         # Worker state
         self._workers: Dict[str, ray.actor.ActorHandle] = {}
         self._worker_tasks: Dict[str, ray.ObjectRef] = {}
 
-        # Target worker count (used during startup for correct partition assignment)
-        self._target_worker_count: int = stage.min_parallelism
-
-        # Upstream config (from runtime)
-        self._upstream_endpoint = runtime.upstream_endpoint
-        self._upstream_topic = runtime.upstream_topic
+        # Upstream queue name (from runtime)
+        self._upstream_queue_name = runtime.upstream_queue_name
 
         # Upstream tracking
         self._upstream_finished = False
@@ -105,34 +99,22 @@ class WorkerManager:
         """Get list of current worker IDs."""
         return list(self._workers.keys())
 
-    def set_target_worker_count(self, count: int) -> None:
-        """Set target worker count for partition assignment during startup."""
-        self._target_worker_count = count
+    def set_broker_endpoint(self, endpoint: QueueEndpoint) -> None:
+        """Set broker endpoint (called after queue creation)."""
+        self._broker_endpoint = endpoint
 
-    def set_output_endpoint(self, endpoint: QueueEndpoint) -> None:
-        """Set output endpoint (called after queue creation)."""
-        self._output_endpoint = endpoint
-
-    def set_upstream_config(self, endpoint: Optional[QueueEndpoint], topic: Optional[str]) -> None:
-        """Set upstream queue configuration.
+    def set_upstream_queue_name(self, queue_name: Optional[str]) -> None:
+        """Set upstream queue name.
 
         Used by SourceMaster to point workers at the source queue.
         """
-        self._upstream_endpoint = endpoint
-        self._upstream_topic = topic
+        self._upstream_queue_name = queue_name
 
-    async def spawn_worker(
-        self,
-        partition_count: int,
-        is_min_worker: bool = False,
-        assigned_partitions: Optional[List[int]] = None,
-    ) -> Optional[str]:
-        """Spawn a new worker with optional resource checking.
+    async def spawn_worker(self, is_min_worker: bool = False) -> Optional[str]:
+        """Spawn a new worker.
 
         Args:
-            partition_count: Number of partitions for assignment
             is_min_worker: If True, worker is required (raises on failure)
-            assigned_partitions: Optional explicit partition assignment (for recovery)
 
         Returns:
             worker_id if successful, None if cancelled due to resources
@@ -140,7 +122,7 @@ class WorkerManager:
         Raises:
             RuntimeError: If is_min_worker=True and worker cannot start
         """
-        worker_id = await self._create_worker(partition_count, assigned_partitions)
+        worker_id = await self._create_worker()
 
         if not is_min_worker:
             # Optional worker - check if it started successfully
@@ -157,36 +139,14 @@ class WorkerManager:
 
         return worker_id
 
-    async def _create_worker(
-        self,
-        partition_count: int,
-        explicit_partitions: Optional[List[int]] = None,
-    ) -> str:
+    async def _create_worker(self) -> str:
         """Create a new worker actor and start its run loop.
-
-        Args:
-            partition_count: Number of partitions for assignment
-            explicit_partitions: Optional explicit partition assignment (for recovery)
 
         Returns:
             The worker_id of the spawned worker
         """
         worker_index = len(self._workers)
         worker_id = f"{self._stage_id}_w{worker_index}_{uuid.uuid4().hex[:6]}"
-
-        # Use explicit partitions if provided (recovery), otherwise compute
-        if explicit_partitions is not None:
-            assigned_partitions = explicit_partitions
-            # Register in partition manager
-            for p in explicit_partitions:
-                self._partition_manager.assign_orphaned_partition(worker_id, p)
-        else:
-            assigned_partitions = self._partition_manager.assign_worker(
-                worker_id=worker_id,
-                worker_index=worker_index,
-                target_worker_count=self._target_worker_count,
-                partition_count=partition_count,
-            )
 
         # Build resource requirements
         resources = {}
@@ -202,17 +162,11 @@ class WorkerManager:
             worker_id=worker_id,
             job_id=self._job_id,
             stage_id=self._stage_id,
-            assigned_partitions=tuple(assigned_partitions),
-            consumer_group=self._consumer_group,
-            semantic_guarantee=self._runtime.semantic_guarantee,
-            upstream_endpoint=self._upstream_endpoint,
-            upstream_topic=self._upstream_topic,
-            output_endpoint=self._output_endpoint,
-            output_topic=self._output_topic,
-            state_endpoint=self._state_endpoint,
-            state_topic=self._state_topic,
+            broker_endpoint=self._broker_endpoint,
+            upstream_queue_name=self._upstream_queue_name,
+            output_queue_name=self._output_queue_name,
+            state_queue_name=self._state_queue_name,
             batch_size=self._stage.batch_size,
-            commit_batch_size=self._stage.commit_batch_size,
         )
 
         # Create worker actor
@@ -231,7 +185,7 @@ class WorkerManager:
         task = worker.run.remote()
         self._worker_tasks[worker_id] = task
 
-        self._logger.info(f"Spawned worker {worker_id} with partitions {assigned_partitions}")
+        self._logger.info(f"Spawned worker {worker_id}")
         return worker_id
 
     async def _check_worker_ready(self, worker_id: str, timeout: float) -> bool:
@@ -266,23 +220,15 @@ class WorkerManager:
 
         return False
 
-    async def cancel_worker(self, worker_id: str) -> List[int]:
-        """Cancel a pending worker that couldn't start due to resource constraints.
-
-        Returns:
-            List of orphaned partitions that need to be recovered
-        """
+    async def cancel_worker(self, worker_id: str) -> None:
+        """Cancel a pending worker that couldn't start due to resource constraints."""
         worker = self._workers.pop(worker_id, None)
         task = self._worker_tasks.pop(worker_id, None)
-        orphaned_partitions = self._partition_manager.remove_worker(worker_id)
 
         if worker is not None:
             try:
                 ray.kill(worker)
-                self._logger.info(
-                    f"Cancelled worker {worker_id} due to resource constraints, "
-                    f"orphaned partitions: {orphaned_partitions}"
-                )
+                self._logger.info(f"Cancelled worker {worker_id} due to resource constraints")
             except Exception as e:
                 self._logger.debug(f"Error killing worker {worker_id}: {e}")
 
@@ -291,8 +237,6 @@ class WorkerManager:
                 ray.cancel(task, force=True)
             except Exception:
                 pass
-
-        return orphaned_partitions
 
     async def stop_worker(self, worker_id: str, timeout: float = 10.0) -> bool:
         """Gracefully stop a worker.
@@ -312,7 +256,6 @@ class WorkerManager:
             ray.get(worker.stop.remote(), timeout=timeout)
             self._workers.pop(worker_id, None)
             self._worker_tasks.pop(worker_id, None)
-            self._partition_manager.remove_worker(worker_id)
             self._logger.debug(f"Stopped worker {worker_id}")
             return True
         except Exception as e:
@@ -408,46 +351,6 @@ class WorkerManager:
                 )
             except Exception as e:
                 self._logger.warning(f"Failed to notify {worker_id} of upstream completion: {e}")
-
-    async def update_worker_partitions(self, worker_id: str, partitions: List[int]) -> bool:
-        """Update a worker's partition assignment.
-
-        Args:
-            worker_id: ID of worker to update
-            partitions: New partition assignment
-
-        Returns:
-            True if update successful
-        """
-        worker = self._workers.get(worker_id)
-        if worker is None:
-            return False
-
-        try:
-            await asyncio.to_thread(
-                ray.get,
-                worker.update_partitions.remote(partitions),
-                timeout=5.0,
-            )
-            return True
-        except Exception as e:
-            self._logger.warning(f"Failed to update partitions for {worker_id}: {e}")
-            return False
-
-    async def notify_all_partition_update(self) -> None:
-        """Notify all workers of their updated partition assignments."""
-        for worker_id, worker in self._workers.items():
-            partitions = self._partition_manager.get_assignment(worker_id)
-            try:
-                obj_ref = worker.update_partitions.remote(partitions)
-                await asyncio.wait_for(
-                    asyncio.to_thread(ray.get, obj_ref),
-                    timeout=5.0,
-                )
-            except Exception as e:
-                self._logger.warning(
-                    f"Failed to notify worker {worker_id} of partition update: {e}"
-                )
 
     def get_worker(self, worker_id: str) -> Optional[ray.actor.ActorHandle]:
         """Get a worker actor handle by ID."""

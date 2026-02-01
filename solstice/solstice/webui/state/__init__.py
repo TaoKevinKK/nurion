@@ -14,12 +14,12 @@
 
 """Push-based state management for WebUI.
 
-This module provides event-driven state management using Tansu message queue,
+This module provides event-driven state management using WorkQueue,
 replacing the pull-based ray.get() polling approach.
 
 Key components:
 - StateMessage: Unified message format for all state updates
-- JobStateManager: Consumes and aggregates state from Tansu topic
+- JobStateManager: Consumes and aggregates state from WorkQueue
 - StateProducer: Helper for producing state messages (used by workers)
 
 Benefits over pull-based approach:

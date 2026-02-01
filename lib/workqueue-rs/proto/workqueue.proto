@@ -1,0 +1,249 @@
+syntax = "proto3";
+
+package workqueue;
+
+// ============================================================================
+// WorkQueue Service Definition
+// ============================================================================
+
+service WorkQueue {
+  // === Consumer API ===
+
+  // Claim messages from a queue
+  rpc Claim(ClaimRequest) returns (ClaimResponse);
+
+  // Acknowledge messages as processed (delete them)
+  rpc Ack(AckRequest) returns (AckResponse);
+
+  // Negative acknowledge - return messages to queue for retry
+  rpc Nack(NackRequest) returns (NackResponse);
+
+  // Atomic operation: Ack upstream + Push downstream
+  rpc AckAndForward(AckAndForwardRequest) returns (AckAndForwardResponse);
+
+  // === Producer API ===
+
+  // Push a single message to queue
+  rpc Push(PushRequest) returns (PushResponse);
+
+  // Push multiple messages to queue
+  rpc PushBatch(PushBatchRequest) returns (PushBatchResponse);
+
+  // === State API (integrated operator state) ===
+
+  // Get state values by keys
+  rpc StateGet(StateGetRequest) returns (StateGetResponse);
+
+  // Put/delete state values
+  rpc StatePut(StatePutRequest) returns (StatePutResponse);
+
+  // === Heartbeat (bidirectional streaming) ===
+
+  // Worker heartbeat to maintain lease
+  rpc HeartbeatStream(stream HeartbeatPing) returns (stream HeartbeatPong);
+
+  // === Admin API ===
+
+  // Create a queue
+  rpc CreateQueue(CreateQueueRequest) returns (CreateQueueResponse);
+
+  // Delete a queue
+  rpc DeleteQueue(DeleteQueueRequest) returns (DeleteQueueResponse);
+
+  // Get queue statistics
+  rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
+}
+
+// ============================================================================
+// Message Structures
+// ============================================================================
+
+message Message {
+  string msg_id = 1;           // Unique message ID (UUID v7)
+  string queue = 2;            // Queue name
+  bytes payload = 3;           // Message payload
+  double created_at = 4;       // Creation time (Unix timestamp)
+  map<string, string> metadata = 5; // Optional metadata
+}
+
+// ============================================================================
+// Consumer API Messages
+// ============================================================================
+
+message ClaimRequest {
+  string queue = 1;            // Queue name
+  string worker_id = 2;        // Worker identifier
+  string lease_id = 3;         // Lease ID (from HeartbeatStream)
+  int32 batch_size = 4;        // Number of messages to claim (default 1)
+  int32 timeout_ms = 5;        // Wait timeout in milliseconds (0 = no wait)
+}
+
+message ClaimResponse {
+  repeated Message messages = 1;    // Claimed messages
+  bool has_more = 2;                // Whether queue has more messages
+}
+
+message AckRequest {
+  string queue = 1;
+  repeated string msg_ids = 2;      // Message IDs to acknowledge
+  string worker_id = 3;
+  string lease_id = 4;
+
+  // Optional: atomic state updates with ack
+  string state_namespace = 5;       // e.g., "{job_id}/{stage_id}"
+  map<string, bytes> state_puts = 6;    // State keys to set
+  repeated string state_deletes = 7;     // State keys to delete
+}
+
+message AckResponse {
+  int32 acked_count = 1;            // Number of messages acknowledged
+  repeated string failed_ids = 2;    // Message IDs that failed to ack
+}
+
+message NackRequest {
+  string queue = 1;
+  repeated string msg_ids = 2;
+  string worker_id = 3;
+  string lease_id = 4;
+  NackReason reason = 5;
+  int32 delay_ms = 6;               // Delay before message can be reclaimed
+}
+
+enum NackReason {
+  NACK_REASON_UNSPECIFIED = 0;
+  NACK_REASON_PROCESSING_FAILED = 1;  // Processing failed, needs retry
+  NACK_REASON_PAYLOAD_MISSING = 2;    // Payload lost, needs rebuild (P2)
+  NACK_REASON_SKIP = 3;               // Skip this message (move to DLQ)
+}
+
+message NackResponse {
+  int32 nacked_count = 1;
+}
+
+message AckAndForwardRequest {
+  // Upstream acknowledgment
+  string upstream_queue = 1;
+  repeated string upstream_msg_ids = 2;
+
+  // Downstream push
+  string downstream_queue = 3;
+  repeated bytes downstream_payloads = 4;
+
+  string worker_id = 5;
+  string lease_id = 6;
+
+  // Optional: atomic state updates with ack+forward
+  string state_namespace = 7;
+  map<string, bytes> state_puts = 8;
+  repeated string state_deletes = 9;
+}
+
+message AckAndForwardResponse {
+  repeated string new_msg_ids = 1;    // Downstream message IDs
+  bool success = 2;
+}
+
+// ============================================================================
+// Producer API Messages
+// ============================================================================
+
+message PushRequest {
+  string queue = 1;
+  bytes payload = 2;
+  map<string, string> metadata = 3;
+}
+
+message PushResponse {
+  string msg_id = 1;
+}
+
+message PushBatchRequest {
+  string queue = 1;
+  repeated bytes payloads = 2;
+}
+
+message PushBatchResponse {
+  repeated string msg_ids = 1;
+}
+
+// ============================================================================
+// Heartbeat Messages
+// ============================================================================
+
+message HeartbeatPing {
+  string worker_id = 1;
+  string lease_id = 2;         // Empty on first ping, server assigns
+  int64 timestamp = 3;         // Client timestamp
+}
+
+message HeartbeatPong {
+  string lease_id = 1;         // Assigned or confirmed lease ID
+  bool ok = 2;                 // Whether lease is valid
+  int32 next_ping_ms = 3;      // Suggested next ping interval
+}
+
+// ============================================================================
+// Admin API Messages
+// ============================================================================
+
+message CreateQueueRequest {
+  string queue = 1;
+  int32 max_depth = 2;         // Max queue depth (0 = unlimited)
+  int32 message_ttl_secs = 3;  // Message TTL (0 = never expire)
+}
+
+message CreateQueueResponse {
+  bool created = 1;            // true = newly created, false = already exists
+}
+
+message DeleteQueueRequest {
+  string queue = 1;
+  bool force = 2;              // Force delete non-empty queue
+}
+
+message DeleteQueueResponse {
+  bool deleted = 1;
+  int32 messages_deleted = 2;
+}
+
+message GetStatsRequest {
+  string queue = 1;            // Empty = return all queues
+}
+
+message GetStatsResponse {
+  map<string, QueueStats> queues = 1;
+  int32 total_workers = 2;
+  int64 uptime_secs = 3;
+}
+
+message QueueStats {
+  string queue = 1;
+  int64 pending_count = 2;     // Messages waiting to be claimed
+  int64 claimed_count = 3;     // Messages currently claimed
+  int64 total_pushed = 4;      // Total messages pushed
+  int64 total_acked = 5;       // Total messages acknowledged
+}
+
+// ============================================================================
+// State API Messages (Integrated Operator State)
+// ============================================================================
+
+message StateGetRequest {
+  string namespace = 1;            // e.g., "{job_id}/{stage_id}"
+  repeated string keys = 2;        // Keys to fetch
+}
+
+message StateGetResponse {
+  map<string, bytes> values = 1;   // Key -> value (missing keys not included)
+}
+
+message StatePutRequest {
+  string namespace = 1;
+  map<string, bytes> puts = 2;     // Keys to set
+  repeated string deletes = 3;     // Keys to delete
+}
+
+message StatePutResponse {
+  int32 puts_count = 1;            // Number of keys set
+  int32 deletes_count = 2;         // Number of keys deleted
+}

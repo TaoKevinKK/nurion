@@ -5,7 +5,6 @@ from solstice.core.operator import (
     Operator,
     OperatorConfig,
     OperatorRuntime,
-    SemanticGuarantee,
     operator,
     master_callable,
     is_master_callable,
@@ -17,7 +16,6 @@ from solstice.core.models import (
     FailurePolicy,
     FailureTracker,
     QueueEndpoint,
-    create_queue_endpoint,
     QueueMessage,
     StageStatus,
     MessageType,
@@ -25,7 +23,6 @@ from solstice.core.models import (
 )
 from solstice.core.stage_master import StageMaster
 from solstice.core.stage_worker import StageWorker, WorkerRuntime
-from solstice.queue import QueueType
 
 __all__ = [
     # Job
@@ -43,14 +40,11 @@ __all__ = [
     "OperatorRuntime",
     "SourceOperator",
     "SinkOperator",
-    "SemanticGuarantee",
     "operator",
     "master_callable",
     "is_master_callable",
     # Queue
-    "QueueType",
     "QueueEndpoint",
-    "create_queue_endpoint",
     "QueueMessage",
     "MessageType",
     "make_split_id",

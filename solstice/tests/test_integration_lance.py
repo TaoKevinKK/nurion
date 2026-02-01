@@ -16,7 +16,7 @@
 
 Tests the full pipeline flow:
 1. Create Lance dataset (local or S3)
-2. Run LanceSourceMaster through full pipeline with TansuBackend queue
+2. Run LanceSourceMaster through full pipeline with WorkQueue queue
 3. Verify data is processed correctly
 """
 
@@ -33,9 +33,9 @@ import pyarrow as pa
 import pytest
 from lance.dataset import write_dataset
 
-from tests.conftest import make_operator_runtime, make_stage_runtime
+from tests.conftest import make_operator_runtime
 from solstice.core.models import Split
-from solstice.core.stage import Stage
+from solstice.core.stage import Stage, StageRuntime
 from solstice.operators.sources import LanceTableSourceConfig
 from solstice.operators.sources.lance import LanceSourceMaster
 
@@ -177,16 +177,18 @@ class TestLanceSourceS3:
 
 
 # ============================================================================
-# Full Pipeline Tests (requires tansu)
+# Full Pipeline Tests (requires workqueue)
 # ============================================================================
 
 
 class TestLancePipeline:
-    """Integration tests for full Lance pipeline with TansuBackend."""
+    """Integration tests for full Lance pipeline with WorkQueue."""
 
     @pytest.mark.asyncio
-    async def test_full_pipeline_with_queue(self, lance_dataset_local, ray_cluster):
-        """Test complete LanceSource pipeline with TansuBackend queue.
+    async def test_full_pipeline_with_queue(
+        self, lance_dataset_local, ray_cluster, workqueue_backend
+    ):
+        """Test complete LanceSource pipeline with WorkQueue queue.
 
         This test verifies the full flow:
         1. LanceSourceMaster starts and creates source queue
@@ -203,9 +205,18 @@ class TestLancePipeline:
         )
 
         from solstice.core.split_payload_store import RaySplitPayloadStore
+        from solstice.core.stage_master import QueueEndpoint
 
         payload_store = RaySplitPayloadStore(name="test-lance-pipeline_store")
-        runtime = make_stage_runtime()
+        runtime = StageRuntime(
+            broker_endpoint=QueueEndpoint(
+                host="localhost",
+                port=workqueue_backend.port,
+                storage_url="memory://",
+            ),
+            upstream_queue_name=None,
+            state_queue_name=None,
+        )
         master = LanceSourceMaster(
             job_id="test-lance-pipeline",
             stage=source_stage,
@@ -252,7 +263,12 @@ class TestLancePipeline:
 
     @pytest.mark.asyncio
     async def test_pipeline_with_s3_dataset(
-        self, minio_endpoint, minio_credentials, s3_storage_options, ray_cluster
+        self,
+        minio_endpoint,
+        minio_credentials,
+        s3_storage_options,
+        ray_cluster,
+        workqueue_backend,
     ):
         """Test Lance pipeline with S3 dataset using testcontainers MinIO."""
         unique_id = str(uuid.uuid4())[:8]
@@ -284,9 +300,18 @@ class TestLancePipeline:
         )
 
         from solstice.core.split_payload_store import RaySplitPayloadStore
+        from solstice.core.stage_master import QueueEndpoint
 
         payload_store = RaySplitPayloadStore(name="test-lance-s3-pipeline_store")
-        runtime = make_stage_runtime()
+        runtime = StageRuntime(
+            broker_endpoint=QueueEndpoint(
+                host="localhost",
+                port=workqueue_backend.port,
+                storage_url="memory://",
+            ),
+            upstream_queue_name=None,
+            state_queue_name=None,
+        )
         master = LanceSourceMaster(
             job_id="test-lance-s3-pipeline",
             stage=source_stage,

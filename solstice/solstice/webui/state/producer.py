@@ -15,7 +15,7 @@
 """State producer for push-based metrics.
 
 StateProducer provides a simple interface for producing state messages
-to Tansu. It handles:
+to WorkQueue. It handles:
 - Async fire-and-forget produce (doesn't block caller)
 - Sequence number generation
 - Graceful degradation on failures
@@ -32,7 +32,7 @@ from solstice.webui.state.messages import StateMessage
 from solstice.utils.logging import create_ray_logger
 
 if TYPE_CHECKING:
-    from solstice.queue import QueueClient
+    from solstice.queue import WorkQueueQueueClient
 
 
 class StateProducer:
@@ -44,7 +44,7 @@ class StateProducer:
     - Graceful failure handling (log and continue)
 
     Usage:
-        producer = StateProducer(job_id, queue_client, state_topic)
+        producer = StateProducer(job_id, queue_client, state_queue_name)
         await producer.start()
         await producer.produce(message)
         await producer.stop()
@@ -53,19 +53,19 @@ class StateProducer:
     def __init__(
         self,
         job_id: str,
-        queue_client: "QueueClient",
-        state_topic: str,
+        queue_client: "WorkQueueQueueClient",
+        state_queue_name: str,
     ):
         """Initialize state producer.
 
         Args:
             job_id: Job identifier
-            queue_client: Tansu queue client
-            state_topic: Topic name for state messages
+            queue_client: WorkQueue client
+            state_queue_name: Queue name for state messages
         """
         self.job_id = job_id
         self.queue_client = queue_client
-        self.state_topic = state_topic
+        self.state_queue_name = state_queue_name
 
         self.logger = create_ray_logger(f"StateProducer-{job_id}")
 
@@ -107,13 +107,13 @@ class StateProducer:
         """Produce a message (queued for async send).
 
         This is fire-and-forget - it doesn't wait for the message
-        to be sent to Tansu. Failures are logged but not raised.
+        to be sent to WorkQueue. Failures are logged but not raised.
         """
         # Queue for background produce
         await self._pending_produces.put(message)
 
     async def _produce_loop(self) -> None:
-        """Background loop that sends pending messages to Tansu."""
+        """Background loop that sends pending messages to WorkQueue."""
         while self._running or not self._pending_produces.empty():
             try:
                 # Wait for a message with timeout
@@ -125,10 +125,10 @@ class StateProducer:
                 except asyncio.TimeoutError:
                     continue
 
-                # Send to Tansu
+                # Send to WorkQueue
                 try:
-                    self.queue_client.produce(
-                        self.state_topic,
+                    self.queue_client.push(
+                        self.state_queue_name,
                         message.to_bytes(),
                     )
                 except Exception as e:
@@ -147,8 +147,8 @@ class StateProducer:
         while not self._pending_produces.empty():
             try:
                 message = self._pending_produces.get_nowait()
-                self.queue_client.produce(
-                    self.state_topic,
+                self.queue_client.push(
+                    self.state_queue_name,
                     message.to_bytes(),
                 )
             except Exception as e:

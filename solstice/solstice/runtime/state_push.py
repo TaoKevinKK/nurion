@@ -15,7 +15,7 @@
 """State push manager for WebUI metrics.
 
 Manages the push-based state infrastructure:
-- Tansu broker and queue for state messages
+- WorkQueue broker and queue for state messages
 - StateProducer for emitting job-level events
 - JobStateManager for consuming and aggregating state
 
@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from solstice.queue import TansuBrokerManager, TansuQueueClient
+    from solstice.queue import WorkQueueBrokerManager, WorkQueueQueueClient
     from solstice.core.models import QueueEndpoint
     from solstice.webui.state.producer import StateProducer
     from solstice.webui.state.manager import JobStateManager
@@ -54,8 +54,8 @@ class StatePushManager:
     """Manages push-based state/metrics infrastructure.
 
     Encapsulates:
-    - Tansu broker lifecycle
-    - State topic creation
+    - WorkQueue broker lifecycle
+    - State queue creation
     - StateProducer for job events
     - JobStateManager for state aggregation
     - Registration with WebUI
@@ -81,8 +81,8 @@ class StatePushManager:
         self.logger = create_ray_logger(f"StatePush-{job_id}")
 
         # Infrastructure (created in start())
-        self._broker: Optional["TansuBrokerManager"] = None
-        self._queue: Optional["TansuQueueClient"] = None
+        self._broker: Optional["WorkQueueBrokerManager"] = None
+        self._queue: Optional["WorkQueueQueueClient"] = None
         self._producer: Optional["StateProducer"] = None
         self._state_manager: Optional["JobStateManager"] = None
         self._endpoint: Optional["QueueEndpoint"] = None
@@ -91,8 +91,8 @@ class StatePushManager:
         self._started = False
 
     @property
-    def topic(self) -> str:
-        """State topic name."""
+    def queue_name(self) -> str:
+        """State queue name."""
         return f"{self.job_id}_state"
 
     @property
@@ -119,7 +119,7 @@ class StatePushManager:
             return
 
         try:
-            from solstice.queue import TansuBrokerManager, TansuQueueClient, QueueType
+            from solstice.queue import WorkQueueBrokerManager, WorkQueueQueueClient
             from solstice.core.stage_master import QueueEndpoint
             from solstice.webui.state.producer import StateProducer
             from solstice.webui.state.manager import JobStateManager
@@ -130,8 +130,8 @@ class StatePushManager:
             # Use actual node IP for cross-node access (workers on other nodes need to connect)
             from solstice.utils.network import get_node_ip
 
-            self._broker = TansuBrokerManager(
-                storage_url=self.config.storage_url,
+            self._broker = WorkQueueBrokerManager(
+                db_path=self.config.storage_url,
                 host=get_node_ip(),
             )
             self._broker.start()
@@ -140,25 +140,24 @@ class StatePushManager:
             host, port_str = broker_url.split(":")
 
             self._endpoint = QueueEndpoint(
-                queue_type=QueueType.TANSU,
                 host=host,
                 port=int(port_str),
                 storage_url=self.config.storage_url,
             )
 
             # Create queue client
-            self._queue = TansuQueueClient(broker_url)
+            self._queue = WorkQueueQueueClient(broker_url, worker_id="state-push")
             self._queue.start()
 
-            # Create state topic
-            self._queue.create_topic(self.topic, partitions=1)
-            self.logger.info(f"Created state topic {self.topic}")
+            # Create state queue
+            self._queue.create_queue(self.queue_name)
+            self.logger.info(f"Created state queue {self.queue_name}")
 
             # Create state producer
             self._producer = StateProducer(
                 job_id=self.job_id,
                 queue_client=self._queue,
-                state_topic=self.topic,
+                state_queue_name=self.queue_name,
             )
             await self._producer.start()
 
@@ -168,7 +167,7 @@ class StatePushManager:
             self._state_manager = JobStateManager(
                 job_id=self.job_id,
                 queue_client=self._queue,
-                state_topic=self.topic,
+                state_queue_name=self.queue_name,
                 storage=self._storage,
             )
             await self._state_manager.start()

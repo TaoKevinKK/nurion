@@ -15,19 +15,16 @@
 """Stage Master component managers.
 
 These managers handle specific concerns within a StageMaster:
-- PartitionManager: Partition assignment and rebalancing
 - WorkerManager: Worker lifecycle (spawn, stop, status)
 - RecoveryManager: Failure tracking and worker recovery
 - BackpressureMonitor: Backpressure detection and scaling
 """
 
-from solstice.core.managers.partition_manager import PartitionManager
 from solstice.core.managers.worker_manager import WorkerManager
 from solstice.core.managers.recovery_manager import RecoveryManager
 from solstice.core.managers.backpressure_monitor import BackpressureMonitor
 
 __all__ = [
-    "PartitionManager",
     "WorkerManager",
     "RecoveryManager",
     "BackpressureMonitor",

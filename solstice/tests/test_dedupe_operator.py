@@ -28,11 +28,12 @@ from solstice.operators.shuffle import ShuffleOperator
 class TestHashDedupeOperator:
     """Tests for HashDedupeOperator.
 
-    Note: The operator is now stateless - it does not maintain in-memory
-    state across batches. Cross-batch deduplication requires a state store
-    to be configured.
+    The operator performs batch-level deduplication using DuckDB.
+    Since data is shuffled by dedup keys, same keys end up in the same
+    partition, making batch-level dedup effective for most cases.
 
-    These tests verify batch-level deduplication which works without a state store.
+    For exact cross-batch deduplication at 10B+ scale,
+    use the MinHash + CC flow instead.
     """
 
     @pytest.fixture
@@ -157,11 +158,11 @@ class TestHashDedupeOperator:
 
         operator.close()
 
-    def test_dedupe_batch_only_without_state_store(self, sample_split):
-        """Test that without state store, only batch-level dedup is performed.
+    def test_dedupe_batch_level_only(self, sample_split):
+        """Test that deduplication is batch-level only.
 
-        Note: Cross-batch deduplication requires a state store to be configured.
-        Without it, the operator logs a warning and only dedupes within the batch.
+        Each batch is deduplicated independently. Cross-batch deduplication
+        requires using MinHash + CC flow for 10B+ scale scenarios.
         """
         config = HashDedupeConfig(dedup_keys=["user_id"], num_partitions=4)
         operator = config.setup(make_operator_runtime())
@@ -179,7 +180,7 @@ class TestHashDedupeOperator:
         # Second batch with overlapping keys
         table2 = pa.table(
             {
-                "user_id": [2, 3],  # user_id=2 would be duplicate with state store
+                "user_id": [2, 3],  # user_id=2 would be duplicate in full dataset
                 "value": [30, 40],
             }
         )
@@ -193,13 +194,11 @@ class TestHashDedupeOperator:
             r1_table = r1_table.drop([ShuffleOperator.PARTITION_COLUMN])
         assert r1_table.num_rows == 2
 
-        # Second batch - without state store, no cross-batch dedup
-        # So both rows should pass (only batch-level dedup)
+        # Second batch - batch-level dedup only, so both rows pass
         assert result2 is not None
         r2_table = result2.to_table()
         if ShuffleOperator.PARTITION_COLUMN in r2_table.column_names:
             r2_table = r2_table.drop([ShuffleOperator.PARTITION_COLUMN])
-        # Without state store, both rows pass (no cross-batch dedup)
         assert r2_table.num_rows == 2
 
         operator.close()

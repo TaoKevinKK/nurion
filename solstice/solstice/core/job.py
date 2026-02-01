@@ -18,9 +18,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
-from solstice.core.operator import SemanticGuarantee
 from solstice.core.stage import Stage
-from solstice.queue import QueueType
 
 if TYPE_CHECKING:
     from solstice.runtime.ray_runner import RayJobRunner
@@ -53,9 +51,9 @@ class JobConfig:
     """Configuration for a Solstice job.
 
     Attributes:
-        queue_type: Type of queue backend (TANSU for production, MEMORY for testing)
-        tansu_storage_url: Storage URL for Tansu backend (memory://, s3://)
-        semantic_guarantee: AT_LEAST_ONCE (default, no dedup) or EXACTLY_ONCE (with dedup)
+        workqueue_db_path: Storage path for WorkQueue backend (file://, memory://)
+        claim_timeout_secs: Seconds before claimed messages are reclaimed from dead workers
+        recovery_interval_secs: Interval between recovery task runs
         ray_init_kwargs: Arguments to pass to ray.init()
         autoscale_config: Configuration for autoscaling (None to disable)
         webui: WebUI debugging interface configuration
@@ -63,9 +61,9 @@ class JobConfig:
         recover_from_checkpoint: Whether to recover from existing checkpoint on startup
     """
 
-    queue_type: QueueType = QueueType.TANSU
-    tansu_storage_url: str = "memory://"
-    semantic_guarantee: SemanticGuarantee = SemanticGuarantee.AT_LEAST_ONCE
+    workqueue_db_path: str = "memory://"
+    claim_timeout_secs: float = 60.0  # Default: 60s before reclaiming from dead workers
+    recovery_interval_secs: float = 10.0  # Default: check every 10s for expired claims
     ray_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     autoscale_config: Optional["AutoscaleConfig"] = None
     webui: WebUIConfig = field(default_factory=WebUIConfig)
@@ -93,7 +91,7 @@ class Job:
 
             >>> job = Job(
             ...     job_id="etl_pipeline",
-            ...     config=JobConfig(queue_type=QueueType.MEMORY),
+            ...     config=JobConfig(workqueue_db_path="file:///tmp/wq"),
             ... )
         """
         self.job_id = job_id

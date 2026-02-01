@@ -15,9 +15,9 @@
 """Ray runtime for executing Solstice jobs with queue-based architecture.
 
 Architecture:
-- Workers pull directly from upstream queues
+- Workers claim messages from upstream queues (competing consumers)
 - Masters manage their output queue
-- Offset-based recovery via queue backends
+- Message ID-based recovery via WorkQueue
 - Optional autoscaling for dynamic worker management
 """
 
@@ -49,7 +49,7 @@ from solstice.core.stage_master import (
 )
 from solstice.operators.sources.source import SourceMaster
 from solstice.core.split_payload_store import RaySplitPayloadStore
-from solstice.queue import QueueType, TansuBrokerManager, TansuQueueClient
+from solstice.queue import WorkQueueBrokerManager, WorkQueueQueueClient
 from solstice.runtime.autoscaler import SimpleAutoscaler
 from solstice.runtime.state_push import StatePushManager, StatePushConfig
 from solstice.utils.logging import create_ray_logger
@@ -72,8 +72,8 @@ class RayJobRunner:
 
     Features:
     - StageMaster for simplified, output-queue only management
-    - Workers pull from upstream queues
-    - Offset-based recovery via queue backends
+    - Workers claim from upstream queues (competing consumers)
+    - Message ID-based recovery via WorkQueue
     - Async-first design
 
     Example:
@@ -98,8 +98,7 @@ class RayJobRunner:
 
         # Read configuration from job.config
         config = job.config
-        self.queue_type = config.queue_type
-        self.tansu_storage_url = config.tansu_storage_url
+        self.workqueue_db_path = config.workqueue_db_path
         self._ray_init_kwargs = config.ray_init_kwargs or {}
 
         self.logger = create_ray_logger(f"RayJobRunner-{job.job_id}")
@@ -127,14 +126,14 @@ class RayJobRunner:
             job_id=job.job_id,
             config=StatePushConfig(
                 enabled=config.webui.enabled,
-                storage_url=config.tansu_storage_url or "memory://state/",
+                storage_url=config.workqueue_db_path or "memory://state/",
             ),
         )
 
-        # Shared Tansu broker for all stages (reduces resource usage and improves stability)
-        self._shared_broker: Optional[TansuBrokerManager] = None
-        self._shared_broker_endpoint: Optional[QueueEndpoint] = None
-        self._shared_broker_client: Optional[TansuQueueClient] = None
+        # Shared WorkQueue broker for all stages (reduces resource usage and improves stability)
+        self._shared_broker: Optional[WorkQueueBrokerManager] = None
+        self._broker_endpoint: Optional[QueueEndpoint] = None
+        self._shared_broker_client: Optional[WorkQueueQueueClient] = None
 
         # State
         self._initialized = False
@@ -155,40 +154,39 @@ class RayJobRunner:
             ray.init(ignore_reinit_error=True, **self._ray_init_kwargs)
 
     async def _create_shared_broker(self) -> None:
-        """Create a single shared Tansu broker for all stages.
+        """Create a single shared WorkQueue broker for all stages.
 
         This improves stability by having one broker process instead of one per stage.
-        All stages connect to this broker and create their own topics.
+        All stages connect to this broker and create their own queues.
         """
-        if self.queue_type != QueueType.TANSU:
-            return  # Memory queue doesn't need shared broker
-
         from solstice.utils.network import get_node_ip
 
-        self._shared_broker = TansuBrokerManager(
-            storage_url=self.tansu_storage_url or "memory://tansu/",
+        config = self.job.config
+        self._shared_broker = WorkQueueBrokerManager(
+            db_path=self.workqueue_db_path or "memory://",
             host=get_node_ip(),  # Use actual IP instead of 127.0.0.1 for cross-node access
+            claim_timeout_secs=config.claim_timeout_secs,
+            recovery_interval_secs=config.recovery_interval_secs,
         )
         self._shared_broker.start()
 
         broker_url = self._shared_broker.get_broker_url()
         host, port_str = broker_url.split(":")
 
-        self._shared_broker_endpoint = QueueEndpoint(
-            queue_type=QueueType.TANSU,
+        self._broker_endpoint = QueueEndpoint(
             host=host,
             port=int(port_str),
-            storage_url=self.tansu_storage_url or "memory://tansu/",
+            storage_url=self.workqueue_db_path or "memory://",
         )
 
         # Create a client for the runner itself (for cleanup operations)
-        self._shared_broker_client = TansuQueueClient(broker_url)
+        self._shared_broker_client = WorkQueueQueueClient(broker_url, worker_id="runner")
         self._shared_broker_client.start()
 
-        self.logger.info(f"Created shared Tansu broker at {broker_url}")
+        self.logger.info(f"Created shared WorkQueue broker at {broker_url}")
 
     async def _stop_shared_broker(self) -> None:
-        """Stop the shared Tansu broker."""
+        """Stop the shared WorkQueue broker."""
         if self._shared_broker_client:
             try:
                 self._shared_broker_client.stop()
@@ -202,7 +200,7 @@ class RayJobRunner:
             except Exception as e:
                 self.logger.warning(f"Error stopping shared broker: {e}")
             self._shared_broker = None
-            self._shared_broker_endpoint = None
+            self._broker_endpoint = None
 
     async def _try_recover_checkpoint(self) -> None:
         """Try to recover from a checkpoint if enabled.
@@ -266,7 +264,7 @@ class RayJobRunner:
         if storage is not None:
             await self._state_push.start(storage=storage)
 
-        # Create shared Tansu broker for all stages (if using Tansu)
+        # Create shared WorkQueue broker for all stages (if using WorkQueue)
         await self._create_shared_broker()
 
         # Build reverse DAG (stage -> its upstreams)
@@ -280,12 +278,11 @@ class RayJobRunner:
             upstream_ids = self._reverse_dag.get(stage_id, [])
             is_source = not upstream_ids
 
-            # Determine upstream info (None for source stages)
-            upstream_endpoint: Optional[QueueEndpoint] = None
-            upstream_topic: Optional[str] = None
+            # Determine upstream queue name (None for source stages)
+            upstream_queue_name: Optional[str] = None
 
             if not is_source:
-                # Non-source stage: get upstream endpoint
+                # Non-source stage: get upstream queue name
                 # TODO: Implement multi-upstream support (currently only uses first upstream)
                 if len(upstream_ids) > 1:
                     self.logger.warning(
@@ -295,15 +292,14 @@ class RayJobRunner:
                 upstream_id = upstream_ids[0]
                 upstream_master = self._masters[upstream_id]
 
-                # Start upstream if needed to get its endpoint
+                # Start upstream if needed to get its queue name
                 if not upstream_master._running:
                     await upstream_master.start()
 
-                upstream_endpoint = upstream_master._output_endpoint
-                upstream_topic = upstream_master._output_topic
+                upstream_queue_name = upstream_master._output_queue_name
 
             # Build immutable StageRuntime with all info
-            runtime = self._build_stage_runtime(stage, upstream_endpoint, upstream_topic)
+            runtime = self._build_stage_runtime(stage, upstream_queue_name)
 
             # Create master using operator_config.master_class (or default StageMaster)
             master = self._create_master(stage, runtime)
@@ -344,24 +340,18 @@ class RayJobRunner:
     def _build_stage_runtime(
         self,
         stage: "Stage",
-        upstream_endpoint: Optional[QueueEndpoint] = None,
-        upstream_topic: Optional[str] = None,
+        upstream_queue_name: Optional[str] = None,
     ) -> StageRuntime:
         """Build StageRuntime from job and runner configuration.
 
         Args:
             stage: The stage being configured
-            upstream_endpoint: Queue endpoint for upstream stage (None for source)
-            upstream_topic: Queue topic for upstream stage (None for source)
+            upstream_queue_name: Queue name for upstream stage (None for source)
         """
         return StageRuntime(
-            queue_type=self.queue_type,
-            shared_broker_endpoint=self._shared_broker_endpoint,
-            upstream_endpoint=upstream_endpoint,
-            upstream_topic=upstream_topic,
-            state_endpoint=self._state_push.endpoint,
-            state_topic=self._state_push.topic,
-            semantic_guarantee=self.job.config.semantic_guarantee,
+            broker_endpoint=self._broker_endpoint,
+            upstream_queue_name=upstream_queue_name,
+            state_queue_name=self._state_push.queue_name,
         )
 
     def _stage_info(self, stage: "Stage") -> Dict[str, Any]:
@@ -827,7 +817,7 @@ async def run_pipeline(
 
     Example:
         ```python
-        job = Job(job_id="my_job", config=JobConfig(queue_type=QueueType.MEMORY))
+        job = Job(job_id="my_job")
         # ... add stages ...
 
         status = await run_pipeline(job)

@@ -242,9 +242,9 @@ class SparkSourceV2Master(StageMaster):
                 df = df.repartition(self._config.parallelism)
 
         # Output queue connection info
-        assert self._output_endpoint is not None, "output_endpoint not set"
-        queue_bootstrap = f"{self._output_endpoint.host}:{self._output_endpoint.port}"
-        queue_topic = self._output_topic
+        assert self.broker_endpoint is not None, "broker_endpoint not set"
+        queue_bootstrap = f"{self.broker_endpoint.host}:{self.broker_endpoint.port}"
+        queue_topic = self._output_queue_name
 
         self.logger.info(f"JVM writing directly to output_queue: {queue_bootstrap}/{queue_topic}")
 

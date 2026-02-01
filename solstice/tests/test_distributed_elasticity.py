@@ -16,15 +16,17 @@
 
 These are P1 tests that verify:
 - Dynamic worker scaling up during processing
-- Dynamic worker scaling down during processing
-- Rapid scale up/down cycles
-- Partition rebalancing during scaling
+- Dynamic worker scaling down (worker failures)
+- Zero-worker recovery (all workers killed)
+- Exactly-once semantics during scaling
 
-All tests use real Ray clusters and Tansu queues (no mocks).
-Data volumes: 10,000+ records with complex operators.
+All tests use real Ray clusters and WorkQueue brokers (no mocks).
+WorkQueue uses a single-queue multi-consumer model where workers
+compete to claim messages - no explicit partition assignment needed.
 """
 
 import asyncio
+import logging
 import pytest
 import ray
 
@@ -43,12 +45,21 @@ from tests.utils import (
     wait_for_progress,
 )
 
+logger = logging.getLogger(__name__)
+
 # Mark all tests in this module as distributed tests
 pytestmark = pytest.mark.distributed
 
 
 class TestElasticScaling:
-    """Tests for elastic worker scaling."""
+    """Tests for elastic worker scaling with WorkQueue.
+
+    WorkQueue model:
+    - Single queue per stage, multiple workers claim messages
+    - No explicit partition assignment - workers compete for messages
+    - Claimed messages have lease timeout for failure recovery
+    - Exactly-once semantics via atomic ack_and_forward
+    """
 
     @pytest.fixture(autouse=True)
     async def setup_collector(self, ray_cluster, request):
@@ -68,8 +79,12 @@ class TestElasticScaling:
 
     @pytest.mark.asyncio
     async def test_scale_up_during_processing(self, ray_cluster):
-        """Scale up: new workers should join and partition rebalance correctly."""
-        NUM_RECORDS = 1500
+        """Scale up: additional workers should help process messages faster.
+
+        In WorkQueue model, new workers simply start claiming from the queue.
+        No rebalancing needed - they compete for available messages.
+        """
+        NUM_RECORDS = 2000
         FILTER_MODULO = 3
         FILTER_REMAINDER = 0
         validator = DataValidator()
@@ -81,9 +96,9 @@ class TestElasticScaling:
 
         job = create_test_pipeline(
             num_records=NUM_RECORDS,
-            batch_size=500,
+            batch_size=200,
             min_workers=2,
-            max_workers=6,
+            max_workers=8,
             collector_name=self.collector_name,
             with_checksum=True,
             source_data=source_data,
@@ -94,6 +109,7 @@ class TestElasticScaling:
         )
 
         runner = RayJobRunner(job)
+        workers_added = 0
         try:
             await runner.initialize()
             run_task = asyncio.create_task(runner.run())
@@ -101,39 +117,45 @@ class TestElasticScaling:
             master = runner._masters.get("transform")
             assert master is not None, "Transform master not found"
 
-            # Brief wait for workers to start
-            await asyncio.sleep(0.3)
+            # Wait for initial progress
+            await wait_for_progress(
+                runner, min_processed=100, timeout=30, collector_name=self.collector_name
+            )
 
             # Scale up: spawn additional workers
+            initial_count = len(master._workers) if master._workers else 0
             if master._worker_manager and not master._finished:
-                partition_count = master._partition_count
-                for _ in range(2):
+                for _ in range(3):
                     try:
-                        await master._worker_manager.spawn_worker(partition_count=partition_count)
+                        await master._worker_manager.spawn_worker(is_min_worker=False)
+                        workers_added += 1
                     except Exception:
                         pass
                     await asyncio.sleep(0.1)
 
-            # Wait for completion
+            logger.info(f"Scaled up from {initial_count} to {initial_count + workers_added} workers")
+
             await asyncio.wait_for(run_task, timeout=60)
         finally:
             await runner.stop()
 
         sink_data = get_sink_records(self.collector_name)
 
-        # Verify data integrity after scale up
+        # Exactly-once: correct count and no duplicates
         assert validator.verify_count(sink_data, expected_count), (
-            f"Data loss after scale up: expected {expected_count}, got {len(sink_data)}"
+            f"Count mismatch after scale up: expected {expected_count}, got {len(sink_data)}"
         )
-        assert validator.verify_filter_result(
-            sink_data, NUM_RECORDS, FILTER_MODULO, FILTER_REMAINDER
-        )
+        assert validator.verify_no_duplicates(sink_data), "Duplicates found after scale up"
         assert validator.verify_checksums(source_data, sink_data)
 
     @pytest.mark.asyncio
-    async def test_scale_down_during_processing(self, ray_cluster):
-        """Scale down: removed workers' partitions should be taken over by others."""
-        NUM_RECORDS = 1500
+    async def test_scale_down_worker_failures(self, ray_cluster):
+        """Scale down via worker failures: claimed messages should be recovered.
+
+        When workers die, their claimed messages timeout and return to queue.
+        Other workers or new workers will reclaim and process them.
+        """
+        NUM_RECORDS = 2000
         EXPLODE_FACTOR = 2
         validator = DataValidator()
 
@@ -142,7 +164,7 @@ class TestElasticScaling:
 
         job = create_test_pipeline(
             num_records=NUM_RECORDS,
-            batch_size=500,
+            batch_size=200,
             min_workers=4,
             max_workers=8,
             collector_name=self.collector_name,
@@ -152,37 +174,51 @@ class TestElasticScaling:
         )
 
         runner = RayJobRunner(job)
+        kills = 0
         try:
             await runner.initialize()
             run_task = asyncio.create_task(runner.run())
 
-            # Wait for processing to start with more workers
+            # Wait for processing to start
             await wait_for_progress(
                 runner, min_processed=200, timeout=30, collector_name=self.collector_name
             )
 
-            # Scale down: kill some workers
-            await kill_random_worker(runner, stage_id="transform")
-            await asyncio.sleep(0.3)
-            await kill_random_worker(runner, stage_id="transform")
+            # Scale down: kill workers sequentially
+            for _ in range(2):
+                try:
+                    if await kill_random_worker(runner, stage_id="transform"):
+                        kills += 1
+                except Exception:
+                    pass
+                await asyncio.sleep(0.5)
 
-            # Wait for completion
-            await asyncio.wait_for(run_task, timeout=45)
+            logger.info(f"Killed {kills} workers")
+
+            await asyncio.wait_for(run_task, timeout=60)
         finally:
             await runner.stop()
 
+        assert kills > 0, "No workers were killed - test invalid"
+
         sink_data = get_sink_records(self.collector_name)
 
-        # Verify data integrity after scale down
+        # Exactly-once: correct count and no duplicates
         assert validator.verify_count(sink_data, expected_count), (
-            f"Data loss after scale down: expected {expected_count}, got {len(sink_data)}"
+            f"Count mismatch after scale down: expected {expected_count}, got {len(sink_data)}"
         )
-        assert validator.verify_explode_result(sink_data, NUM_RECORDS, EXPLODE_FACTOR)
+        assert validator.verify_no_duplicates_composite(sink_data, ["id", "copy_idx"]), (
+            "Duplicates found after scale down"
+        )
         assert validator.verify_checksums(source_data, sink_data)
 
     @pytest.mark.asyncio
-    async def test_scale_to_zero_and_back(self, ray_cluster):
-        """Scale to zero then back: state should be preserved, recovery from offset."""
+    async def test_zero_worker_recovery(self, ray_cluster):
+        """Zero worker recovery: kill all workers, system should auto-recover.
+
+        StageMaster detects zero workers with pending messages and spawns new ones.
+        Messages claimed by dead workers are recovered after claim_timeout.
+        """
         NUM_RECORDS = 1500
         FILTER_MODULO = 5
         FILTER_REMAINDER = 0
@@ -196,7 +232,7 @@ class TestElasticScaling:
 
         job = create_test_pipeline(
             num_records=NUM_RECORDS,
-            batch_size=400,
+            batch_size=300,
             min_workers=2,
             max_workers=6,
             collector_name=self.collector_name,
@@ -216,49 +252,45 @@ class TestElasticScaling:
 
             # Wait for processing to start
             await wait_for_progress(
-                runner, min_processed=150, timeout=30, collector_name=self.collector_name
+                runner, min_processed=100, timeout=30, collector_name=self.collector_name
             )
 
-            # Kill all workers (scale to ~zero active processing)
+            # Kill ALL transform workers
             master = runner._masters.get("transform")
-            if master:
+            if master and master._workers:
                 workers = list(master._workers.values())
+                logger.info(f"Killing all {len(workers)} transform workers")
                 for worker in workers:
                     try:
                         ray.kill(worker)
                     except Exception:
                         pass
 
-            # Wait a bit - master should recreate workers
-            await asyncio.sleep(0.5)
-
-            # Wait for completion
-            await asyncio.wait_for(run_task, timeout=60)
+            # StageMaster should detect this and spawn new workers
+            # Wait for completion (includes recovery time)
+            await asyncio.wait_for(run_task, timeout=90)
         finally:
             await runner.stop()
 
         sink_data = get_sink_records(self.collector_name)
 
-        # At-least-once semantics: no data loss, but may have duplicates
-        assert len(sink_data) >= expected_count, (
-            f"Data loss after scale to zero: expected >= {expected_count}, got {len(sink_data)}"
+        # Exactly-once semantics
+        assert validator.verify_count(sink_data, expected_count), (
+            f"Count mismatch after zero-worker recovery: expected {expected_count}, got {len(sink_data)}"
         )
-        # Verify all expected IDs are present (after filter + explode)
-        actual_ids = {(r["id"], r.get("copy_idx", 0)) for r in sink_data}
-        expected_ids = {
-            (i, c)
-            for i in range(NUM_RECORDS)
-            if i % FILTER_MODULO == FILTER_REMAINDER
-            for c in range(EXPLODE_FACTOR)
-        }
-        missing = expected_ids - actual_ids
-        assert not missing, f"Missing {len(missing)} records after scale to zero"
+        assert validator.verify_no_duplicates_composite(sink_data, ["id", "copy_idx"]), (
+            "Duplicates found after zero-worker recovery"
+        )
         assert validator.verify_checksums(source_data, sink_data)
 
     @pytest.mark.asyncio
-    async def test_rapid_scale_up_down_cycles(self, ray_cluster):
-        """Rapid scaling: no race conditions or duplicate processing."""
-        NUM_RECORDS = 1000
+    async def test_concurrent_scale_up_and_failures(self, ray_cluster):
+        """Concurrent scaling: add workers while others fail.
+
+        Tests system stability when scaling up and experiencing failures
+        simultaneously. Exactly-once semantics must be maintained.
+        """
+        NUM_RECORDS = 2000
         FILTER_MODULO = 4
         FILTER_REMAINDER = 0
         validator = DataValidator()
@@ -266,13 +298,13 @@ class TestElasticScaling:
         source_data = generate_test_data_with_checksum(NUM_RECORDS)
         expected_count = validator.calculate_filter_expected_count(
             NUM_RECORDS, FILTER_MODULO, FILTER_REMAINDER
-        )  # 250 records
+        )
 
         job = create_test_pipeline(
             num_records=NUM_RECORDS,
-            batch_size=500,  # Larger batches for faster processing
-            min_workers=2,
-            max_workers=6,
+            batch_size=200,
+            min_workers=3,
+            max_workers=8,
             collector_name=self.collector_name,
             with_checksum=True,
             source_data=source_data,
@@ -283,107 +315,135 @@ class TestElasticScaling:
         )
 
         runner = RayJobRunner(job)
+        spawns = 0
+        kills = 0
+
         try:
             await runner.initialize()
             run_task = asyncio.create_task(runner.run())
 
             master = runner._masters.get("transform")
 
-            # Quick scale up/down cycles without waiting for progress
-            for cycle in range(2):
-                await asyncio.sleep(0.3)  # Brief wait between cycles
+            # Wait for initial progress
+            await wait_for_progress(
+                runner, min_processed=100, timeout=30, collector_name=self.collector_name
+            )
+
+            # Perform concurrent scale operations
+            for _ in range(3):
+                if run_task.done():
+                    break
 
                 # Scale up
                 if master and master._worker_manager and not master._finished:
-                    partition_count = master._partition_count
                     try:
-                        await master._worker_manager.spawn_worker(partition_count=partition_count)
+                        await master._worker_manager.spawn_worker(is_min_worker=False)
+                        spawns += 1
+                    except Exception:
+                        pass
+
+                await asyncio.sleep(0.2)
+
+                # Scale down (kill)
+                if not master._finished:
+                    try:
+                        if await kill_random_worker(runner, stage_id="transform"):
+                            kills += 1
                     except Exception:
                         pass
 
                 await asyncio.sleep(0.3)
 
-                # Scale down
-                if not master._finished:
-                    await kill_random_worker(runner, stage_id="transform")
+            logger.info(f"Spawned {spawns} workers, killed {kills} workers")
 
-            # Wait for completion
-            await asyncio.wait_for(run_task, timeout=60)
+            await asyncio.wait_for(run_task, timeout=90)
         finally:
             await runner.stop()
 
         sink_data = get_sink_records(self.collector_name)
 
-        # At-least-once semantics: no data loss
-        assert len(sink_data) >= expected_count, (
-            f"Data loss in rapid scaling: expected >= {expected_count}, got {len(sink_data)}"
+        # Exactly-once semantics maintained during concurrent scaling
+        assert validator.verify_count(sink_data, expected_count), (
+            f"Count mismatch during concurrent scaling: expected {expected_count}, got {len(sink_data)}"
         )
-        assert validator.verify_filter_result(
-            sink_data, NUM_RECORDS, FILTER_MODULO, FILTER_REMAINDER
+        assert validator.verify_no_duplicates(sink_data), (
+            "Duplicates found during concurrent scaling"
         )
         assert validator.verify_checksums(source_data, sink_data)
 
     @pytest.mark.asyncio
-    async def test_scale_with_partition_rebalance(self, ray_cluster):
-        """Partition rebalance during scaling: balanced distribution, no message loss."""
+    async def test_multi_stage_elasticity(self, ray_cluster):
+        """Multi-stage elasticity: failures in different stages.
+
+        Tests that failures in one stage don't corrupt data flow to others.
+        Each stage operates independently with its own workers and queue.
+        """
         NUM_RECORDS = 1500
+        FILTER_MODULO = 3
+        FILTER_REMAINDER = 0
         EXPLODE_FACTOR = 2
         validator = DataValidator()
 
         source_data = generate_test_data_with_checksum(NUM_RECORDS)
-        expected_count = NUM_RECORDS * EXPLODE_FACTOR  # 3000 records
+        expected_count = validator.calculate_filter_explode_expected_count(
+            NUM_RECORDS, FILTER_MODULO, FILTER_REMAINDER, EXPLODE_FACTOR
+        )
 
         job = create_test_pipeline(
             num_records=NUM_RECORDS,
-            batch_size=500,
+            batch_size=300,
             min_workers=2,
             max_workers=6,
             collector_name=self.collector_name,
             with_checksum=True,
             source_data=source_data,
-            transform_config=ExplodeConfig(factor=EXPLODE_FACTOR),
+            transform_config=FilterExplodeConfig(
+                filter_modulo=FILTER_MODULO,
+                filter_remainder=FILTER_REMAINDER,
+                explode_factor=EXPLODE_FACTOR,
+            ),
         )
 
         runner = RayJobRunner(job)
+        kills_by_stage = {"source": 0, "transform": 0, "sink": 0}
+
         try:
             await runner.initialize()
             run_task = asyncio.create_task(runner.run())
 
-            # Wait for initial processing
+            # Wait for pipeline to warm up
             await wait_for_progress(
-                runner, min_processed=200, timeout=30, collector_name=self.collector_name
+                runner, min_processed=100, timeout=30, collector_name=self.collector_name
             )
 
-            master = runner._masters.get("transform")
+            # Kill workers in different stages
+            for stage in ["source", "transform", "sink"]:
+                if run_task.done():
+                    break
+                try:
+                    if await kill_random_worker(runner, stage_id=stage):
+                        kills_by_stage[stage] += 1
+                        logger.info(f"Killed worker in {stage}")
+                except Exception as e:
+                    logger.debug(f"Could not kill worker in {stage}: {e}")
+                await asyncio.sleep(0.5)
 
-            # Scale up to trigger rebalance
-            if master and master._worker_manager:
-                partition_count = master._partition_count
-                for _ in range(2):
-                    try:
-                        await master._worker_manager.spawn_worker(partition_count=partition_count)
-                    except Exception:
-                        pass
-                    await asyncio.sleep(0.1)
+            logger.info(f"Kills by stage: {kills_by_stage}")
 
-            # Brief wait for rebalance
-            await asyncio.sleep(0.5)
-
-            # Scale down to trigger another rebalance
-            for _ in range(2):
-                await kill_random_worker(runner, stage_id="transform")
-                await asyncio.sleep(0.2)
-
-            # Wait for completion
-            await asyncio.wait_for(run_task, timeout=60)
+            await asyncio.wait_for(run_task, timeout=90)
         finally:
             await runner.stop()
 
+        total_kills = sum(kills_by_stage.values())
+        assert total_kills > 0, "No workers killed - test invalid"
+
         sink_data = get_sink_records(self.collector_name)
 
-        # Verify partition rebalance didn't lose data (at-least-once)
-        assert len(sink_data) >= expected_count, (
-            f"Data loss after rebalance: expected >= {expected_count}, got {len(sink_data)}"
+        # Exactly-once across all stages
+        assert validator.verify_count(sink_data, expected_count), (
+            f"Count mismatch in multi-stage test: expected {expected_count}, got {len(sink_data)}"
         )
-        assert validator.verify_explode_result(sink_data, NUM_RECORDS, EXPLODE_FACTOR)
+        assert validator.verify_no_duplicates_composite(sink_data, ["id", "copy_idx"]), (
+            "Duplicates found in multi-stage test"
+        )
         assert validator.verify_checksums(source_data, sink_data)

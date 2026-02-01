@@ -30,14 +30,11 @@ import pytest_asyncio
 import ray
 
 from solstice.core.split_payload_store import RaySplitPayloadStore
-from solstice.core.operator import OperatorRuntime, SemanticGuarantee
+from solstice.core.operator import OperatorRuntime
 from solstice.core.stage import StageRuntime
 from solstice.queue import (
-    QueueType,
-    TansuBrokerManager,
-    TansuQueueClient,
-    MemoryBroker,
-    MemoryClient,
+    WorkQueueBrokerManager,
+    WorkQueueQueueClient,
 )
 from solstice.utils.network import find_free_port
 
@@ -54,8 +51,6 @@ def make_operator_runtime(
     worker_id: str = "test_worker",
     job_id: str = "test_job",
     stage_id: str = "test_stage",
-    partition_id: int = 0,
-    semantic_guarantee: SemanticGuarantee = SemanticGuarantee.AT_LEAST_ONCE,
 ) -> OperatorRuntime:
     """Create a test OperatorRuntime for unit tests.
 
@@ -66,28 +61,19 @@ def make_operator_runtime(
         job_id=job_id,
         stage_id=stage_id,
         worker_id=worker_id,
-        partition_id=partition_id,
-        semantic_guarantee=semantic_guarantee,
     )
 
 
-def make_stage_runtime(
-    queue_type: QueueType = QueueType.MEMORY,
-    semantic_guarantee: SemanticGuarantee = SemanticGuarantee.AT_LEAST_ONCE,
-) -> StageRuntime:
+def make_stage_runtime() -> StageRuntime:
     """Create a test StageRuntime for unit tests.
 
     This helper simplifies creating StageRuntime instances in tests
     where the actual runtime values don't matter.
     """
     return StageRuntime(
-        queue_type=queue_type,
-        shared_broker_endpoint=None,
-        upstream_endpoint=None,
-        upstream_topic=None,
-        state_endpoint=None,
-        state_topic=None,
-        semantic_guarantee=semantic_guarantee,
+        broker_endpoint=None,
+        upstream_queue_name=None,
+        state_queue_name=None,
     )
 
 
@@ -152,20 +138,20 @@ RAY_RUNTIME_EXCLUDES = [
 ]
 
 
-class TansuTestBackend:
-    """Wrapper combining TansuBrokerManager + TansuQueueClient for tests."""
+class WorkQueueTestBackend:
+    """Wrapper combining WorkQueueBrokerManager + WorkQueueQueueClient for tests."""
 
-    def __init__(self, broker: TansuBrokerManager, client: TansuQueueClient):
+    def __init__(self, broker: WorkQueueBrokerManager, client: WorkQueueQueueClient):
         self.broker = broker
         self.client = client
         # Delegate common methods to client for backward compatibility
-        self.create_topic = client.create_topic
-        self.delete_topic = client.delete_topic
-        self.produce = client.produce
-        self.fetch = client.fetch
-        self.commit_offset = client.commit_offset
-        self.get_committed_offset = client.get_committed_offset
-        self.get_latest_offset = client.get_latest_offset
+        self.create_queue = client.create_queue
+        self.delete_queue = client.delete_queue
+        self.push = client.push
+        self.claim = client.claim
+        self.ack = client.ack
+        self.nack = client.nack
+        self.get_stats = client.get_stats
 
     @property
     def host(self) -> str:
@@ -179,14 +165,14 @@ class TansuTestBackend:
 
 
 @pytest_asyncio.fixture
-async def tansu_backend():
-    """Start a Tansu broker and client wrapped for easy testing."""
+async def workqueue_backend():
+    """Start a WorkQueue broker and client wrapped for easy testing."""
     port = find_free_port()
-    broker = TansuBrokerManager(storage_url="memory://tansu/", port=port, startup_timeout=5.0)
+    broker = WorkQueueBrokerManager(db_path="memory://", port=port, startup_timeout=5.0)
     broker.start()
-    client = TansuQueueClient(broker.get_broker_url())
+    client = WorkQueueQueueClient(broker.get_broker_url(), worker_id="test-worker")
     client.start()
-    backend = TansuTestBackend(broker, client)
+    backend = WorkQueueTestBackend(broker, client)
     try:
         yield backend
     finally:
@@ -195,55 +181,26 @@ async def tansu_backend():
         await asyncio.sleep(0.1)  # Brief pause for cleanup
 
 
-@pytest_asyncio.fixture
-async def memory_client():
-    """Start a MemoryBroker and MemoryClient, yield the client."""
-    broker = MemoryBroker()
-    broker.start()
-    client = MemoryClient(broker)
-    client.start()
-    try:
-        yield client
-    finally:
-        client.stop()
-        broker.stop()
-
-
 # ============================================================================
-# Tansu SQLite fixtures for persistence tests
+# WorkQueue fixtures for persistence tests
 # ============================================================================
 
 
 @pytest.fixture
-def tansu_sqlite_storage_url(tmp_path):
-    """Provide a SQLite storage URL for persistent Tansu storage.
-
-    Note: SQLite URL format is sqlite:///absolute/path/file.db (three slashes for absolute path)
+def workqueue_storage_path(tmp_path):
+    """Provide a file storage path for persistent WorkQueue storage.
 
     Usage:
-        def test_persistence(tansu_sqlite_storage_url):
-            broker = TansuBrokerManager(storage_url=tansu_sqlite_storage_url, ...)
+        def test_persistence(workqueue_storage_path):
+            broker = WorkQueueBrokerManager(db_path=workqueue_storage_path, ...)
     """
-    db_path = tmp_path / "tansu.db"
-    # Use file:// URL format with absolute path (three slashes)
-    yield f"sqlite:///{db_path}"
+    db_path = tmp_path / "workqueue"
+    yield f"file://{db_path}"
 
 
 @pytest.fixture
-def memory_broker_and_client():
-    """Provide a fresh MemoryBroker and MemoryClient pair (sync version)."""
-    broker = MemoryBroker(gc_interval_seconds=3600)  # Disable auto-GC
-    broker.start()
-    client = MemoryClient(broker)
-    client.start()
-    yield broker, client
-    client.stop()
-    broker.stop()
-
-
-@pytest.fixture
-def tansu_broker_and_client():
-    """Provide a Tansu broker and client pair with memory storage."""
+def workqueue_broker_and_client(tmp_path):
+    """Provide a WorkQueue broker and client pair with file storage."""
     import socket
 
     # Find a free port dynamically
@@ -251,12 +208,15 @@ def tansu_broker_and_client():
         s.bind(("", 0))
         port = s.getsockname()[1]
 
+    # Use temp file storage
+    db_path = f"file://{tmp_path}/workqueue"
+
     # Start broker with shorter timeout for tests
-    broker = TansuBrokerManager(storage_url="memory://tansu/", port=port, startup_timeout=5.0)
+    broker = WorkQueueBrokerManager(db_path=db_path, port=port, startup_timeout=10.0)
     broker.start()
 
     # Create and start client
-    client = TansuQueueClient(broker.get_broker_url())
+    client = WorkQueueQueueClient(broker.get_broker_url(), worker_id="test-worker")
     client.start()
 
     yield broker, client
@@ -605,7 +565,7 @@ def ray_cluster():
     ray.shutdown()
 
     # Wait for Ray to fully shutdown before next test
-    # confluent-kafka background threads may still be active
+    # Background threads may still be active
     time.sleep(3.0)
 
 

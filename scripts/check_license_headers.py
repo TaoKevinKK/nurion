@@ -34,6 +34,13 @@ SCALA_JAVA_LICENSE_PATTERN = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
+RUST_LICENSE_PATTERN = re.compile(
+    r"//\s*Copyright\s+2025\s+nurion\s+team.*?"
+    r"//\s*Licensed\s+under\s+the\s+Apache\s+License.*?"
+    r"//\s*http://www\.apache\.org/licenses/LICENSE-2\.0",
+    re.DOTALL | re.IGNORECASE,
+)
+
 # Alternative: ASF license (for raydp files)
 # Match both Python (#) and Scala/Java (/* */) formats
 ASF_LICENSE_PATTERN = re.compile(
@@ -79,6 +86,10 @@ def should_check_file(file_path: Path) -> bool:
 
     # Check if file is excluded
     if file_path.name in EXCLUDE_FILES:
+        return False
+
+    # Skip protobuf/gRPC generated Python files
+    if file_path.name.endswith("_pb2.py") or file_path.name.endswith("_pb2_grpc.py"):
         return False
 
     return True
@@ -131,13 +142,31 @@ def check_scala_java_file(file_path: Path) -> tuple[bool, str]:
     # First check if file has any valid license header (ASF or nurion)
     if ASF_LICENSE_PATTERN.search(header_text):
         return True, "Has ASF license header"
-    
+
     if SCALA_JAVA_LICENSE_PATTERN.search(header_text):
         return True, "Has nurion license header"
 
     # For ASF-licensed files (raydp), expect ASF pattern
     if is_asf_licensed_file(file_path):
         return False, "Missing ASF license header (expected for raydp files)"
+
+    return False, "Missing Apache 2.0 license header"
+
+
+def check_rust_file(file_path: Path) -> tuple[bool, str]:
+    """Check Rust file for license header. Returns (is_valid, message)."""
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception as e:
+        return False, f"Error reading file: {e}"
+
+    # Check first 30 lines
+    lines = content.split("\n")[:30]
+    header_text = "\n".join(lines)
+
+    if RUST_LICENSE_PATTERN.search(header_text):
+        return True, "Has nurion license header"
 
     return False, "Missing Apache 2.0 license header"
 
@@ -162,6 +191,10 @@ def check_directory(root_dir: Path) -> int:
                 violations.append((file_path, message))
         elif file_path.suffix in (".scala", ".java"):
             is_valid, message = check_scala_java_file(file_path)
+            if not is_valid:
+                violations.append((file_path, message))
+        elif file_path.suffix == ".rs":
+            is_valid, message = check_rust_file(file_path)
             if not is_valid:
                 violations.append((file_path, message))
 

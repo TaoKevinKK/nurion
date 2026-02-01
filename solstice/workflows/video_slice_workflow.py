@@ -25,7 +25,6 @@ from solstice.core.stage import Stage
 from solstice.operators.filter import FilterOperatorConfig
 from solstice.operators.map import MapOperatorConfig
 from solstice.operators.sinks import FileSinkConfig, LanceSinkConfig
-from solstice.queue import QueueType
 from solstice.operators.sources import LanceTableSourceConfig
 from solstice.operators.video import (
     FFmpegSceneDetectConfig,
@@ -68,19 +67,11 @@ def create_job(
     }
 
     # Queue and runner configuration
-    tansu_storage_url = config.get("tansu_storage_url", "memory://")
-    queue_type_str = config.get("queue_type", "TANSU")
-    queue_type = QueueType[queue_type_str] if isinstance(queue_type_str, str) else queue_type_str
+    workqueue_db_path = config.get("workqueue_db_path", "memory://")
 
-    job_config = JobConfig(
-        queue_type=queue_type,
-        tansu_storage_url=tansu_storage_url,
-    )
+    job_config = JobConfig(workqueue_db_path=workqueue_db_path)
 
-    job = Job(
-        job_id=job_id,
-        config=job_config,
-    )
+    job = Job(job_id=job_id, config=job_config)
 
     # Source stage
     split_size = int(config.get("split_size", 10))

@@ -8,7 +8,7 @@ A web-based debugging and monitoring interface for Solstice streaming jobs.
 |---------|--------|
 | Portal Service (Ray Serve) | ✅ Complete |
 | Unified Read-Only Architecture | ✅ Complete |
-| Push-Based Metrics (Tansu) | ✅ Complete |
+| Push-Based Metrics (WorkQueue) | ✅ Complete |
 | Job/Stage/Worker Pages | ✅ Complete |
 | SlateDB Storage | ✅ Complete |
 | SSE Real-Time Updates | ❌ Pending |

@@ -43,7 +43,7 @@ class EmbeddedWebUIServer:
     """Run WebUI inside the job driver process.
 
     Reads metrics from JobStorage (SlateDB) which is populated by
-    JobStateManager consuming from Tansu state topic.
+    JobStateManager consuming from WorkQueue state queue.
     """
 
     def __init__(

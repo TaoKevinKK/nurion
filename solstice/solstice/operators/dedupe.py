@@ -18,21 +18,20 @@ This module provides operators for deduplicating data:
 
 1. **HashDedupeOperator**: Exact deduplication by key columns
    - Shuffles data by dedup key
-   - Uses SlateDB to track seen keys (partition-scoped)
-   - Outputs only first occurrence of each key
-   - Stateless operator - all state is in SlateDB
+   - Deduplicates within batch using DuckDB
+   - Future: Cross-batch dedup via WorkQueue state API
 
-Architecture for HashDedupe:
+Architecture for HashDedupe (WorkQueue model, Jan 2025):
     Input -> Shuffle by dedup_keys -> HashDedupeOperator -> Deduplicated Output
-                                           |
-                                           v
-                                    SlateDB (seen keys)
 
-The dedup operator is stateless - it reads/writes state directly to SlateDB
-without maintaining in-memory caches. This ensures:
-- Fault tolerance: any worker can resume processing
-- Exactly-once deduplication across restarts
-- Partition-scoped state for scalability
+Design rationale for 10B+ scale:
+- Batch-level dedup via DuckDB (efficient, in-memory)
+- Shuffle ensures same keys go to same partition
+- Cross-batch dedup via WorkQueue state API (future)
+- No local SlateDB state store needed
+
+For exact cross-batch deduplication at scale, use MinHash + CC flow
+which handles 10B+ records via payload-based iteration.
 """
 
 from dataclasses import dataclass, field
@@ -54,12 +53,10 @@ class HashDedupeConfig(ShuffleOperatorConfig):
     Attributes:
         dedup_keys: Columns that define uniqueness (same as partition_keys)
         keep: Which duplicate to keep ("first" or "last")
-        state_store_path: Inherited from ShuffleOperatorConfig
     """
 
     dedup_keys: List[str] = field(default_factory=list)
     keep: str = "first"  # "first" or "last"
-    # state_store_path is inherited from ShuffleOperatorConfig
 
     def __post_init__(self):
         # dedup_keys are also partition_keys for shuffle
@@ -69,29 +66,25 @@ class HashDedupeConfig(ShuffleOperatorConfig):
 
 @operator(HashDedupeConfig)
 class HashDedupeOperator(ShuffleOperator):
-    """Stateless operator for exact hash-based deduplication.
+    """Operator for exact hash-based deduplication.
 
     This operator:
     1. Shuffles data by dedup keys (handled by ShuffleOperator base)
-    2. Checks seen keys in SlateDB for each record
-    3. Outputs only records with keys not seen before
-    4. Marks new keys as seen in SlateDB
+    2. Uses DuckDB for efficient batch-level deduplication
+    3. Outputs deduplicated records
 
-    The operator is STATELESS - it does not maintain any in-memory state.
-    All seen-key tracking is done via the external SlateDB state store.
-    This enables:
-    - Any worker can process any partition (after acquiring it)
-    - Fault tolerance via SlateDB checkpoints
-    - Elastic scaling without state migration
+    WorkQueue-based design (no local state store):
+    - Batch-level dedup via DuckDB (efficient, handles most cases)
+    - Shuffle ensures same keys go to same partition
+    - For exact cross-batch dedup at 10B+ scale, use MinHash + CC flow
+
+    Future: Cross-batch dedup via WorkQueue state API:
+    - state_get(key_hash) to check if seen
+    - atomic ack + state_put(key_hash) to mark as seen
 
     Example:
         config = HashDedupeConfig(dedup_keys=["user_id", "event_id"])
         stage = Stage("dedupe", config, parallelism=8)
-
-    State Management:
-        - Keys are stored as: hash(dedup_key_values) -> "1"
-        - State is checkpointed with the partition via SlateDB
-        - On recovery, SlateDB state is restored automatically
     """
 
     def __init__(self, config: HashDedupeConfig, runtime: OperatorRuntime):
@@ -104,14 +97,14 @@ class HashDedupeOperator(ShuffleOperator):
         return self.dedupe_config.dedup_keys
 
     def process_data(self, table: pa.Table) -> Optional[pa.Table]:
-        """Deduplicate the input data.
+        """Deduplicate the input data within the batch.
 
-        For each row:
-        1. Use DuckDB to dedupe within the batch
-        2. For each unique row, check SlateDB if key was seen
-        3. If not seen, output the row and mark as seen in SlateDB
+        Uses DuckDB for efficient batch-level deduplication.
+        Since data is shuffled by dedup keys, same keys end up in the
+        same partition, making batch-level dedup effective.
 
-        This is stateless - all state operations go directly to SlateDB.
+        For exact cross-batch deduplication at 10B+ scale,
+        use the MinHash + CC flow instead.
         """
         if not self.dedup_keys:
             # No dedup keys specified, pass through
@@ -130,63 +123,4 @@ class HashDedupeOperator(ShuffleOperator):
         if deduped_table.num_rows == 0:
             return None
 
-        # If no state store, only do batch-level dedup
-        if self.state_store is None:
-            self.logger.warning(
-                "No state store configured - only performing batch-level deduplication"
-            )
-            return deduped_table
-
-        # Cross-batch dedup via state store (synchronous)
-        output_rows = []
-        keys_to_mark = []
-
-        # Compute partition from first row's key (all rows in batch should go to same partition)
-        partition_id = self._compute_partition_for_row(deduped_table, 0)
-        self._ensure_partition_acquired(partition_id)
-
-        for i in range(deduped_table.num_rows):
-            key_hash = self._compute_key_hash(deduped_table, i)
-
-            # Check if key exists in state store (synchronous)
-            existing = self.state_store.get(partition_id, key_hash)
-
-            if existing is None:
-                # Key not seen before - output it
-                output_rows.append(i)
-                keys_to_mark.append(key_hash)
-
-        # Mark new keys as seen (synchronous)
-        for key_hash in keys_to_mark:
-            self.state_store.put(partition_id, key_hash, b"1")
-
-        if not output_rows:
-            return None
-
-        # Select only the non-duplicate rows
-        return deduped_table.take(output_rows)
-
-    def _compute_partition_for_row(self, table: pa.Table, row_idx: int) -> int:
-        """Compute partition ID for a row based on key columns."""
-        import hashlib
-
-        key_parts = []
-        for col_name in self.dedup_keys:
-            value = table.column(col_name)[row_idx].as_py()
-            key_parts.append(str(value))
-
-        key_str = "|".join(key_parts)
-        h = int(hashlib.sha256(key_str.encode()).hexdigest(), 16)
-        return h % self.num_partitions
-
-    def _compute_key_hash(self, table: pa.Table, row_idx: int) -> bytes:
-        """Compute a hash of the dedup key values for a row."""
-        import hashlib
-
-        key_parts = []
-        for col_name in self.dedup_keys:
-            value = table.column(col_name)[row_idx].as_py()
-            key_parts.append(str(value))
-
-        key_str = "|".join(key_parts)
-        return hashlib.sha256(key_str.encode()).digest()[:16]
+        return deduped_table

@@ -35,7 +35,6 @@ import os
 import pytest
 import ray
 
-from solstice.core.operator import SemanticGuarantee
 from solstice.runtime.ray_runner import RayJobRunner
 from solstice.testing.fault_injection import (
     reset_fault_injector,
@@ -184,7 +183,6 @@ class TestExactlyOnceSemantics(StabilityTestBase):
             source_data=source_data,
         )
         # Enable exactly-once mode
-        job.config.semantic_guarantee = SemanticGuarantee.EXACTLY_ONCE
 
         runner = RayJobRunner(job)
         try:
@@ -278,7 +276,6 @@ class TestExactlyOnceSemantics(StabilityTestBase):
                 remainder=FILTER_REMAINDER,
             ),
         )
-        job.config.semantic_guarantee = SemanticGuarantee.EXACTLY_ONCE
 
         runner = RayJobRunner(job)
         try:
@@ -321,7 +318,6 @@ class TestExactlyOnceSemantics(StabilityTestBase):
             source_data=source_data,
             transform_config=ExplodeConfig(factor=EXPLODE_FACTOR),
         )
-        job.config.semantic_guarantee = SemanticGuarantee.EXACTLY_ONCE
 
         runner = RayJobRunner(job)
         try:
@@ -495,7 +491,6 @@ class TestCheckpointRecovery(StabilityTestBase):
                 remainder=FILTER_REMAINDER,
             ),
         )
-        job.config.semantic_guarantee = SemanticGuarantee.EXACTLY_ONCE
 
         runner = RayJobRunner(job)
         try:
@@ -1173,7 +1168,6 @@ class TestCombinedFaultScenarios(StabilityTestBase):
                 remainder=FILTER_REMAINDER,
             ),
         )
-        job.config.semantic_guarantee = SemanticGuarantee.EXACTLY_ONCE
 
         runner = RayJobRunner(job)
         try:

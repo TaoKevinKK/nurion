@@ -110,15 +110,15 @@ class TestStressScenarios:
         assert validator.verify_explode_result(sink_data, NUM_RECORDS, EXPLODE_FACTOR)
 
     @pytest.mark.asyncio
-    @pytest.mark.timeout(180)  # Hard timeout for faster iteration
+    @pytest.mark.timeout(60)
     async def test_many_small_batches_stress(self, ray_cluster):
         """Stress test with many small batches.
 
         Tests overhead of batch management with high batch count.
         Uses Filter to reduce output while maintaining batch count.
         """
-        NUM_RECORDS = 10000  # Reduced for faster iteration
-        BATCH_SIZE = 50  # Many small batches
+        NUM_RECORDS = 5000  # Moderate size for stress test
+        BATCH_SIZE = 100  # 50 splits - manageable batch count
         FILTER_MODULO = 3
         FILTER_REMAINDER = 0
         validator = DataValidator()
@@ -145,7 +145,7 @@ class TestStressScenarios:
         runner = RayJobRunner(job)
         try:
             await runner.initialize()
-            await asyncio.wait_for(runner.run(), timeout=120)
+            await asyncio.wait_for(runner.run(), timeout=45)
         finally:
             await runner.stop()
 

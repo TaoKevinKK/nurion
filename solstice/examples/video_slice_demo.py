@@ -25,7 +25,7 @@ Usage:
 
     # Submit job with excludes
     ray job submit --working-dir . \\
-        --runtime-env-json '{"excludes": ["tests/testdata/", "java/", "*.jar", "*.mp4", "*.mkv", "*.avi", ".venv/", "__pycache__/", ".pytest_cache/", ".ruff_cache/", "*.egg-info/", "tansu-py/target/"]}' \\
+        --runtime-env-json '{"excludes": ["tests/testdata/", "java/", "*.jar", "*.mp4", "*.mkv", "*.avi", ".venv/", "__pycache__/", ".pytest_cache/", ".ruff_cache/", "*.egg-info/", "workqueue-rs/target/"]}' \\
         -- python examples/video_slice_demo.py --job-id my_job --wait-time 300
 """
 
@@ -114,7 +114,7 @@ def main(job_id: str, wait_time: int):
         "filter_modulo": 4,
         "scene_threshold": 0.4,
         "split_size": 2,
-        "tansu_storage_url": "memory://",
+        "workqueue_db_path": "memory://",
         "scene_parallelism": (1, 2),  # Lower parallelism
         "slice_parallelism": (1, 2),
         "filter_parallelism": (1, 2),

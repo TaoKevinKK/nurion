@@ -31,7 +31,6 @@ from solstice.core.job import Job, JobConfig
 from solstice.core.stage import Stage
 from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime
 from solstice.core.models import Split, SplitPayload
-from solstice.queue import QueueType
 from solstice.runtime.ray_runner import RayJobRunner
 from solstice.operators.sources.source import SourceMaster
 
@@ -218,10 +217,7 @@ MockSinkConfig.operator_class = MockSinkOperator
 @pytest.fixture
 def simple_job():
     """Create a simple single-stage job."""
-    job = Job(
-        job_id="test_simple",
-        config=JobConfig(queue_type=QueueType.TANSU),
-    )
+    job = Job(job_id="test_simple")
 
     source_stage = Stage(
         stage_id="source",
@@ -276,53 +272,6 @@ class TestRayJobRunner:
         await runner.stop()  # Should not raise
 
         assert not runner.is_running
-
-
-class TestExactlyOnce:
-    """Tests for exactly-once semantics."""
-
-    @pytest.mark.asyncio
-    async def test_offset_tracking(self):
-        """Test that offsets are tracked correctly."""
-        from solstice.queue import MemoryBroker, MemoryClient
-
-        # Create a shared queue (queue methods are now synchronous)
-        broker = MemoryBroker()
-        broker.start()
-        client = MemoryClient(broker)
-        client.start()
-
-        topic = "test_topic"
-        group = "test_group"
-        client.create_topic(topic)
-
-        # Produce messages
-        from solstice.core.stage_master import QueueMessage
-
-        for i in range(10):
-            msg = QueueMessage(
-                message_id=f"msg_{i}",
-                split_id=f"split_{i}",
-                payload_key=f"ref_{i}",
-            )
-            client.produce(topic, msg.to_bytes())
-
-        # Consume and commit
-        records = client.fetch(topic, offset=0, max_records=5)
-        assert len(records) == 5
-
-        client.commit_offset(group, topic, 5)
-
-        # Verify committed offset
-        committed = client.get_committed_offset(group, topic)
-        assert committed == 5
-
-        # Resume from committed
-        remaining = client.fetch(topic, offset=committed)
-        assert len(remaining) == 5
-
-        client.stop()
-        broker.stop()
 
 
 # ============================================================================

@@ -15,15 +15,15 @@
 """Queue and network fault tests for distributed Solstice pipelines.
 
 These are P1 tests that verify:
-- Tansu broker restart recovery (with SQLite persistence)
+- WorkQueue broker restart recovery (with SlateDB persistence)
 - Connection timeout handling
 - Slow network / backpressure behavior
-- Produce/fetch retry on failure
+- Push/claim retry on failure
 
-All tests use real Ray clusters and Tansu queues (no mocks).
+All tests use real Ray clusters and WorkQueue brokers (no mocks).
 Data volumes: 10,000+ records with complex operators.
 
-Note: Broker restart tests use SQLite storage to ensure data persists
+Note: Broker restart tests use file storage to ensure data persists
 across restarts. Memory-backed storage loses all data on restart.
 """
 
@@ -70,15 +70,15 @@ class TestQueueFaultRecovery:
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(120)
-    async def test_tansu_broker_restart(self, ray_cluster, tansu_sqlite_storage_url):
-        """Tansu broker restart: auto-reconnect, no data loss with SQLite storage.
+    async def test_workqueue_broker_restart(self, ray_cluster, workqueue_storage_path):
+        """WorkQueue broker restart: auto-reconnect, no data loss with file storage.
 
-        This test verifies that after broker restart with SQLite persistence:
+        This test verifies that after broker restart with SlateDB persistence:
         1. Queue data persists across broker restarts
         2. Pipeline can reconnect and continue processing
         3. All data is eventually processed without loss
 
-        Uses SQLite storage backend to ensure data durability.
+        Uses file storage backend to ensure data durability.
         """
         NUM_RECORDS = 1500  # Smaller dataset for faster test
         FILTER_MODULO = 4
@@ -102,7 +102,7 @@ class TestQueueFaultRecovery:
                 modulo=FILTER_MODULO,
                 remainder=FILTER_REMAINDER,
             ),
-            tansu_storage_url=tansu_sqlite_storage_url,  # Use SQLite for persistence
+            workqueue_db_path=workqueue_storage_path,  # Use file storage for persistence
         )
 
         runner = RayJobRunner(job)
@@ -127,23 +127,23 @@ class TestQueueFaultRecovery:
             # because the underlying Rust/Tokio runtime may have residual state
             try:
                 if runner._shared_broker is not None:
-                    from solstice.queue.tansu import TansuBrokerManager
+                    from solstice.queue import WorkQueueBrokerManager
 
                     old_broker = runner._shared_broker
-                    old_host = old_broker.host
-                    old_port = old_broker.port
-                    old_storage_url = old_broker.storage_url
+                    old_url = old_broker.get_broker_url()
+                    old_host, old_port_str = old_url.rsplit(":", 1)
+                    old_port = int(old_port_str)
+                    old_db_path = old_broker._db_path
 
                     # Stop the old broker and wait for clean shutdown
                     old_broker.stop()
                     await asyncio.sleep(1.0)  # Wait for port to be released
 
                     # Create and start a new broker instance on the same port
-                    # Using the same SQLite storage URL ensures data persistence
-                    new_broker = TansuBrokerManager(
-                        storage_url=old_storage_url,
+                    # Using the same db_path ensures data persistence
+                    new_broker = WorkQueueBrokerManager(
+                        db_path=old_db_path,
                         port=old_port,
-                        host=old_host,
                     )
                     new_broker.start()
                     await asyncio.sleep(0.5)  # Wait for broker to be ready
@@ -157,7 +157,7 @@ class TestQueueFaultRecovery:
                 pytest.skip(f"Could not restart broker: {e}")
 
             # Wait for pipeline to complete
-            # With SQLite storage, pipeline should complete successfully after restart
+            # With file storage, pipeline should complete successfully after restart
             await asyncio.wait_for(run_task, timeout=60)
         finally:
             await runner.stop()
@@ -165,7 +165,7 @@ class TestQueueFaultRecovery:
         if broker_restarted:
             sink_data = get_sink_records(self.collector_name)
 
-            # With SQLite storage, all data should be processed
+            # With file storage, all data should be processed
             # Allow some tolerance for at-least-once semantics (may have duplicates)
             assert len(sink_data) >= expected_count, (
                 f"Data loss detected: expected at least {expected_count}, got {len(sink_data)}"
@@ -181,7 +181,7 @@ class TestQueueFaultRecovery:
             assert validator.verify_checksums(source_data, sink_data)
 
     @pytest.mark.asyncio
-    async def test_tansu_connection_timeout(self, ray_cluster):
+    async def test_workqueue_connection_timeout(self, ray_cluster):
         """Connection timeout: correct retry, no panic.
 
         This test verifies the system handles connection issues gracefully
@@ -224,7 +224,7 @@ class TestQueueFaultRecovery:
         assert validator.verify_explode_result(sink_data, NUM_RECORDS, EXPLODE_FACTOR)
 
     @pytest.mark.asyncio
-    async def test_tansu_slow_network(self, ray_cluster):
+    async def test_workqueue_slow_network(self, ray_cluster):
         """Slow network: backpressure should work correctly, no data loss.
 
         Simulates slow network by using slow transform operators combined

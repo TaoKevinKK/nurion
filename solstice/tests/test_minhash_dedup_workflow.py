@@ -194,13 +194,52 @@ def create_test_documents(path: str) -> Dict[str, Any]:
     }
 
 
+def get_docs_to_remove(plagiaries: Dict[str, str]) -> set:
+    """Get doc_ids that should be removed based on ground truth.
+
+    For each plagiary pair (doc1, doc2), the larger doc_id should be removed.
+
+    Args:
+        plagiaries: Bidirectional dict of plagiary pairs
+
+    Returns:
+        Set of doc_ids that should be removed (larger doc from each pair)
+    """
+    docs_to_remove = set()
+    seen_pairs = set()
+
+    for doc1, doc2 in plagiaries.items():
+        pair = tuple(sorted([doc1, doc2]))
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+
+        # The larger doc_id should be removed
+        if doc1 < doc2:
+            docs_to_remove.add(doc2)
+        else:
+            docs_to_remove.add(doc1)
+
+    return docs_to_remove
+
+
 @pytest.mark.workflow
 @pytest.mark.timeout(600)
 class TestMinHashDedupWorkflowExecution:
     """End-to-end workflow tests for MinHash deduplication."""
 
     def test_basic_execution(self, ray_cluster):
-        """Test workflow execution."""
+        """Test workflow execution and verify results match ground truth.
+
+        Verification:
+        1. For each truth pair, at most one doc should be kept
+        2. If a doc from a truth pair is kept, it should be the smaller doc_id
+        3. No duplicate doc_ids in output
+
+        Note: Current pipeline limitation - only documents that have candidate
+        pairs flow through the CC stage and get output. Documents without any
+        similar matches are not included in the output.
+        """
         tmp_dir = tempfile.mkdtemp(prefix="minhash_exec_test_")
         input_path = os.path.join(tmp_dir, "input.lance")
         output_path = os.path.join(tmp_dir, "output.lance")
@@ -208,11 +247,16 @@ class TestMinHashDedupWorkflowExecution:
         try:
             # Load all 10000 documents
             metadata = create_test_documents(input_path)
+            plagiaries = metadata["plagiaries"]
+
+            # Get docs that should be removed (larger doc from each truth pair)
+            docs_to_remove = get_docs_to_remove(plagiaries)
 
             logger.info(
                 f"Test data loaded:\n"
                 f"  - Total docs: {metadata['total_docs']}\n"
-                f"  - Truth pairs: {metadata['num_truth_pairs']}"
+                f"  - Truth pairs: {metadata['num_truth_pairs']}\n"
+                f"  - Docs to remove: {len(docs_to_remove)}"
             )
 
             from workflows.minhash_dedup import create_job
@@ -231,7 +275,7 @@ class TestMinHashDedupWorkflowExecution:
                     "num_hashes": 10,
                     "num_bands": 2,  # 10/2 = 5 rows per band
                     "max_iterations": 20,
-                    "tansu_storage_url": "memory://",
+                    "workqueue_db_path": "memory://",
                     "output_format": "lance",
                     "num_partitions": 8,
                     # Resources for 10k doc test
@@ -270,21 +314,20 @@ class TestMinHashDedupWorkflowExecution:
                 f"Results:\n  - Input: {metadata['total_docs']}\n  - Output: {result_count}"
             )
 
-            # === VERIFICATION (same logic as runMinHashExample.py) ===
+            # === VERIFICATION ===
 
             # 1. No duplicate doc_ids in output
             assert len(output_doc_ids) == len(output_id_set), (
-                f"Duplicate doc_ids in output: {len(output_doc_ids)} rows but only {len(output_id_set)} unique"
+                f"Duplicate doc_ids in output: {len(output_doc_ids)} rows "
+                f"but only {len(output_id_set)} unique"
             )
 
-            # 2. For each truth pair: at most one should be in output
-            #    (if both are in output, dedup failed for that pair)
-            plagiaries = metadata["plagiaries"]
+            # 2. Check truth pair handling
             both_kept = []
-            one_kept = 0
+            correct_kept = 0  # Kept the smaller doc_id
+            wrong_kept = 0  # Kept the larger doc_id (should be removed)
             neither_kept = 0
 
-            # Count unique pairs (since plagiaries is bidirectional)
             seen_pairs = set()
             for doc1, doc2 in plagiaries.items():
                 pair = tuple(sorted([doc1, doc2]))
@@ -292,37 +335,54 @@ class TestMinHashDedupWorkflowExecution:
                     continue
                 seen_pairs.add(pair)
 
-                doc1_in = doc1 in output_id_set
-                doc2_in = doc2 in output_id_set
+                smaller, larger = (doc1, doc2) if doc1 < doc2 else (doc2, doc1)
+                smaller_in = smaller in output_id_set
+                larger_in = larger in output_id_set
 
-                if doc1_in and doc2_in:
-                    both_kept.append(f"{doc1} and {doc2}")
-                elif doc1_in or doc2_in:
-                    one_kept += 1
+                if smaller_in and larger_in:
+                    both_kept.append(f"{smaller} and {larger}")
+                elif smaller_in:
+                    correct_kept += 1
+                elif larger_in:
+                    wrong_kept += 1
                 else:
                     neither_kept += 1
 
             logger.info(
                 f"\nDedup results:\n"
-                f"  - Truth pairs with exactly one kept: {one_kept}/{metadata['num_truth_pairs']}\n"
-                f"  - Truth pairs with both kept (dedup failed): {len(both_kept)}\n"
-                f"  - Truth pairs with neither kept: {neither_kept}\n"
-                f"  - Output count: {result_count}"
+                f"  - Correct (smaller kept): {correct_kept}/{metadata['num_truth_pairs']}\n"
+                f"  - Wrong (larger kept): {wrong_kept}/{metadata['num_truth_pairs']}\n"
+                f"  - Both kept (dedup failed): {len(both_kept)}\n"
+                f"  - Neither kept: {neither_kept}"
             )
 
-            # Dedup should not keep both docs from any truth pair
+            # 3. Dedup should not keep both docs from any truth pair
             assert len(both_kept) == 0, (
                 f"Dedup failed - both docs kept for {len(both_kept)} pairs:\n"
                 + "\n".join(both_kept[:10])
             )
 
-            # At least some truth pairs should have one doc kept (recall > 0)
-            recall = (
-                one_kept / metadata["num_truth_pairs"] * 100
-                if metadata["num_truth_pairs"] > 0
-                else 0
+            # 4. Output should not contain any docs that should be removed
+            # (i.e., larger doc from truth pairs)
+            wrongly_kept = output_id_set & docs_to_remove
+            assert len(wrongly_kept) == 0, (
+                f"Output contains {len(wrongly_kept)} docs that should have been "
+                f"removed (larger doc from truth pair):\n" + "\n".join(list(wrongly_kept)[:10])
             )
-            logger.info(f"  - Recall: {recall:.1f}%")
+
+            # 5. Check dedup precision: among pairs that were detected,
+            # how many were correctly deduped
+            detected_pairs = correct_kept + wrong_kept + len(both_kept)
+            if detected_pairs > 0:
+                precision = correct_kept / detected_pairs * 100
+                logger.info(
+                    f"\nPrecision (among detected pairs):\n"
+                    f"  - Detected pairs: {detected_pairs}/{metadata['num_truth_pairs']}\n"
+                    f"  - Correctly deduped: {correct_kept}\n"
+                    f"  - Precision: {precision:.1f}%"
+                )
+                # Precision should be 100% - all detected pairs should be correctly deduped
+                assert precision == 100, f"Precision not 100%: {precision:.1f}%"
 
         finally:
             if Path(tmp_dir).exists():

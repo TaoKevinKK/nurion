@@ -89,8 +89,8 @@ class SparkSourceConfig(OperatorConfig):
     parallelism: Optional[int] = None
 
     # SourceConfig fields for master
-    tansu_storage_url: str = "memory://"
-    """Tansu storage URL (memory://, s3://)."""
+    workqueue_db_path: str = "memory://"
+    """WorkQueue storage path (memory://, file://)."""
 
 
 @operator(SparkSourceConfig)

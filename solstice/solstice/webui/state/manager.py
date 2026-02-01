@@ -14,7 +14,7 @@
 
 """Job state manager - stateless message consumer with async writes.
 
-JobStateManager consumes state messages from Tansu and writes directly to storage.
+JobStateManager consumes state messages from WorkQueue and writes directly to storage.
 Uses SlateDB async API and WriteBatch for high throughput.
 
 Design principles:
@@ -37,7 +37,7 @@ from solstice.webui.state.messages import StateMessage, StateMessageType
 from solstice.utils.logging import create_ray_logger
 
 if TYPE_CHECKING:
-    from solstice.queue import QueueClient
+    from solstice.queue import WorkQueueQueueClient
     from solstice.webui.storage import JobStorage
 
 
@@ -50,13 +50,13 @@ class JobStateManager:
     def __init__(
         self,
         job_id: str,
-        queue_client: "QueueClient",
-        state_topic: str,
+        queue_client: "WorkQueueQueueClient",
+        state_queue_name: str,
         storage: "JobStorage",
     ):
         self.job_id = job_id
         self.queue_client = queue_client
-        self.state_topic = state_topic
+        self.state_queue_name = state_queue_name
         self.storage = storage
 
         self.logger = create_ray_logger(f"JobStateManager-{job_id}")
@@ -65,7 +65,7 @@ class JobStateManager:
         self._consume_task: Optional[asyncio.Task] = None
 
     async def start(self) -> None:
-        """Start consuming from state topic."""
+        """Start consuming from state queue."""
         if self._running:
             return
 
@@ -95,19 +95,19 @@ class JobStateManager:
         last_log_time = time.time()
         fetch_count = 0
 
-        self.logger.info(f"Starting consume loop for topic {self.state_topic}")
+        self.logger.info(f"Starting consume loop for queue {self.state_queue_name}")
 
         while self._running:
             try:
                 fetch_count += 1
                 if fetch_count <= 5:
                     self.logger.info(f"Fetch #{fetch_count}: starting...")
-                # Use short timeout and yield control frequently
-                records = self.queue_client.fetch(
-                    self.state_topic,
-                    None,  # offset
-                    100,  # max_records
-                    100,  # timeout_ms - short to avoid blocking
+
+                # Claim messages from WorkQueue
+                records = self.queue_client.claim(
+                    self.state_queue_name,
+                    batch_size=100,
+                    timeout_ms=100,  # Short timeout to avoid blocking
                 )
 
                 if fetch_count <= 5:
@@ -118,16 +118,27 @@ class JobStateManager:
                 if records:
                     # Process all records into a single batch
                     batch = WriteBatch()
+                    msg_ids = []
                     for record in records:
                         try:
-                            message = StateMessage.from_bytes(record.value)
+                            message = StateMessage.from_bytes(record.data)
                             self._add_to_batch(batch, message)
                             message_count += 1
+                            msg_ids.append(record.msg_id)
                         except Exception as e:
                             self.logger.warning(f"Failed to parse message: {e}")
+                            # Still ack the message to avoid reprocessing
+                            msg_ids.append(record.msg_id)
 
                     # Write batch async (non-blocking, don't wait for durable)
                     await self.storage.db.write_with_options_async(batch, await_durable=False)
+
+                    # Ack all processed messages
+                    if msg_ids:
+                        try:
+                            self.queue_client.ack(self.state_queue_name, msg_ids)
+                        except Exception as e:
+                            self.logger.warning(f"Failed to ack messages: {e}")
 
                 # Log progress every 30 seconds
                 now = time.time()
@@ -228,7 +239,6 @@ class JobStateManager:
             "stage_id": stage_id,
             "status": status,
             "timestamp": msg.timestamp,
-            "assigned_partitions": msg.payload.get("assigned_partitions", []),
             "reason": msg.payload.get("reason", ""),
         }
         if status == "STOPPED":
@@ -250,23 +260,8 @@ class JobStateManager:
             "stage_id": stage_id,
             "status": msg.payload.get("status", "RUNNING"),
             "timestamp": msg.timestamp,
-            "assigned_partitions": msg.payload.get("assigned_partitions", []),
-            "partition_offsets": msg.payload.get("partition_offsets", {}),
         }
         batch.put(key.encode(), json.dumps(data).encode())
-
-        # Store partition offsets as time-series
-        partition_offsets = msg.payload.get("partition_offsets", {})
-        for partition_id, offset in partition_offsets.items():
-            offset_key = f"offset:{stage_id}:{partition_id}:{int(msg.timestamp * 1000)}"
-            offset_data = {
-                "ts": msg.timestamp,
-                "stage_id": stage_id,
-                "partition_id": int(partition_id),
-                "offset": offset,
-                "worker_id": worker_id,
-            }
-            batch.put(offset_key.encode(), json.dumps(offset_data).encode())
 
     def _batch_split_metrics(self, batch: WriteBatch, msg: StateMessage) -> None:
         """Add split metrics to batch."""
@@ -274,16 +269,14 @@ class JobStateManager:
         metrics = msg.payload.get("metrics", [])
 
         for metric in metrics:
-            partition_id = metric.get("partition_id", 0)
-            offset = metric.get("offset", 0)
+            msg_id = metric.get("msg_id", "")
             timestamp = metric.get("timestamp", msg.timestamp)
 
-            key = f"split:{stage_id}:{partition_id}:{offset}"
+            key = f"split:{stage_id}:{msg_id}"
             data = {
                 "ts": timestamp,
                 "stage_id": stage_id,
-                "partition_id": partition_id,
-                "offset": offset,
+                "msg_id": msg_id,
                 "worker_id": metric.get("worker_id", ""),
                 "process_time_ms": metric.get("process_time_ms", 0),
                 "input_records": metric.get("input_records", 0),

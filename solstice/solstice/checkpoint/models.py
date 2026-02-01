@@ -43,14 +43,14 @@ class PartitionCheckpointData:
     """Checkpoint data for a single partition.
 
     This captures everything needed to restore a partition's state:
-    - Input offset: Where to resume consuming from Tansu
+    - Input offset: Where to resume consuming from queue
     - State snapshot: SlateDB checkpoint ID for state restoration
 
     Note: No worker_id - any worker can restore this partition.
     """
 
     partition_id: int
-    input_offset: int  # Tansu committed offset
+    input_offset: int  # Queue committed offset
     state_snapshot_id: Optional[str] = None  # SlateDB checkpoint ID
     state_snapshot_path: Optional[str] = None  # Full path to snapshot
     output_offset: Optional[int] = None  # Output queue offset (if applicable)

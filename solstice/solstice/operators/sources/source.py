@@ -16,7 +16,7 @@
 
 SourceMaster is responsible for:
 1. Generating splits via the abstract plan_splits() method
-2. Writing split metadata to a persistent queue (Tansu broker)
+2. Writing split metadata to a source queue (WorkQueue)
 3. Spawning workers that consume from this queue and process data
 
 Architecture:
@@ -24,16 +24,16 @@ Architecture:
     │                      SourceMaster                               │
     │                                                                 │
     │  ┌─────────────────────────────────────────────────────────┐   │
-    │  │              Source Queue (Tansu, persistent)           │   │
+    │  │              Source Queue (WorkQueue)                    │   │
     │  │  - Split metadata written by plan_splits()              │   │
-    │  │  - Enables exactly-once via offset tracking             │   │
+    │  │  - Workers compete via claim() for messages             │   │
     │  └─────────────────────────────────────────────────────────┘   │
     │                           ▲                                     │
-    │                           │ produce splits                      │
+    │                           │ push splits                         │
     │  plan_splits() ───────────┘                                    │
     │                                                                 │
     │                           │                                     │
-    │                           ▼ workers consume                     │
+    │                           ▼ workers claim                       │
     │  ┌────────────┐  ┌────────────┐  ┌────────────┐               │
     │  │  Worker 1  │  │  Worker 2  │  │  Worker N  │               │
     │  │ (process)  │  │ (process)  │  │ (process)  │               │
@@ -48,10 +48,10 @@ Architecture:
     └─────────────────────────────────────────────────────────────────┘
 
 Key design decisions:
-- SourceMaster uses TansuBrokerManager + TansuQueueClient for source queue
-- Split metadata is written to source queue, workers read actual data
-- Workers consume from source queue, produce to output queue
-- This enables crash recovery and exactly-once semantics
+- SourceMaster uses WorkQueue for source queue
+- Split metadata is pushed to source queue, workers read actual data
+- Workers claim from source queue, produce to output queue
+- No partition assignment - workers compete for messages
 """
 
 from __future__ import annotations
@@ -61,7 +61,6 @@ import time
 from abc import abstractmethod
 from typing import TYPE_CHECKING, Iterator, Optional
 
-from confluent_kafka import KafkaException
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -78,12 +77,8 @@ from solstice.core.stage_master import (
     StageMaster,
 )
 from solstice.queue import (
-    QueueType,
-    QueueBroker,
-    QueueClient,
-    TansuQueueClient,
-    MemoryBroker,
-    MemoryClient,
+    WorkQueueBrokerManager,
+    WorkQueueQueueClient,
 )
 from solstice.utils.logging import create_ray_logger
 
@@ -95,9 +90,7 @@ if TYPE_CHECKING:
 from solstice.testing.fault_injection import InjectedFaultError
 
 # Exceptions that indicate transient failures and should be retried.
-# InjectedFaultError is included for fault injection testing.
-# In production, Kafka/Tansu errors raise KafkaException.
-_RETRYABLE_EXCEPTIONS = (KafkaException, OSError, TimeoutError, InjectedFaultError)
+_RETRYABLE_EXCEPTIONS = (OSError, TimeoutError, InjectedFaultError)
 
 
 class SourceMaster(StageMaster):
@@ -105,14 +98,14 @@ class SourceMaster(StageMaster):
 
     SourceMaster extends StageMaster with split generation capability:
     1. Generate splits via plan_splits()
-    2. Write split metadata to a persistent source queue
-    3. Spawn workers that consume from source queue
+    2. Write split metadata to a source queue
+    3. Spawn workers that claim from source queue
     4. Workers produce output to output queue (for downstream stages)
 
     This design ensures:
     - Split planning is deterministic and persistent
-    - Crash recovery can resume from last committed offset
-    - Workers only need to consume from queue (no special source logic)
+    - Workers compete for messages via claim()
+    - No partition assignment needed
 
     Subclasses must implement:
     - plan_splits() -> Iterator[Split]: Generate splits for this source
@@ -134,14 +127,14 @@ class SourceMaster(StageMaster):
         )
 
         # Source queue (for split metadata, distinct from output queue)
-        # Broker manages lifecycle, client handles produce/consume
-        self._source_broker: Optional[QueueBroker] = None
-        self._source_client: Optional[QueueClient] = None
-        self._source_topic = f"{job_id}_{self.stage_id}_source"
+        self._source_broker: Optional[WorkQueueBrokerManager] = None
+        self._source_client: Optional[WorkQueueQueueClient] = None
+        self._source_queue_name = f"{job_id}_{self.stage_id}_source"
         self._source_endpoint: Optional[QueueEndpoint] = None
 
         # Metrics
         self._splits_produced = 0
+        self._splits_production_done = False
 
         # Backpressure configuration (from stage)
         self._backpressure_threshold_queue_size = stage.backpressure_threshold_queue_size
@@ -149,65 +142,32 @@ class SourceMaster(StageMaster):
         # Override logger
         self.logger = create_ray_logger(f"SourceMaster-{self.stage_id}")
 
-    async def _create_source_queue(self) -> QueueClient:
-        """Connect to shared broker and create source queue topic.
+    async def _create_source_queue(self) -> WorkQueueQueueClient:
+        """Connect to shared broker and create source queue.
 
         All stages use the same shared broker managed by RayJobRunner.
-        This reduces resource usage and improves stability.
 
         Returns:
-            QueueClient for producing/consuming messages.
+            WorkQueueQueueClient for pushing/claiming messages.
         """
-        if self.runtime.queue_type == QueueType.MEMORY:
-            # MEMORY: Create local broker (for testing only)
-            broker = MemoryBroker()
-            broker.start()
-            self._source_broker = broker
+        endpoint = self.runtime.broker_endpoint
+        if not endpoint:
+            raise RuntimeError(f"Source {self.stage_id}: broker_endpoint is required")
 
-            client = MemoryClient(broker)
-            client.start()
-            self._source_client = client
+        broker_url = f"{endpoint.host}:{endpoint.port}"
+        client = WorkQueueQueueClient(broker_url, worker_id=f"source-{self.stage_id}")
+        client.start()
+        self._source_client = client
 
-            self._source_endpoint = QueueEndpoint(
-                queue_type=QueueType.MEMORY,
-                port=0,
-                storage_url="memory://",
-            )
-            # Create source queue with partitions matching source parallelism
-            source_partitions = self.stage.max_parallelism
-            client.create_topic(self._source_topic, partitions=source_partitions)
-            self.logger.info(
-                f"Created Memory source queue for {self.stage_id} with {source_partitions} partition(s)"
-            )
-            return client
-        else:
-            # TANSU: Connect to shared broker (required)
-            endpoint = self.runtime.shared_broker_endpoint
-            if not endpoint:
-                raise RuntimeError(
-                    f"Source {self.stage_id}: shared_broker_endpoint is required for TANSU queue type"
-                )
+        self._source_endpoint = QueueEndpoint(
+            host=endpoint.host,
+            port=endpoint.port,
+            storage_url=endpoint.storage_url,
+        )
 
-            broker_url = f"{endpoint.host}:{endpoint.port}"
-            tansu_client: QueueClient = TansuQueueClient(broker_url)
-            tansu_client.start()
-            self._source_client = tansu_client
-
-            self._source_endpoint = QueueEndpoint(
-                queue_type=QueueType.TANSU,
-                host=endpoint.host,
-                port=endpoint.port,
-                storage_url=endpoint.storage_url,
-            )
-
-            # Create source queue with partitions matching source parallelism
-            source_partitions = self.stage.max_parallelism
-            tansu_client.create_topic(self._source_topic, partitions=source_partitions)
-            self.logger.info(
-                f"Connected to shared broker at {broker_url} for source {self.stage_id} "
-                f"with {source_partitions} partition(s)"
-            )
-            return tansu_client
+        client.create_queue(self._source_queue_name)
+        self.logger.info(f"Connected to broker at {broker_url} for source {self.stage_id}")
+        return client
 
     async def start(self) -> None:
         """Start the source master.
@@ -225,7 +185,7 @@ class SourceMaster(StageMaster):
         self._running = True
 
         # Create source queue (broker + client for split metadata)
-        self._source_client = await self._create_source_queue()
+        await self._create_source_queue()
 
         # Generate splits and write to source queue
         await self._produce_splits()
@@ -233,13 +193,8 @@ class SourceMaster(StageMaster):
         # Create output queue (for downstream stages)
         self._output_queue = await self._create_queue()
 
-        # Set upstream to our source queue (workers will consume from here)
-        self.upstream_endpoint = self._source_endpoint
-        self.upstream_topic = self._source_topic
-
-        # Update partition manager with source queue info
-        self._partition_manager._upstream_endpoint = self._source_endpoint
-        self._partition_manager._upstream_topic = self._source_topic
+        # Set upstream queue name to our source queue (workers will consume from here)
+        self.upstream_queue_name = self._source_queue_name
 
         # Initialize managers (must be called after output queue is created)
         self._init_managers()
@@ -248,18 +203,16 @@ class SourceMaster(StageMaster):
         assert self._worker_manager is not None
 
         # Update worker manager with source queue info (workers consume from source queue)
-        self._worker_manager.set_target_worker_count(self.stage.min_parallelism)
-        self._worker_manager.set_upstream_config(self._source_endpoint, self._source_topic)
-
-        # Get partition count for worker assignment
-        partition_count = await self._partition_manager.get_upstream_partition_count()
+        self._worker_manager.set_upstream_queue_name(self._source_queue_name)
 
         # Spawn workers (min workers are required, so is_min_worker=True)
         for i in range(self.stage.min_parallelism):
-            await self._worker_manager.spawn_worker(
-                partition_count=partition_count,
-                is_min_worker=True,
-            )
+            await self._worker_manager.spawn_worker(is_min_worker=True)
+
+        # Notify workers that all splits have been produced
+        # (workers will exit when queue is drained + this flag is set)
+        if self._splits_production_done:
+            await self._notify_workers_splits_done()
 
         self.logger.info(
             f"Source {self.stage_id} started: {self._splits_produced} splits, "
@@ -310,62 +263,22 @@ class SourceMaster(StageMaster):
 
         self.logger.info(f"Source {self.stage_id} produced {self._splits_produced} splits to queue")
 
-        # Send EOF marker to all partitions of source queue
-        # This signals workers that no more splits will be produced
-        await self._send_source_eof()
+        # Mark splits production complete - workers will be notified after they are spawned
+        # (see start() method which calls _notify_workers_splits_done())
+        self._splits_production_done = True
 
-    async def _send_source_eof(self) -> None:
-        """Send EOF marker to all partitions of source queue.
+    async def _notify_workers_splits_done(self) -> None:
+        """Notify workers that all splits have been produced.
 
-        Each partition needs an EOF so all source workers can terminate.
+        Workers use the unified exit mechanism:
+        - _upstream_finished flag is set
+        - queue drained (pending=0, claimed=0) check
+
+        This replaces the old EOF message approach.
         """
-        if not self._source_client:
-            return
-
-        from solstice.core.stage_master import QueueMessage
-
-        # Send EOF to each partition with retry logic
-        source_partitions = self.stage.max_parallelism
-
-        for partition in range(source_partitions):
-            eof_message = QueueMessage.create_eof(partition=partition)
-            try:
-                await self._produce_eof_with_retry(eof_message, partition)
-            except Exception as e:
-                # Best effort EOF delivery - continue to next partition
-                self.logger.warning(
-                    f"Failed to send EOF to partition {partition} after retries: {e}"
-                )
-
-        self.logger.info(
-            f"Source {self.stage_id} sent EOF marker to {source_partitions} partition(s)"
-        )
-
-    async def _produce_eof_with_retry(self, eof_message: "QueueMessage", partition: int) -> None:
-        """Produce EOF message with retry logic."""
-
-        def before_sleep_callback(retry_state: RetryCallState) -> None:
-            exc = retry_state.outcome.exception() if retry_state.outcome else None
-            self.logger.warning(
-                f"Retry {retry_state.attempt_number}/3 sending EOF to partition {partition}: {exc}"
-            )
-
-        @retry(
-            stop=stop_after_attempt(3),
-            wait=wait_exponential(multiplier=0.1, min=0.1, max=1.0),
-            retry=retry_if_exception_type(_RETRYABLE_EXCEPTIONS),
-            before_sleep=before_sleep_callback,
-            reraise=True,
-        )
-        async def _do_produce() -> None:
-            assert self._source_client is not None
-            self._source_client.produce(
-                self._source_topic,
-                eof_message.to_bytes(),
-                partition=partition,
-            )
-
-        await _do_produce()
+        if self._worker_manager:
+            await self._worker_manager.notify_upstream_finished()
+            self.logger.info(f"Source {self.stage_id} notified workers: all splits produced")
 
     async def _check_backpressure_before_produce(self) -> bool:
         """Check if we should pause production due to downstream backpressure.
@@ -431,10 +344,8 @@ class SourceMaster(StageMaster):
     async def _produce_split(self, split: Split) -> None:
         """Produce a split to the source queue.
 
-        The split metadata is serialized and written to the queue.
-        Workers will consume this and use the SourceOperator to read actual data.
-
-        Splits are distributed across partitions using round-robin to balance load.
+        The split metadata is serialized and pushed to the queue.
+        Workers will claim this and use the SourceOperator to read actual data.
         """
         # Create message with split metadata
         message = QueueMessage(
@@ -448,18 +359,12 @@ class SourceMaster(StageMaster):
             },
         )
 
-        # Distribute splits across partitions using round-robin
-        source_partitions = self.stage.max_parallelism
-        partition = self._splits_produced % source_partitions
+        # Push to source queue
+        if not self._source_client:
+            raise RuntimeError("Source client not initialized")
+        self._source_client.push(self._source_queue_name, message.to_bytes())
 
-        # Produce to source queue
-        assert self._source_client is not None, "Source client not initialized"
-        offset = self._source_client.produce(
-            self._source_topic, message.to_bytes(), partition=partition
-        )
-        self.logger.debug(
-            f"Produced split {split.split_id} to partition {partition} at offset {offset}"
-        )
+        self.logger.debug(f"Produced split {split.split_id}")
 
     @abstractmethod
     def plan_splits(self) -> Iterator[Split]:
@@ -474,26 +379,18 @@ class SourceMaster(StageMaster):
 
     async def cleanup_queue(self) -> None:
         """Clean up queues. Called by runner after all consumers are done."""
-        # Clean up source client first
         if self._source_client:
             self._source_client.stop()
             self._source_client = None
-
-        # Clean up source broker
-        if self._source_broker:
-            self._source_broker.stop()
-            self._source_broker = None
-
-        # Clean up output queue (parent)
         await super().cleanup_queue()
 
-    def get_source_client(self) -> Optional[QueueClient]:
+    def get_source_client(self) -> Optional[WorkQueueQueueClient]:
         """Get the source queue client (for debugging/testing)."""
         return self._source_client
 
-    def get_source_topic(self) -> str:
-        """Get the source topic name."""
-        return self._source_topic
+    def get_source_queue_name(self) -> str:
+        """Get the source queue name."""
+        return self._source_queue_name
 
     def get_source_endpoint(self) -> Optional[QueueEndpoint]:
         """Get the source endpoint (for debugging/testing)."""
@@ -506,8 +403,8 @@ class SourceMaster(StageMaster):
         # Add source queue size
         if self._source_client:
             try:
-                source_size = self._source_client.get_latest_offset(self._source_topic)
-                status.metrics["source_queue_size"] = source_size
+                stats = self._source_client.get_stats(self._source_queue_name)
+                status.metrics["source_queue_pending"] = stats.get("pending_count", 0)
             except Exception:
                 pass
 

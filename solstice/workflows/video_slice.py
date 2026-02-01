@@ -48,7 +48,6 @@ from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime
 from solstice.core.stage import Stage
 from solstice.operators.sinks import LanceSinkConfig
 from solstice.operators.sources import LanceTableSourceConfig
-from solstice.queue import QueueType
 from solstice.runtime.autoscaler import AutoscaleConfig
 from solstice.utils.remote import ensure_local_file, is_remote_path, restore_s3_object
 
@@ -451,12 +450,10 @@ def create_job(
     }
 
     # Create job with configuration
-    # Use TANSU queue for distributed execution on Ray cluster
     # Configure aggressive autoscaling for batch processing
     job = Job(
         job_id=job_id,
         config=JobConfig(
-            queue_type=QueueType.TANSU,
             ray_init_kwargs=ray_init_kwargs,
             webui=WebUIConfig(
                 enabled=True,

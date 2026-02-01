@@ -12,18 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use pyo3::prelude::*;
-
-mod broker;
-
-use broker::{BrokerConfig, BrokerError, BrokerErrorKind, TansuBroker};
-
-/// Tansu Python bindings - embedded Kafka-compatible broker
-#[pymodule]
-fn tansu_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<BrokerConfig>()?;
-    m.add_class::<BrokerError>()?;
-    m.add_class::<BrokerErrorKind>()?;
-    m.add_class::<TansuBroker>()?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tonic_build::configure()
+        .build_server(true)
+        .build_client(false) // We use Python grpcio for client
+        .compile_protos(&["proto/workqueue.proto"], &["proto/"])?;
     Ok(())
 }

@@ -61,7 +61,6 @@ class ShuffleOperatorConfig(OperatorConfig):
     Attributes:
         partition_keys: Columns to partition by (hash of these determines partition)
         num_partitions: Number of output partitions (default: 1)
-        state_store_path: Inherited from OperatorConfig for stateful operators
     """
 
     partition_keys: List[str] = field(default_factory=list)
@@ -93,7 +92,6 @@ class ShuffleOperator(Operator):
     - DuckDB engine lifecycle
     - Partition ID computation
     - Adding __target_partition column
-    - State store (inherited from Operator)
     """
 
     # Column name for target partition (added to output)
@@ -191,7 +189,6 @@ class ShuffleOperator(Operator):
         if self._engine is not None:
             self._engine.close()
             self._engine = None
-        # State store cleanup is handled by base Operator.close()
         super().close()
 
 

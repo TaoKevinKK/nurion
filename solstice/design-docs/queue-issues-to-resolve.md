@@ -4,31 +4,54 @@ _Analysis Date: December 10, 2025_
 
 ---
 
-## Implementation Status (Updated 2026-01-19)
+## ⚠️ SUPERSEDED BY WORKQUEUE (2026-02-01)
 
-This document analyzed issues found during initial queue implementation. All critical issues have been resolved:
+**This document is now historical.** The Tansu/Kafka partition-based model has been replaced with WorkQueue, a single-queue multi-consumer model.
+
+See: [`work-queue-redesign.md`](./work-queue-redesign.md) for the current design.
+
+### Why WorkQueue?
+
+The partition-based model had fundamental issues:
+- Complex partition management and rebalancing
+- Worker-partition coupling prevented true load balancing
+- Offset-based tracking was error-prone
+- EOF per partition was complicated
+
+### WorkQueue Solution
+
+| Old Issue | WorkQueue Solution |
+|-----------|-------------------|
+| Offset not persisted | **No offsets** - claim-based with server-managed state |
+| Multi-worker coordination | **Work-stealing** - any worker claims any message |
+| Partition management | **No partitions** - single queue per stage |
+| EOF detection | **Unified exit** - `notify_upstream_finished` + queue drained |
+| Consumer group complexity | **Lease-based** - heartbeat + timeout recovery |
+| Exactly-once semantics | **Atomic operations** - `ack_and_forward` with state |
+
+---
+
+## Historical Status (Tansu Era - Before 2026-02)
+
+This section preserved for historical reference:
 
 | Issue | Status | Resolution |
 |-------|--------|------------|
-| **#1 Offset not persisted** | ✅ Fixed | TansuBackend uses Kafka consumer group protocol |
-| **#2 Data in Ray Object Store** | ⚠️ Acceptable | Design choice; S3 backup not yet implemented |
-| **#3 Consumer Group offset not shared** | ✅ Fixed | TansuBackend uses proper consumer groups |
-| **#4 Multi-worker coordination** | ✅ Fixed | PartitionManager assigns partitions to workers |
+| **#1 Offset not persisted** | 🔄 Obsolete | WorkQueue uses claim-based model, no offsets |
+| **#2 Data in Ray Object Store** | ⚠️ Still applies | Design choice; S3 backup not yet implemented |
+| **#3 Consumer Group offset not shared** | 🔄 Obsolete | WorkQueue has no consumer groups |
+| **#4 Multi-worker coordination** | 🔄 Obsolete | WorkQueue uses work-stealing |
 | **#5 Worker failure no restart** | ✅ Fixed | RecoveryManager handles worker failures |
-| **#6 Exception skips message** | ✅ Fixed | FailurePolicy controls behavior (FAIL_FAST/SKIP/RETRY) |
-| **#7 Single partition** | ✅ Fixed | Multi-partition fully implemented (see below) |
+| **#6 Exception skips message** | ✅ Fixed | FailurePolicy controls behavior |
+| **#7 Single partition** | 🔄 Obsolete | WorkQueue has no partitions |
 | **#8 Payload deletion timing** | ⚠️ Acceptable | Not critical for current use cases |
-| **#9 Lag calculation incorrect** | ✅ Fixed | Uses proper queue methods |
+| **#9 Lag calculation incorrect** | 🔄 Obsolete | WorkQueue uses `get_stats()` |
 
-**Multi-Partition Implementation Details:**
-- `PartitionManager`: Computes partition count based on config (`partition_count` or `max_workers`)
-- Topics created with multiple partitions via `create_topic(topic, partitions=N)`
-- Workers get `assigned_partitions` list and poll them round-robin
-- Partition rebalance on worker scale up/down via `update_partitions()`
-- Offset tracking and commit per partition
-- EOF detection per partition
+**Note**: Issues marked 🔄 Obsolete are no longer relevant with the WorkQueue architecture.
 
-**Note**: This document is preserved for historical context. Some analysis may be outdated.
+---
+
+## Historical Analysis (Pre-WorkQueue)
 
 ---
 

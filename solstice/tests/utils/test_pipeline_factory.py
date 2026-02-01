@@ -30,7 +30,6 @@ from solstice.core.models import Split, SplitPayload
 from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime
 from solstice.core.stage import Stage
 from solstice.operators.sources.source import SourceMaster
-from solstice.queue import QueueType
 
 from .collecting_sink import CollectingSinkConfig
 
@@ -471,9 +470,10 @@ def create_test_pipeline(
     with_checksum: bool = False,
     source_data: Optional[List[Dict]] = None,
     job_id: Optional[str] = None,
-    queue_type: QueueType = QueueType.TANSU,
     transform_config: Optional[OperatorConfig] = None,
-    tansu_storage_url: str = "memory://",
+    workqueue_db_path: str = "memory://",
+    claim_timeout_secs: float = 2.0,  # Fast recovery for tests (default 2s)
+    recovery_interval_secs: float = 0.5,  # Fast recovery interval for tests (default 0.5s)
 ) -> Job:
     """Create a standard test pipeline for distributed correctness tests.
 
@@ -488,9 +488,10 @@ def create_test_pipeline(
         with_checksum: Include checksum field in records
         source_data: Pre-generated source data (overrides num_records)
         job_id: Optional job ID (auto-generated if not provided)
-        queue_type: Queue type to use (TANSU or MEMORY)
         transform_config: Optional custom transform config
-        tansu_storage_url: Storage URL for Tansu backend (memory://, sqlite://, s3://)
+        workqueue_db_path: Storage URL for WorkQueue backend (memory://, file://)
+        claim_timeout_secs: Seconds before reclaiming messages from dead workers
+        recovery_interval_secs: Interval between recovery task runs
 
     Returns:
         Configured Job instance
@@ -504,7 +505,11 @@ def create_test_pipeline(
 
     job = Job(
         job_id=job_id,
-        config=JobConfig(queue_type=queue_type, tansu_storage_url=tansu_storage_url),
+        config=JobConfig(
+            workqueue_db_path=workqueue_db_path,
+            claim_timeout_secs=claim_timeout_secs,
+            recovery_interval_secs=recovery_interval_secs,
+        ),
     )
 
     # Source stage
@@ -579,10 +584,7 @@ def create_multi_stage_pipeline(
     if job_id is None:
         job_id = f"test_multi_{uuid.uuid4().hex[:8]}"
 
-    job = Job(
-        job_id=job_id,
-        config=JobConfig(queue_type=QueueType.TANSU),
-    )
+    job = Job(job_id=job_id)
 
     # Low CPU requirements for test parallelism
     test_resources = {"num_cpus": 0.1, "num_gpus": 0, "memory": 100 * 1024**2}

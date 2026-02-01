@@ -582,8 +582,8 @@ class TestSparkSourceMaster:
         master._stop_spark()
 
     @pytest.mark.asyncio
-    async def test_full_pipeline_with_queue(self, ray_cluster):
-        """Test complete SparkSource pipeline with TansuBackend queue.
+    async def test_full_pipeline_with_queue(self, ray_cluster, workqueue_backend):
+        """Test complete SparkSource pipeline with WorkQueue queue.
 
         This test verifies the full flow:
         1. SparkSourceMaster starts and creates source queue
@@ -605,9 +605,19 @@ class TestSparkSourceMaster:
         )
 
         from solstice.core.split_payload_store import RaySplitPayloadStore
+        from solstice.core.stage import StageRuntime
+        from solstice.core.stage_master import QueueEndpoint
 
         payload_store = RaySplitPayloadStore(name="test-full-pipeline_store")
-        runtime = make_stage_runtime()
+        runtime = StageRuntime(
+            broker_endpoint=QueueEndpoint(
+                host="localhost",
+                port=workqueue_backend.port,
+                storage_url="memory://",
+            ),
+            upstream_queue_name=None,
+            state_queue_name=None,
+        )
         master = SparkSourceMaster(
             job_id="test-full-pipeline",
             stage=source_stage,

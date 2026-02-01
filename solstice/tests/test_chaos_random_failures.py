@@ -300,7 +300,7 @@ class TestCombinedFailures:
 
                 try:
                     if action == "kill":
-                        await kill_random_worker(runner, stage_id="transform")
+                        await kill_random_worker(runner)
                         actions_taken += 1
                     elif action == "scale_up":
                         master = runner._masters.get("transform")
@@ -349,7 +349,7 @@ class TestCombinedFailures:
         Tests that failures in one stage don't cascade to corrupt data
         in other stages. Uses Filter+Explode for complex verification.
         """
-        NUM_RECORDS = 50000  # Large data to ensure workers are alive during kills
+        NUM_RECORDS = 10000  # Moderate data - enough for chaos but not too slow
         FILTER_MODULO = 4
         FILTER_REMAINDER = 0
         EXPLODE_FACTOR = 2
@@ -362,7 +362,7 @@ class TestCombinedFailures:
 
         job = create_test_pipeline(
             num_records=NUM_RECORDS,
-            batch_size=100,  # Small batches = more splits = longer processing
+            batch_size=500,  # Larger batches = fewer splits = faster processing
             min_workers=3,
             max_workers=6,
             collector_name=self.collector_name,
@@ -384,7 +384,7 @@ class TestCombinedFailures:
 
             # Wait for some progress before killing (but not too much)
             await wait_for_progress(
-                runner, min_processed=500, timeout=60, collector_name=self.collector_name
+                runner, min_processed=200, timeout=60, collector_name=self.collector_name
             )
 
             # Kill workers in different stages

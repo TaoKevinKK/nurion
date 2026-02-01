@@ -72,7 +72,7 @@ class StateMessage:
     payload: Dict[str, Any] = field(default_factory=dict)
 
     def to_bytes(self) -> bytes:
-        """Serialize to bytes for Tansu produce."""
+        """Serialize to bytes for queue produce."""
         return json.dumps(
             {
                 "message_type": self.message_type.value,
@@ -85,7 +85,7 @@ class StateMessage:
 
     @classmethod
     def from_bytes(cls, data: bytes) -> StateMessage:
-        """Deserialize from Tansu consume."""
+        """Deserialize from queue consume."""
         d = json.loads(data.decode("utf-8"))
         return cls(
             message_type=StateMessageType(d["message_type"]),
@@ -117,8 +117,7 @@ class SplitMetric:
 
     Labels (dimensions):
         - stage_id: Which stage processed this
-        - partition_id: Which partition this split came from (strong binding)
-        - offset: Message offset in the partition
+        - msg_id: WorkQueue message ID for this split
         - worker_id: Which worker processed (weak binding, for debugging)
 
     Metrics:
@@ -128,8 +127,7 @@ class SplitMetric:
     """
 
     stage_id: str
-    partition_id: int
-    offset: int
+    msg_id: str
     worker_id: str
     process_time_ms: float
     input_records: int = 0
@@ -139,8 +137,7 @@ class SplitMetric:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "stage_id": self.stage_id,
-            "partition_id": self.partition_id,
-            "offset": self.offset,
+            "msg_id": self.msg_id,
             "worker_id": self.worker_id,
             "process_time_ms": self.process_time_ms,
             "input_records": self.input_records,
@@ -152,8 +149,7 @@ class SplitMetric:
     def from_dict(cls, d: Dict[str, Any]) -> SplitMetric:
         return cls(
             stage_id=d["stage_id"],
-            partition_id=d["partition_id"],
-            offset=d["offset"],
+            msg_id=d.get("msg_id", ""),
             worker_id=d["worker_id"],
             process_time_ms=d["process_time_ms"],
             input_records=d.get("input_records", 0),
@@ -190,8 +186,6 @@ def worker_state_message(
     stage_id: str,
     worker_id: str,
     status: str,  # "RUNNING", "IDLE", "STOPPED"
-    assigned_partitions: List[int],
-    partition_offsets: Optional[Dict[int, int]] = None,
 ) -> StateMessage:
     """Create a WORKER_STATE message."""
     return StateMessage(
@@ -201,8 +195,6 @@ def worker_state_message(
         payload={
             "stage_id": stage_id,
             "status": status,
-            "assigned_partitions": assigned_partitions,
-            "partition_offsets": partition_offsets or {},
         },
     )
 
@@ -293,7 +285,6 @@ def worker_started_message(
     job_id: str,
     stage_id: str,
     worker_id: str,
-    assigned_partitions: Optional[list] = None,
 ) -> StateMessage:
     """Create a WORKER_STARTED message."""
     return StateMessage(
@@ -302,7 +293,6 @@ def worker_started_message(
         source_id=worker_id,
         payload={
             "stage_id": stage_id,
-            "assigned_partitions": assigned_partitions or [],
         },
     )
 

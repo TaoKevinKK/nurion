@@ -129,7 +129,7 @@ def test_video_slice_workflow_with_ray(ray_cluster):
                 "filter_modulo": filter_modulo,
                 "scene_threshold": 0.4,
                 "split_size": 2,  # 2 rows per split = 5 splits for 10 videos
-                "tansu_storage_url": "memory://",  # Use memory for Tansu
+                "workqueue_db_path": "memory://",  # Use memory for WorkQueue
                 # Elastic worker counts (min=2, max=4) to test multi-worker scenarios
                 # with resource backoff on limited CPU environments
                 "scene_parallelism": (2, 4),
@@ -144,7 +144,7 @@ def test_video_slice_workflow_with_ray(ray_cluster):
         )
 
         # Ray already initialized by ray_cluster fixture with correct excludes
-        # Job config (queue_type, tansu_storage_url) is set in the workflow
+        # Job config (workqueue_db_path) is set in the workflow
         runner = job.create_ray_runner()
 
         async def run_pipeline():

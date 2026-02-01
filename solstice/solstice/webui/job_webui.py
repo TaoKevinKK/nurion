@@ -88,7 +88,7 @@ class JobWebUI:
                 "job_config": {
                     "job_id": job_runner.job.job_id,
                     "queue_type": job_runner.queue_type.value,
-                    "tansu_storage_url": job_runner.tansu_storage_url,
+                    "workqueue_db_path": job_runner.workqueue_db_path,
                 },
                 "stage_configs": stage_configs,
                 "dag_edges": job_runner.job.dag_edges,

@@ -34,5 +34,9 @@ mvnw.cmd
 .DS_Store?
 ._*
 
+# library
+*.so
+*.dylib
+
 # Test data
 solstice/tests/testdata/resources/

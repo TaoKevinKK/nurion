@@ -38,7 +38,7 @@ class LanceTableSourceConfig(OperatorConfig):
     This unified config is used by both the operator (for reading splits)
     and the master (for planning splits).
 
-    Note: queue_type and tansu_storage_url are configured via JobConfig,
+    Note: queue_type and workqueue_db_path are configured via JobConfig,
     not here. The runner passes these to the master via StageRuntime.
     """
 
@@ -109,7 +109,7 @@ class LanceSourceMaster(SourceMaster):
     """Source master for Lance tables.
 
     Generates splits based on Lance dataset fragments and writes
-    split metadata to a persistent Tansu queue.
+    split metadata to a persistent WorkQueue.
 
     Workers consume from the queue and use LanceTableSource operator
     to read actual data for each split.

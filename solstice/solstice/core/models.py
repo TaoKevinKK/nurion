@@ -32,8 +32,6 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 
 import pyarrow as pa
 
-from solstice.queue import QueueType
-
 
 @dataclass
 class Split:
@@ -103,24 +101,6 @@ class WorkerMetrics:
 
 
 @dataclass
-class PartitionMetrics:
-    """Metrics for a single partition"""
-
-    partition_id: int
-    latest_offset: int
-    committed_offset: int
-    lag: int  # latest_offset - committed_offset
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "partition_id": self.partition_id,
-            "latest_offset": self.latest_offset,
-            "committed_offset": self.committed_offset,
-            "lag": self.lag,
-        }
-
-
-@dataclass
 class StageMetrics:
     """Metrics reported by a stage master"""
 
@@ -135,11 +115,9 @@ class StageMetrics:
     backpressure_active: bool = False
     uptime_secs: float = 0.0
     timestamp: float = field(default_factory=time.time)
-    partition_metrics: Dict[int, PartitionMetrics] = field(
-        default_factory=dict
-    )  # partition_id -> metrics
-    skew_detected: bool = False
-    skew_ratio: float = 0.0  # max_lag / avg_lag (if > 1.0, indicates skew)
+    # Queue stats (pending/claimed counts)
+    pending_count: int = 0
+    claimed_count: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -154,9 +132,8 @@ class StageMetrics:
             "output_buffer_size": self.output_buffer_size,
             "backpressure_active": self.backpressure_active,
             "uptime_secs": self.uptime_secs,
-            "partition_metrics": {pid: pm.to_dict() for pid, pm in self.partition_metrics.items()},
-            "skew_detected": self.skew_detected,
-            "skew_ratio": self.skew_ratio,
+            "pending_count": self.pending_count,
+            "claimed_count": self.claimed_count,
             "timestamp": self.timestamp,
         }
 
@@ -489,7 +466,7 @@ class QueueMessage:
 
     Message types:
     - DATA: Normal data message with payload
-    - EOF: End-of-stream marker, signals no more messages in this partition
+    - EOF: End-of-stream marker, signals no more messages
     """
 
     message_id: str
@@ -524,14 +501,14 @@ class QueueMessage:
         return self.message_type == MessageType.EOF
 
     @classmethod
-    def create_eof(cls, partition: int) -> "QueueMessage":
-        """Create an EOF marker message for a partition."""
+    def create_eof(cls) -> "QueueMessage":
+        """Create an EOF marker message."""
         return cls(
-            message_id=f"eof_partition_{partition}",
+            message_id="eof",
             split_id="",
             payload_key="",
             message_type=MessageType.EOF,
-            metadata={"partition": partition},
+            metadata={},
         )
 
 
@@ -562,38 +539,18 @@ class StageStatus:
 
 @dataclass
 class QueueEndpoint:
-    """Queue connection info that can be serialized to workers.
+    """Queue connection info that can be serialized to workers."""
 
-    Workers use this to create their own queue connections.
-    """
-
-    queue_type: QueueType
     host: str = "localhost"
-    port: int = 9092
-    storage_url: str = "memory://"
+    port: int = 50051
+    storage_url: str = "file:///tmp/workqueue"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "queue_type": self.queue_type.value,
             "host": self.host,
             "port": self.port,
             "storage_url": self.storage_url,
         }
-
-
-def create_queue_endpoint(
-    queue_type: QueueType,
-    host: str | None = None,
-    port: int | None = None,
-    storage_url: str | None = None,
-) -> QueueEndpoint:
-    """Factory to build a queue endpoint without scattering conditionals."""
-    return QueueEndpoint(
-        queue_type=queue_type,
-        host=host or "localhost",
-        port=port if port is not None else 9092,
-        storage_url=storage_url or "memory://",
-    )
 
 
 # =============================================================================
@@ -601,20 +558,18 @@ def create_queue_endpoint(
 # =============================================================================
 
 
-def make_split_id(job_id: str, stage_id: str, partition: int, offset: int) -> str:
-    """Generate a deterministic split ID.
+def make_split_id(job_id: str, stage_id: str, msg_id: str) -> str:
+    """Generate a deterministic split ID from the message ID.
 
-    This ID is derived solely from immutable properties (job, stage, partition, offset)
-    so that retries after a crash produce the same ID. This enables downstream
-    deduplication for exactly-once semantics.
+    This ID is derived from the upstream message ID, enabling deduplication
+    for exactly-once semantics.
 
     Args:
         job_id: The job identifier
         stage_id: The stage identifier
-        partition: The partition number being processed
-        offset: The offset of the input message in the upstream queue
+        msg_id: The upstream message ID
 
     Returns:
-        A deterministic split ID in the format "job:stage:pN:oM"
+        A deterministic split ID in the format "job:stage:msg_id"
     """
-    return f"{job_id}:{stage_id}:p{partition}:o{offset}"
+    return f"{job_id}:{stage_id}:{msg_id}"

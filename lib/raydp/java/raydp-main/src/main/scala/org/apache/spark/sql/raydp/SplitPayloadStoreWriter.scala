@@ -18,35 +18,40 @@
 package org.apache.spark.sql.raydp
 
 import com.google.gson.Gson
-import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
+import io.grpc.ManagedChannel
+import io.grpc.ManagedChannelBuilder
+import workqueue.Workqueue.{PushRequest, PushResponse}
+import workqueue.WorkQueueGrpc
 
-import java.util.{Base64, HashMap => JHashMap, Properties}
+import java.util.{Base64, HashMap => JHashMap}
+import java.util.concurrent.TimeUnit
 
 /**
- * Writes Arrow data directly to Tansu Queue.
+ * Writes Arrow data directly to WorkQueue via gRPC.
  *
  * This is the V2 implementation that:
- * 1. Embeds Arrow IPC data directly in Kafka message (base64 encoded)
+ * 1. Embeds Arrow IPC data directly in message (base64 encoded)
  * 2. Writes directly to output_queue (bypasses source_queue + operator)
  * 3. No ObjectRef serialization - data is inline in message
  *
  * Flow:
  * 1. Encode Arrow bytes as base64
- * 2. Create payload_key = "_v2arrow:{base64_data}"
- * 3. Send message to output_queue
+ * 2. Create payload_key = "_jvm_arrow:{base64_data}"
+ * 3. Send message to output_queue via gRPC
  * 4. Downstream: payload_store.get(payload_key) → decode and convert to SplitPayload
  *
- * @param queueBootstrapServers Kafka bootstrap servers for Tansu
+ * @param queueEndpoint WorkQueue gRPC endpoint (host:port)
  * @param queueTopic Topic name (output_queue topic)
  * @param stageId Stage identifier for message IDs
  */
 class SplitPayloadStoreWriter(
-    queueBootstrapServers: String,
+    queueEndpoint: String,
     queueTopic: String,
     stageId: String
 ) extends Serializable {
 
-  @transient private var kafkaProducer: KafkaProducer[String, Array[Byte]] = _
+  @transient private var channel: ManagedChannel = _
+  @transient private var stub: WorkQueueGrpc.WorkQueueBlockingStub = _
   @transient private lazy val gson = new Gson()
 
   private var messageCounter = 0
@@ -57,26 +62,24 @@ class SplitPayloadStoreWriter(
    * Must be called once before storeAndSend().
    */
   def start(): Unit = {
-    // Initialize Kafka producer for Tansu
-    val props = new Properties()
-    props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, queueBootstrapServers)
-    props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG,
-      "org.apache.kafka.common.serialization.StringSerializer")
-    props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG,
-      "org.apache.kafka.common.serialization.ByteArraySerializer")
-    props.put(ProducerConfig.ACKS_CONFIG, "all")
-    props.put(ProducerConfig.LINGER_MS_CONFIG, "10")
-    props.put(ProducerConfig.BATCH_SIZE_CONFIG, "16384")
-    // Increase max request size for large Arrow batches (default 1MB -> 16MB)
-    props.put(ProducerConfig.MAX_REQUEST_SIZE_CONFIG, "16777216")
+    // Parse endpoint (host:port)
+    val parts = queueEndpoint.split(":")
+    val host = parts(0)
+    val port = parts(1).toInt
 
-    kafkaProducer = new KafkaProducer[String, Array[Byte]](props)
+    // Initialize gRPC channel
+    channel = ManagedChannelBuilder
+      .forAddress(host, port)
+      .usePlaintext()
+      .build()
+
+    stub = WorkQueueGrpc.newBlockingStub(channel)
   }
 
   /**
    * Store Arrow data and send message to output queue.
    *
-   * V2 Direct approach: embeds Arrow data directly in Kafka message.
+   * V2 Direct approach: embeds Arrow data directly in message.
    * This avoids ObjectRef serialization issues between JVM and Python
    * while maintaining simplicity. For large datasets, data is chunked
    * into manageable partition sizes.
@@ -84,7 +87,7 @@ class SplitPayloadStoreWriter(
    * @param arrowBytes Arrow IPC format bytes
    * @param splitId Unique split identifier
    * @param numRecords Number of records in this batch
-   * @return Queue offset
+   * @return Message ID (or -1 for gRPC which doesn't return offset)
    */
   def storeAndSend(
       arrowBytes: Array[Byte],
@@ -99,7 +102,7 @@ class SplitPayloadStoreWriter(
     // Format: _jvm_arrow:{base64_encoded_arrow_ipc}
     val payloadKey = s"_jvm_arrow:${arrowBase64}"
 
-    // 3. Send message to output_queue
+    // 3. Build message payload (same format as Python QueueMessage)
     val metadata = new JHashMap[String, Any]()
     metadata.put("source_stage", stageId)
     metadata.put("num_records", Integer.valueOf(numRecords))
@@ -113,33 +116,44 @@ class SplitPayloadStoreWriter(
     message.put("timestamp", java.lang.Double.valueOf(System.currentTimeMillis() / 1000.0))
 
     val jsonBytes = gson.toJson(message).getBytes("UTF-8")
-    val record = new ProducerRecord[String, Array[Byte]](queueTopic, splitId, jsonBytes)
 
-    val future = kafkaProducer.send(record)
-    val result = future.get()
+    // 4. Send via gRPC Push
+    val request = PushRequest.newBuilder()
+      .setQueue(queueTopic)
+      .setPayload(com.google.protobuf.ByteString.copyFrom(jsonBytes))
+      .build()
+
+    val response: PushResponse = stub.push(request)
 
     messageCounter += 1
     totalRecords += numRecords
-    result.offset()
+
+    // Return message counter as pseudo-offset (gRPC doesn't have Kafka-style offsets)
+    messageCounter.toLong
   }
 
   /**
    * Flush any pending messages.
+   * No-op for gRPC (messages are sent synchronously).
    */
   def flush(): Unit = {
-    if (kafkaProducer != null) {
-      kafkaProducer.flush()
-    }
+    // gRPC is synchronous, no buffering to flush
   }
 
   /**
    * Close the writer and release resources.
    */
   def close(): Unit = {
-    if (kafkaProducer != null) {
-      kafkaProducer.flush()
-      kafkaProducer.close()
-      kafkaProducer = null
+    if (channel != null) {
+      channel.shutdown()
+      try {
+        channel.awaitTermination(5, TimeUnit.SECONDS)
+      } catch {
+        case _: InterruptedException =>
+          channel.shutdownNow()
+      }
+      channel = null
+      stub = null
     }
   }
 
@@ -158,16 +172,16 @@ object SplitPayloadStoreWriter {
   /**
    * Create a new writer instance.
    *
-   * @param queueBootstrapServers Kafka bootstrap servers for Tansu
+   * @param queueEndpoint WorkQueue gRPC endpoint (host:port)
    * @param queueTopic Topic name (output_queue topic)
    * @param stageId Stage identifier
    * @return A new SplitPayloadStoreWriter instance
    */
   def create(
-      queueBootstrapServers: String,
+      queueEndpoint: String,
       queueTopic: String,
       stageId: String
   ): SplitPayloadStoreWriter = {
-    new SplitPayloadStoreWriter(queueBootstrapServers, queueTopic, stageId)
+    new SplitPayloadStoreWriter(queueEndpoint, queueTopic, stageId)
   }
 }

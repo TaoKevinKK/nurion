@@ -15,11 +15,14 @@
 """Backpressure Monitor - handles backpressure detection and scaling.
 
 Responsibilities:
-- Monitor input queue lag
-- Monitor output queue size
+- Monitor input queue pending count
 - Detect and signal backpressure conditions
-- Calculate partition skew
 - Scale up/down workers based on load
+
+WorkQueue Model:
+- Uses pending_count for lag detection (instead of partition offsets)
+- No partition-level metrics or skew detection
+- Simpler scaling: just add/remove workers (no rebalancing)
 """
 
 from __future__ import annotations
@@ -28,8 +31,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, Mapping, Optional, Protocol
 
-from solstice.queue import QueueType, QueueClient, TansuQueueClient
-from solstice.core.managers.partition_manager import PartitionManager
+from solstice.queue import WorkQueueQueueClient
 from solstice.core.managers.worker_manager import WorkerManager
 
 if TYPE_CHECKING:
@@ -40,7 +42,7 @@ if TYPE_CHECKING:
 class StageStatusProvider(Protocol):
     """Protocol for objects that can provide stage status."""
 
-    def get_status(self) -> StageStatus: ...
+    def get_status(self) -> "StageStatus": ...
 
 
 @dataclass
@@ -53,36 +55,21 @@ class BackpressureSignal:
     reason: str
 
 
-@dataclass
-class PartitionMetrics:
-    """Metrics for a single partition."""
-
-    partition_id: int
-    latest_offset: int
-    committed_offset: int
-    lag: int
-
-
-@dataclass
-class SkewInfo:
-    """Information about partition skew."""
-
-    is_skewed: bool
-    skew_ratio: float  # max_lag / avg_lag
-    partition_lags: Dict[int, int]
-
-
 class BackpressureMonitor:
     """Monitors backpressure and handles scaling decisions.
 
     Tracks:
-    - Input queue lag (messages pending processing)
-    - Output queue size (messages produced)
-    - Partition-level skew
+    - Input queue pending count (messages waiting to be claimed)
+    - Output queue pending count (messages produced)
 
     Provides:
     - Backpressure signals for upstream stages
     - Scaling recommendations based on load
+
+    WorkQueue Model:
+    - Uses pending_count for lag (instead of partition offsets)
+    - No partition-level metrics or skew detection
+    - Simpler scaling: add/remove workers without partition rebalancing
 
     Thread-safe: all state modifications happen in the main asyncio loop.
     """
@@ -91,16 +78,12 @@ class BackpressureMonitor:
         self,
         stage: "Stage",
         runtime: "StageRuntime",
-        partition_manager: PartitionManager,
         worker_manager: WorkerManager,
-        consumer_group: str,
         logger: logging.Logger,
     ):
         self._stage = stage
         self._runtime = runtime
-        self._partition_manager = partition_manager
         self._worker_manager = worker_manager
-        self._consumer_group = consumer_group
         self._logger = logger
 
         # State
@@ -108,7 +91,7 @@ class BackpressureMonitor:
         self._downstream_refs: Dict[str, StageStatusProvider] = {}
 
         # Cached upstream queue client for metrics
-        self._metrics_queue: Optional[TansuQueueClient] = None
+        self._metrics_client: Optional[WorkQueueQueueClient] = None
 
     @property
     def is_backpressure_active(self) -> bool:
@@ -119,145 +102,47 @@ class BackpressureMonitor:
         """Set references to downstream stages for backpressure propagation."""
         self._downstream_refs = dict(refs)
 
-    def _get_metrics_queue(self) -> Optional[TansuQueueClient]:
-        """Get or create a client for upstream metrics."""
-        endpoint = self._runtime.upstream_endpoint
+    def _get_metrics_client(self) -> Optional[WorkQueueQueueClient]:
+        """Get or create a client for metrics."""
+        endpoint = self._runtime.broker_endpoint
         if not endpoint:
             return None
-        if endpoint.queue_type != QueueType.TANSU:
-            return None
 
-        if self._metrics_queue is None:
+        if self._metrics_client is None:
             broker_url = f"{endpoint.host}:{endpoint.port}"
-            self._metrics_queue = TansuQueueClient(broker_url)
-            self._metrics_queue.start()
+            self._metrics_client = WorkQueueQueueClient(broker_url, worker_id="metrics")
+            self._metrics_client.start()
 
-        return self._metrics_queue
+        return self._metrics_client
 
     def get_input_lag(self) -> int:
-        """Get total input queue lag (messages pending processing).
+        """Get input queue lag (messages pending processing).
 
         Returns:
-            Sum of (latest_offset - committed_offset) across all partitions.
+            Number of pending messages in the upstream queue.
         """
-        if not self._runtime.upstream_endpoint or not self._runtime.upstream_topic:
+        if not self._runtime.broker_endpoint or not self._runtime.upstream_queue_name:
             return 0
 
-        queue = self._get_metrics_queue()
-        if queue is None:
+        client = self._get_metrics_client()
+        if client is None:
             return 0
 
         try:
-            partition_offsets = queue.get_all_partition_offsets(self._runtime.upstream_topic)
-            committed_offsets = queue.get_all_committed_offsets(
-                self._consumer_group, self._runtime.upstream_topic
-            )
-            total_lag = 0
-            for partition_id, latest_offset in partition_offsets.items():
-                committed = committed_offsets.get(partition_id, 0)
-                total_lag += max(0, latest_offset - committed)
-            return total_lag
+            stats = client.get_stats(self._runtime.upstream_queue_name)
+            return stats.get("pending_count", 0)
         except Exception as e:
             self._logger.debug(f"Error getting input lag: {e}")
             return 0
 
-    def get_partition_metrics(self) -> Dict[int, PartitionMetrics]:
-        """Get metrics for all input partitions.
-
-        Returns:
-            Dictionary mapping partition_id to PartitionMetrics
-        """
-        if not self._runtime.upstream_endpoint or not self._runtime.upstream_topic:
-            return {}
-
-        queue = self._get_metrics_queue()
-        if queue is None:
-            return {}
-
-        try:
-            partition_offsets = queue.get_all_partition_offsets(self._runtime.upstream_topic)
-            committed_offsets = queue.get_all_committed_offsets(
-                self._consumer_group, self._runtime.upstream_topic
-            )
-            metrics: Dict[int, PartitionMetrics] = {}
-
-            for partition_id, latest_offset in partition_offsets.items():
-                committed = committed_offsets.get(partition_id, 0)
-                lag = max(0, latest_offset - committed)
-
-                metrics[partition_id] = PartitionMetrics(
-                    partition_id=partition_id,
-                    latest_offset=latest_offset,
-                    committed_offset=committed,
-                    lag=lag,
-                )
-            return metrics
-        except Exception as e:
-            self._logger.debug(f"Error getting partition metrics: {e}")
-            return {}
-
-    def detect_skew(self, threshold: float = 2.0) -> SkewInfo:
-        """Detect partition-level skew in input queue.
-
-        Args:
-            threshold: Skew threshold (max_lag / avg_lag)
-
-        Returns:
-            SkewInfo with detection result and partition lags
-        """
-        if not self._runtime.upstream_endpoint or not self._runtime.upstream_topic:
-            return SkewInfo(is_skewed=False, skew_ratio=0.0, partition_lags={})
-
-        try:
-            queue = self._get_metrics_queue()
-            if queue is None:
-                return SkewInfo(is_skewed=False, skew_ratio=0.0, partition_lags={})
-
-            partition_offsets = queue.get_all_partition_offsets(self._runtime.upstream_topic)
-            committed_offsets = queue.get_all_committed_offsets(
-                self._consumer_group, self._runtime.upstream_topic
-            )
-            partition_lags: Dict[int, int] = {}
-
-            for partition_id, latest_offset in partition_offsets.items():
-                committed = committed_offsets.get(partition_id, 0)
-                partition_lags[partition_id] = max(0, latest_offset - committed)
-
-            if not partition_lags:
-                return SkewInfo(is_skewed=False, skew_ratio=0.0, partition_lags={})
-
-            lags = list(partition_lags.values())
-            avg_lag = sum(lags) / len(lags)
-            max_lag = max(lags)
-
-            if avg_lag == 0:
-                return SkewInfo(is_skewed=False, skew_ratio=0.0, partition_lags=partition_lags)
-
-            skew_ratio = max_lag / avg_lag
-            is_skewed = skew_ratio > threshold
-
-            if is_skewed:
-                self._logger.warning(
-                    f"Partition skew detected in {self._stage.stage_id}: "
-                    f"max_lag={max_lag}, avg_lag={avg_lag:.1f}, "
-                    f"skew_ratio={skew_ratio:.2f}, threshold={threshold}"
-                )
-
-            return SkewInfo(
-                is_skewed=is_skewed,
-                skew_ratio=skew_ratio,
-                partition_lags=partition_lags,
-            )
-        except Exception as e:
-            self._logger.debug(f"Error detecting skew: {e}")
-            return SkewInfo(is_skewed=False, skew_ratio=0.0, partition_lags={})
-
-    def check_backpressure(self, output_queue: Optional[QueueClient], output_topic: str) -> bool:
+    def check_backpressure(
+        self, output_client: Optional[WorkQueueQueueClient], output_queue_name: str
+    ) -> bool:
         """Check if backpressure should be activated.
 
         Args:
-            output_queue: Output queue client (if available)
-            output_topic: Output topic name
+            output_client: Output queue client (if available)
+            output_queue_name: Output queue name
 
         Returns:
             True if backpressure should be active
@@ -274,9 +159,10 @@ class BackpressureMonitor:
             return True
 
         # Check output queue size
-        if output_queue:
+        if output_client:
             try:
-                output_size = output_queue.get_latest_offset(output_topic)
+                stats = output_client.get_stats(output_queue_name)
+                output_size = stats.get("pending_count", 0)
                 if output_size > self._stage.backpressure_threshold_queue_size:
                     if not self._backpressure_active:
                         self._logger.warning(
@@ -371,12 +257,6 @@ class BackpressureMonitor:
                 removed += 1
                 self._logger.debug(f"Removed worker {worker_id}")
 
-        # Rebalance partitions among remaining workers
-        if removed > 0:
-            partition_count = await self._partition_manager.get_upstream_partition_count()
-            self._partition_manager.rebalance(self._worker_manager.worker_ids, partition_count)
-            await self._worker_manager.notify_all_partition_update()
-
         self._logger.info(
             f"Scaled down {self._stage.stage_id}: removed {removed}/{count} workers "
             f"(now {self._worker_manager.worker_count} workers)"
@@ -404,27 +284,16 @@ class BackpressureMonitor:
             self._logger.debug(f"Cannot scale up: current={current}, max={max_workers}")
             return 0
 
-        # Get partition count for worker assignment
-        partition_count = await self._partition_manager.get_upstream_partition_count()
-
         added = 0
         for _ in range(actual_add):
             try:
-                worker_id = await self._worker_manager.spawn_worker(
-                    partition_count=partition_count,
-                    is_min_worker=False,
-                )
+                worker_id = await self._worker_manager.spawn_worker(is_min_worker=False)
                 if worker_id:
                     added += 1
                     self._logger.debug(f"Spawned worker {worker_id}")
             except Exception as e:
                 self._logger.warning(f"Failed to spawn worker: {e}")
                 break
-
-        # Rebalance partitions among all workers
-        if added > 0:
-            self._partition_manager.rebalance(self._worker_manager.worker_ids, partition_count)
-            await self._worker_manager.notify_all_partition_update()
 
         self._logger.info(
             f"Scaled up {self._stage.stage_id}: added {added}/{count} workers "
@@ -434,9 +303,9 @@ class BackpressureMonitor:
 
     def stop(self) -> None:
         """Clean up resources."""
-        if self._metrics_queue:
+        if self._metrics_client:
             try:
-                self._metrics_queue.stop()
+                self._metrics_client.stop()
             except Exception as e:
-                self._logger.warning(f"Error stopping metrics queue: {e}")
-            self._metrics_queue = None
+                self._logger.warning(f"Error stopping metrics client: {e}")
+            self._metrics_client = None

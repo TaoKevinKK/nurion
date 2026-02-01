@@ -17,7 +17,7 @@
 Tests the full pipeline flow:
 1. Create Iceberg table via aether REST catalog
 2. Write test data to table
-3. Run IcebergSource through StageMaster with TansuBackend queue
+3. Run IcebergSource through StageMaster with WorkQueue queue
 4. Verify data is processed correctly
 """
 
@@ -33,7 +33,6 @@ from pyiceberg.types import LongType, NestedField, StringType
 
 from tests.conftest import make_operator_runtime
 from solstice.core.models import Split
-from solstice.core.operator import SemanticGuarantee
 from solstice.core.stage import Stage
 from solstice.operators.sources import IcebergSourceConfig
 
@@ -150,15 +149,15 @@ class TestIcebergSource:
 
 
 class TestIcebergPipeline:
-    """Integration tests for full Iceberg pipeline with TansuBackend."""
+    """Integration tests for full Iceberg pipeline with WorkQueue."""
 
     @pytest.mark.asyncio
     async def test_full_pipeline_with_queue(self, iceberg_test_table, ray_cluster):
-        """Test complete IcebergSource pipeline with TansuBackend queue.
+        """Test complete IcebergSource pipeline with WorkQueue queue.
 
         This test verifies the full flow:
         1. Create IcebergSource stage
-        2. Start StageMaster with TansuBackend
+        2. Start StageMaster with WorkQueue
         3. Process data through queue
         4. Verify completion
         """
@@ -167,7 +166,6 @@ class TestIcebergPipeline:
         from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime, operator
         from solstice.core.stage import StageRuntime
         from solstice.core.stage_master import StageMaster
-        from solstice.queue import QueueType
 
         # Create a simple pass-through operator for testing
         @dataclass
@@ -215,17 +213,13 @@ class TestIcebergPipeline:
             ),
         )
 
-        # Create stage master with Memory queue for testing
+        # Create stage master for testing
         from solstice.core.split_payload_store import RaySplitPayloadStore
 
         runtime = StageRuntime(
-            queue_type=QueueType.MEMORY,
-            shared_broker_endpoint=None,
-            upstream_endpoint=None,
-            upstream_topic=None,
-            state_endpoint=None,
-            state_topic=None,
-            semantic_guarantee=SemanticGuarantee.AT_LEAST_ONCE,
+            broker_endpoint=None,
+            upstream_queue_name=None,
+            state_queue_name=None,
         )
 
         payload_store = RaySplitPayloadStore(name="test-iceberg-store")

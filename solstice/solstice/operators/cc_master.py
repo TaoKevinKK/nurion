@@ -17,39 +17,38 @@
 CCIterateMaster handles iteration internally - no special logic needed
 in RayJobRunner. This allows multiple iterative stages in a pipeline.
 
-Architecture:
+Architecture (WorkQueue-based, Jan 2025):
     ┌─────────────────────────────────────────────────────────────┐
     │                    CCIterateMaster                          │
     │                    (self-contained)                         │
     ├─────────────────────────────────────────────────────────────┤
     │  run():                                                     │
     │    1. Read input from upstream (candidate pairs/messages)   │
-    │    2. Process and update labels in state store              │
-    │    3. Poll workers for changes (operator tracks internally) │
+    │    2. Process messages, compute labels, output with edges   │
+    │    3. Aggregate changes via @master_callable                │
     │    4. If changed and iteration < max:                       │
     │       - Reset iteration counters                            │
-    │       - Loop back to step 2                                 │
+    │       - Trigger re-computation from edges in payload        │
     │    5. Output final labels to downstream                     │
     └─────────────────────────────────────────────────────────────┘
 
 Key design points:
 - Iteration happens INSIDE the stage, not in the runner
-- State (labels) is stored in SlateDB per partition
-- Each worker processes its assigned partitions
-- Master polls workers for changes (no callbacks)
-- Iteration state lives in operator, not worker
+- Edges flow through payload (Arrow tables) for scale
+- Labels tracked via iteration change counters (@master_callable)
+- No local SlateDB state store needed
+- Future: labels via WorkQueue state API (state_get/state_put)
 """
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List
 
 import ray
 
 from solstice.core.stage_master import StageMaster
-from solstice.state.slatedb_store import SlateDBPartitionStateStore
 
 if TYPE_CHECKING:
     from solstice.core.stage import Stage, StageRuntime
@@ -70,7 +69,7 @@ class CCIterateMaster(StageMaster):
 
     Handles iteration internally:
     1. Run base stage logic to process input
-    2. Poll workers for iteration changes (operator tracks them)
+    2. Aggregate changes via @master_callable
     3. If not converged, reset and continue
     4. When converged, output final results
 
@@ -95,9 +94,6 @@ class CCIterateMaster(StageMaster):
         self._max_iterations = getattr(op_config, "max_iterations", 100)
         self._convergence_threshold = getattr(op_config, "convergence_threshold", 0)
         self._iteration_stats: List[IterationStats] = []
-
-        # State store config for reading changes
-        self._state_store_path: Optional[str] = getattr(op_config, "state_store_path", None)
         self._num_partitions: int = getattr(op_config, "num_partitions", 1)
 
         # Iteration state
@@ -109,12 +105,12 @@ class CCIterateMaster(StageMaster):
 
         Iteration Algorithm:
         1. First pass: Process initial input (candidate pairs -> messages)
-        2. Poll workers for changes (operator tracks internally)
+        2. Aggregate changes from workers via @master_callable
         3. If not converged, reset iteration and continue
         4. Output final labels
 
         Convergence Conditions:
-        - Total changes across all partitions < convergence_threshold
+        - Total changes across all workers < convergence_threshold
         - Or max_iterations reached
         """
         self.logger.info(
@@ -133,8 +129,8 @@ class CCIterateMaster(StageMaster):
                 self.logger.error("First pass failed")
                 return False
 
-            # Poll workers for changes from first iteration
-            total_changes = await self._poll_worker_changes()
+            # Aggregate changes from workers via @master_callable
+            total_changes = await self._aggregate_worker_changes()
             iteration_duration = time.time() - start_time
 
             self._iteration_stats.append(
@@ -164,7 +160,7 @@ class CCIterateMaster(StageMaster):
                 # Reset iteration state in workers
                 await self._reset_worker_iterations()
 
-                # Trigger re-computation from stored state
+                # Trigger re-computation (workers process data from output queue)
                 total_changes = await self._recompute_worker_iterations()
                 iteration_duration = time.time() - iteration_start
 
@@ -210,63 +206,10 @@ class CCIterateMaster(StageMaster):
         """
         return total_changes <= self._convergence_threshold
 
-    async def _poll_worker_changes(self) -> int:
-        """Read total changes from state store.
+    async def _aggregate_worker_changes(self) -> int:
+        """Aggregate changes from all workers via @master_callable.
 
-        Workers store their change counts in state store with key `__changes__`.
-        We read from each partition and sum them up.
-
-        Returns:
-            Total number of changes across all partitions
-        """
-        if not self._state_store_path:
-            self.logger.warning("No state_store_path configured, cannot poll changes")
-            return 0
-
-        total_changes = 0
-
-        # Create a state store instance to read from
-        state_store = SlateDBPartitionStateStore(
-            base_path=self._state_store_path,
-            job_id=self.job_id,
-            stage_id=self.stage_id,
-        )
-
-        try:
-            for partition_id in range(self._num_partitions):
-                try:
-                    # Acquire partition for reading
-                    state_store.acquire_partition(partition_id)
-                    # Read changes count
-                    changes_bytes = state_store.get(partition_id, b"__changes__")
-                    if changes_bytes:
-                        partition_changes = int(changes_bytes.decode())
-                        total_changes += partition_changes
-                        self.logger.debug(f"Partition {partition_id}: {partition_changes} changes")
-                except Exception as e:
-                    self.logger.debug(f"Failed to read changes from partition {partition_id}: {e}")
-                finally:
-                    state_store.release_partition(partition_id)
-        finally:
-            state_store.close()
-
-        return total_changes
-
-    async def _reset_worker_iterations(self) -> None:
-        """Reset iteration state in all workers via invoke_operator."""
-        if not self._worker_manager:
-            return
-
-        for worker in self._worker_manager.workers.values():
-            try:
-                worker.invoke_operator.remote("reset_iteration")
-            except Exception as e:
-                self.logger.warning(f"Failed to reset worker iteration: {e}")
-
-    async def _recompute_worker_iterations(self) -> int:
-        """Trigger recomputation from stored state in all workers.
-
-        Uses invoke_operator for generic dispatch to operator methods.
+        Calls get_iteration_changes() on each worker and sums the results.
 
         Returns:
             Total number of changes across all workers
@@ -277,24 +220,78 @@ class CCIterateMaster(StageMaster):
         total_changes = 0
         futures = []
 
-        for worker_id, worker in self._worker_manager.workers.items():
-            # Get partition assignment for this worker
-            assigned_partitions = self._partition_manager.get_assignment(worker_id)
-            if not assigned_partitions:
-                self.logger.warning(f"No partitions assigned to worker {worker_id}")
-                continue
-            futures.append(
-                worker.invoke_operator.remote("recompute_from_state", assigned_partitions)
-            )
+        for worker in self._worker_manager.workers.values():
+            try:
+                futures.append(worker.invoke_operator.remote("get_iteration_changes"))
+            except Exception as e:
+                self.logger.warning(f"Failed to get worker changes: {e}")
+
+        if futures:
+            try:
+                results = ray.get(futures, timeout=30.0)
+                total_changes = sum(r for r in results if r is not None)
+            except Exception as e:
+                self.logger.warning(f"Failed to aggregate worker changes: {e}")
+
+        return total_changes
+
+    async def _reset_worker_iterations(self) -> None:
+        """Reset iteration state in all workers via invoke_operator."""
+        if not self._worker_manager:
+            return
+
+        futures = []
+        for worker in self._worker_manager.workers.values():
+            try:
+                futures.append(worker.invoke_operator.remote("reset_iteration"))
+            except Exception as e:
+                self.logger.warning(f"Failed to reset worker iteration: {e}")
+
+        # Wait for all resets to complete
+        if futures:
+            try:
+                ray.get(futures, timeout=30.0)
+            except Exception as e:
+                self.logger.warning(f"Failed waiting for iteration reset: {e}")
+
+    async def _recompute_worker_iterations(self) -> int:
+        """Trigger recomputation in all workers.
+
+        In the payload-based model, workers recompute labels from edges
+        stored in the payload. The master coordinates by:
+        1. Resetting iteration counters
+        2. Triggering recompute (workers read from output queue)
+        3. Aggregating change counts
+
+        Note: For iteration 2+, data flows through the queue again.
+        The output queue from iteration N becomes input for iteration N+1.
+
+        Returns:
+            Total number of changes across all workers
+        """
+        if not self._worker_manager:
+            return 0
+
+        # In payload-based iteration, workers process data from queue
+        # For now, we call recompute_labels with empty data as a signal
+        # TODO: Implement proper queue loopback for iteration 2+
+        futures = []
+
+        for worker in self._worker_manager.workers.values():
+            try:
+                # Workers will read from output queue and recompute
+                futures.append(worker.invoke_operator.remote("recompute_labels", []))
+            except Exception as e:
+                self.logger.warning(f"Failed to trigger worker recompute: {e}")
 
         if futures:
             try:
                 results = ray.get(futures, timeout=60.0)
-                total_changes = sum(r for r in results if r is not None)
+                return sum(r for r in results if r is not None)
             except Exception as e:
                 self.logger.warning(f"Failed to recompute worker iterations: {e}")
 
-        return total_changes
+        return 0
 
     def get_iteration_summary(self) -> Dict[str, Any]:
         """Get summary of iteration execution."""

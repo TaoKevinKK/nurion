@@ -24,8 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Union
 
-from solstice.core.operator import OperatorConfig, SemanticGuarantee
-from solstice.queue import QueueType
+from solstice.core.operator import OperatorConfig
 
 if TYPE_CHECKING:
     from solstice.core.models import QueueEndpoint
@@ -44,22 +43,14 @@ class StageRuntime:
     the stage's lifecycle. Immutable (frozen) for distributed safety.
 
     Attributes:
-        queue_type: Type of queue backend (MEMORY, TANSU)
-        shared_broker_endpoint: Shared Tansu broker endpoint
-        upstream_endpoint: Upstream queue endpoint (None for source stages)
-        upstream_topic: Upstream queue topic name
-        state_endpoint: WebUI state push endpoint
-        state_topic: WebUI state topic name
-        semantic_guarantee: AT_LEAST_ONCE or EXACTLY_ONCE
+        broker_endpoint: WorkQueue broker endpoint
+        upstream_queue_name: Upstream queue name (None for source stages)
+        state_queue_name: WebUI state queue name
     """
 
-    queue_type: QueueType
-    shared_broker_endpoint: Optional["QueueEndpoint"] = None
-    upstream_endpoint: Optional["QueueEndpoint"] = None
-    upstream_topic: Optional[str] = None
-    state_endpoint: Optional["QueueEndpoint"] = None
-    state_topic: Optional[str] = None
-    semantic_guarantee: SemanticGuarantee = SemanticGuarantee.AT_LEAST_ONCE
+    broker_endpoint: Optional["QueueEndpoint"] = None
+    upstream_queue_name: Optional[str] = None
+    state_queue_name: Optional[str] = None
 
 
 # =============================================================================
@@ -79,11 +70,9 @@ class Stage:
         stage_id: str,
         operator_config: OperatorConfig,
         parallelism: Union[int, Tuple[int, int]] = 1,
-        output_partitions: Optional[int] = None,
         worker_resources: Optional[Dict[str, float]] = None,
         # Processing configuration
         batch_size: int = 100,
-        commit_batch_size: int = 5,
         # Backpressure thresholds
         backpressure_threshold_lag: int = 5000,
         backpressure_threshold_queue_size: int = 1000,
@@ -101,10 +90,8 @@ class Stage:
             parallelism: Number of workers. Can be:
                 - int: Fixed number of workers (no auto-scaling)
                 - Tuple[int, int]: (min_workers, max_workers) for auto-scaling
-            output_partitions: Output queue partitions. None = auto based on max_workers
             worker_resources: Resource requirements per worker (num_cpus, num_gpus, memory)
-            batch_size: Number of messages to fetch per batch
-            commit_batch_size: Commit offset after every N messages processed
+            batch_size: Number of messages to claim per batch
             backpressure_threshold_lag: Lag threshold for backpressure activation
             backpressure_threshold_queue_size: Queue size threshold for backpressure
             worker_ready_timeout_seconds: Max time to wait for worker to be ready
@@ -119,7 +106,6 @@ class Stage:
         """
         self.stage_id = stage_id
         self.operator_config = operator_config
-        self.output_partitions = output_partitions
 
         # Parse parallelism parameter
         if isinstance(parallelism, int):
@@ -145,7 +131,6 @@ class Stage:
 
         # Processing configuration
         self.batch_size = batch_size
-        self.commit_batch_size = commit_batch_size
 
         # Backpressure thresholds
         self.backpressure_threshold_lag = backpressure_threshold_lag
@@ -182,8 +167,6 @@ class Stage:
             "operator_config": self.operator_config.to_dict(),
             "max_parallelism": self.max_parallelism,
             "min_parallelism": self.min_parallelism,
-            "output_partitions": self.output_partitions,
             "worker_resources": self.worker_resources,
             "batch_size": self.batch_size,
-            "commit_batch_size": self.commit_batch_size,
         }

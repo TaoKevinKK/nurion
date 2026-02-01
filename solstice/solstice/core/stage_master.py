@@ -19,16 +19,14 @@ Architecture:
     │                     Stage Master                            │
     │                                                             │
     │  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐   │
-    │  │ PartitionMgr  │  │  WorkerMgr    │  │ RecoveryMgr   │   │
-    │  │ - assignment  │  │ - lifecycle   │  │ - failures    │   │
-    │  │ - rebalance   │  │ - spawn/stop  │  │ - recovery    │   │
+    │  │  WorkerMgr    │  │ RecoveryMgr   │  │BackpressureMon│   │
+    │  │ - lifecycle   │  │ - failures    │  │ - lag         │   │
+    │  │ - spawn/stop  │  │ - recovery    │  │ - scaling     │   │
     │  └───────────────┘  └───────────────┘  └───────────────┘   │
     │                                                             │
-    │  ┌───────────────┐  ┌─────────────────────────────────┐    │
-    │  │BackpressureMon│  │        Output Queue             │    │
-    │  │ - lag/skew    │  │  (Tansu or Memory)              │    │
-    │  │ - scaling     │  └─────────────────────────────────┘    │
-    │  └───────────────┘                                          │
+    │  ┌─────────────────────────────────────────────────────┐    │
+    │  │        Output Queue (WorkQueue)                      │    │
+    │  └─────────────────────────────────────────────────────┘    │
     │                           ▲                                 │
     │  ┌────────────┐  ┌────────────┐  ┌────────────┐            │
     │  │  Worker 1  │  │  Worker 2  │  │  Worker N  │            │
@@ -36,23 +34,26 @@ Architecture:
     └─────────────────────────────────────────────────────────────┘
 
 Responsibilities:
-1. Create and manage output queue
-2. Coordinate managers (partition, worker, recovery, backpressure)
+1. Create and manage output queue (WorkQueue)
+2. Coordinate managers (worker, recovery, backpressure)
 3. Run the main processing loop
 4. Track stage completion and emit state events
+
+WorkQueue Model:
+- No partitions - single queue per stage
+- Workers compete for messages via claim()
+- Simpler worker management - just spawn N workers
 """
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from solstice.queue import (
-    QueueType,
-    QueueClient,
-    MemoryBroker,
-    MemoryClient,
-    TansuQueueClient,
+    WorkQueueBrokerManager,
+    WorkQueueQueueClient,
 )
 from solstice.utils.logging import create_ray_logger
 from solstice.core.split_payload_store import SplitPayloadStore
@@ -62,11 +63,9 @@ from solstice.core.models import (
     QueueEndpoint,
     QueueMessage,
     StageStatus,
-    create_queue_endpoint,
 )
 from solstice.core.stage_worker import StageWorker
 from solstice.core.managers import (
-    PartitionManager,
     WorkerManager,
     RecoveryManager,
     BackpressureMonitor,
@@ -81,7 +80,6 @@ __all__ = [
     "StageMaster",
     "StageWorker",
     "QueueEndpoint",
-    "create_queue_endpoint",
     "QueueMessage",
     "StageStatus",
     "FailurePolicy",
@@ -92,15 +90,15 @@ __all__ = [
 class StageMaster:
     """Orchestrates workers for a pipeline stage.
 
-    Uses component managers for specific concerns:
-    - PartitionManager: Partition assignment and rebalancing
+    Uses WorkQueue for inter-stage communication:
+    - Single queue per stage (no partitions)
+    - Workers compete for messages via claim()
+    - Simpler than Kafka partition-based model
+
+    Managers:
     - WorkerManager: Worker lifecycle (spawn, stop, status)
     - RecoveryManager: Failure tracking and worker recovery
     - BackpressureMonitor: Backpressure detection and scaling
-
-    NOT responsible for:
-    - Pulling from upstream (workers do this)
-    - Scheduling splits to workers (workers self-schedule)
     """
 
     def __init__(
@@ -116,23 +114,18 @@ class StageMaster:
         self.runtime = runtime
         self.logger = create_ray_logger(f"Master-{self.stage_id}")
 
-        # Upstream queue connection (from runtime)
-        self.upstream_endpoint = runtime.upstream_endpoint
-        self.upstream_topic = runtime.upstream_topic
-        self.state_endpoint = runtime.state_endpoint
-        self.state_topic = runtime.state_topic
+        # Queue configuration (from runtime)
+        self.broker_endpoint = runtime.broker_endpoint
+        self.upstream_queue_name = runtime.upstream_queue_name
+        self.state_queue_name = runtime.state_queue_name
 
         # SplitPayloadStore - shared across all stages
         self.payload_store = payload_store
 
         # Output queue (managed by master)
-        self._output_broker: Optional[MemoryBroker] = None
-        self._output_queue: Optional[QueueClient] = None
-        self._output_topic = f"{job_id}_{self.stage_id}_output"
-        self._output_endpoint: Optional[QueueEndpoint] = None
-
-        # Consumer group for offset tracking
-        self._consumer_group = f"{job_id}_{self.stage_id}"
+        self._output_broker: Optional[WorkQueueBrokerManager] = None
+        self._output_queue: Optional[WorkQueueQueueClient] = None
+        self._output_queue_name = f"{job_id}_{self.stage_id}_output"
 
         # State
         self._running = False
@@ -149,65 +142,44 @@ class StageMaster:
         self._state_producer: Optional["StateProducer"] = None
         self._last_metrics_emit_time = 0.0
 
-        # Initialize managers (will be fully configured in start())
-        self._partition_manager = PartitionManager(
-            stage=stage,
-            runtime=runtime,
-        )
-
         # Worker and recovery managers created after output queue is ready
         self._worker_manager: Optional[WorkerManager] = None
         self._recovery_manager: Optional[RecoveryManager] = None
         self._backpressure_monitor: Optional[BackpressureMonitor] = None
 
-    async def _create_queue(self) -> QueueClient:
-        """Connect to shared broker and create output topic."""
-        partition_count = self._partition_manager.partition_count
-        queue: QueueClient
-
-        if self.runtime.queue_type == QueueType.TANSU:
-            endpoint = self.runtime.shared_broker_endpoint
-            if not endpoint:
-                raise RuntimeError(
-                    f"Stage {self.stage_id}: shared_broker_endpoint is required "
-                    "for TANSU queue type"
-                )
-
-            broker_url = f"{endpoint.host}:{endpoint.port}"
-            queue = TansuQueueClient(broker_url)
+    async def _create_queue(self) -> WorkQueueQueueClient:
+        """Create output queue using WorkQueue."""
+        # Use broker endpoint from runtime, otherwise create local broker
+        if self.broker_endpoint:
+            broker_url = f"{self.broker_endpoint.host}:{self.broker_endpoint.port}"
+            queue = WorkQueueQueueClient(broker_url, worker_id=f"master-{self.stage_id}")
             queue.start()
-
-            self._output_endpoint = QueueEndpoint(
-                queue_type=self.runtime.queue_type,
-                host=endpoint.host,
-                port=endpoint.port,
-                storage_url=endpoint.storage_url,
-            )
-            self.logger.info(f"Connected to shared broker at {broker_url}")
+            self.logger.info(f"Connected to broker at {broker_url}")
         else:
-            # MEMORY: Create local broker (for testing)
-            if partition_count > 1:
-                self.logger.warning(
-                    f"Memory backend doesn't support multiple partitions. "
-                    f"Using 1 partition instead of {partition_count}"
-                )
-                partition_count = 1
+            # Create local broker for this stage
+            import tempfile
 
-            self._output_broker = MemoryBroker()
+            db_path = f"file://{tempfile.gettempdir()}/workqueue_{self.job_id}_{self.stage_id}"
+
+            self._output_broker = WorkQueueBrokerManager(db_path=db_path)
             self._output_broker.start()
 
-            queue = MemoryClient(self._output_broker)
+            broker_url = self._output_broker.get_broker_url()
+            queue = WorkQueueQueueClient(broker_url, worker_id=f"master-{self.stage_id}")
             queue.start()
 
-            self._output_endpoint = QueueEndpoint(
-                queue_type=self.runtime.queue_type,
-                host="memory",
-                port=0,
-                storage_url=self._output_broker.get_broker_url(),
+            # Update broker_endpoint with the local broker info
+            host, port_str = broker_url.rsplit(":", 1)
+            self.broker_endpoint = QueueEndpoint(
+                host=host,
+                port=int(port_str),
+                storage_url=db_path,
             )
+            self.logger.info(f"Created local broker at {broker_url}")
 
-        queue.create_topic(self._output_topic, partitions=partition_count)
-        self.logger.info(f"Created topic {self._output_topic} with {partition_count} partition(s)")
+        # Create the output queue
+        queue.create_queue(self._output_queue_name)
+        self.logger.info(f"Created output queue: {self._output_queue_name}")
         return queue
 
     def _init_managers(self) -> None:
@@ -216,18 +188,14 @@ class StageMaster:
             job_id=self.job_id,
             stage=self.stage,
             runtime=self.runtime,
-            partition_manager=self._partition_manager,
             payload_store=self.payload_store,
-            output_endpoint=self._output_endpoint,
-            output_topic=self._output_topic,
-            consumer_group=self._consumer_group,
-            state_endpoint=self.state_endpoint,
-            state_topic=self.state_topic,
+            broker_endpoint=self.broker_endpoint,
+            output_queue_name=self._output_queue_name,
+            state_queue_name=self.state_queue_name,
         )
 
         self._recovery_manager = RecoveryManager(
             stage_id=self.stage_id,
-            partition_manager=self._partition_manager,
             worker_manager=self._worker_manager,
             policy=FailurePolicy(),
         )
@@ -235,11 +203,39 @@ class StageMaster:
         self._backpressure_monitor = BackpressureMonitor(
             stage=self.stage,
             runtime=self.runtime,
-            partition_manager=self._partition_manager,
             worker_manager=self._worker_manager,
-            consumer_group=self._consumer_group,
             logger=self.logger,
         )
+
+    def _has_unprocessed_messages(self) -> bool:
+        """Check if upstream queue still has unprocessed messages.
+
+        Returns True if there are pending or claimed (in-flight) messages,
+        meaning we shouldn't finish the stage yet.
+        """
+        if not self.upstream_queue_name:
+            # Source stages have no upstream queue
+            return False
+
+        if not self._output_queue:
+            return False
+
+        try:
+            stats = self._output_queue.get_stats(self.upstream_queue_name)
+            pending = stats.get("pending_count", 0)
+            claimed = stats.get("claimed_count", 0)
+
+            if pending > 0 or claimed > 0:
+                self.logger.debug(
+                    f"Stage {self.stage_id} upstream queue has unprocessed messages: "
+                    f"pending={pending}, claimed={claimed}"
+                )
+                return True
+            return False
+        except Exception as e:
+            self.logger.warning(f"Error checking upstream queue stats: {e}")
+            # On error, assume there might be messages (safer)
+            return True
 
     async def start(self) -> None:
         """Start the stage master."""
@@ -259,21 +255,9 @@ class StageMaster:
         assert self._worker_manager is not None
         assert self._recovery_manager is not None
 
-        # Set target worker count for correct partition assignment
-        self._worker_manager.set_target_worker_count(self.stage.min_parallelism)
-
-        # Get partition count for worker assignment
-        if self.upstream_endpoint and self.upstream_topic:
-            partition_count = await self._partition_manager.get_upstream_partition_count()
-        else:
-            partition_count = self._partition_manager.partition_count
-
         # Spawn minimum required workers
         for _ in range(self.stage.min_parallelism):
-            worker_id = await self._worker_manager.spawn_worker(
-                partition_count=partition_count,
-                is_min_worker=True,
-            )
+            worker_id = await self._worker_manager.spawn_worker(is_min_worker=True)
             if worker_id is None:
                 raise RuntimeError(
                     f"Stage {self.stage_id}: Failed to spawn minimum required workers"
@@ -297,7 +281,7 @@ class StageMaster:
         1. Start all workers
         2. Wait for worker completion/failure via ray.wait()
         3. Handle failures with recovery
-        4. Send EOF when all workers done
+        4. Notify downstream when all workers done (via notify_upstream_finished)
         """
         if not self._running:
             await self.start()
@@ -310,8 +294,24 @@ class StageMaster:
             while self._running and not self._finished:
                 # Check if all workers done
                 if self._worker_manager.worker_count == 0:
-                    self._finished = True
-                    break
+                    # Before finishing, check if upstream queue still has messages
+                    # This prevents premature exit when all workers crash
+                    if self._has_unprocessed_messages():
+                        self.logger.info(
+                            f"Stage {self.stage_id}: no workers but queue has unprocessed messages, spawning worker"
+                        )
+                        # Spawn at least one worker to process remaining messages
+                        worker_id = await self._worker_manager.spawn_worker(is_min_worker=False)
+                        if worker_id is None:
+                            self.logger.warning(
+                                f"Stage {self.stage_id}: could not spawn worker for remaining messages"
+                            )
+                            # Wait a bit and try again
+                            await asyncio.sleep(0.5)
+                            continue
+                    else:
+                        self._finished = True
+                        break
 
                 # Event-driven wait for any worker to complete
                 completed, failed = await self._worker_manager.wait_for_completion(timeout=1.0)
@@ -325,10 +325,8 @@ class StageMaster:
                         len(failed), self._worker_manager.worker_count
                     )
 
-                    partition_count = await self._partition_manager.get_upstream_partition_count()
                     result = await self._recovery_manager.recover_failed_workers(
                         failed_worker_ids=failed,
-                        partition_count=partition_count,
                     )
 
                     if result.should_give_up:
@@ -342,29 +340,14 @@ class StageMaster:
                 elif completed:
                     self._recovery_manager.record_success()
 
-                    # Check if there are pending orphaned partitions that need recovery
-                    # This can happen when workers were cancelled due to resource constraints
-                    if self._recovery_manager.has_pending_orphaned_partitions:
-                        self.logger.info(
-                            f"Attempting to recover {len(self._recovery_manager.pending_orphaned_partitions)} "
-                            f"pending orphaned partitions after worker completion"
-                        )
-                        partition_count = (
-                            await self._partition_manager.get_upstream_partition_count()
-                        )
-                        result = await self._recovery_manager.recover_failed_workers(
-                            failed_worker_ids=[],  # No failed workers, just pending partitions
-                            partition_count=partition_count,
-                        )
-
                 if self._failed:
                     break
 
                 # Emit periodic metrics
                 await self._emit_stage_metrics()
 
-            # Send EOF markers to downstream
-            await self._send_eof_markers()
+            # No EOF marker needed - downstream workers detect completion via:
+            # notify_upstream_finished() + queue drained (pending=0, claimed=0)
 
             # Emit completion event
             await self._emit_stage_completed()
@@ -389,10 +372,6 @@ class StageMaster:
         if self._backpressure_monitor:
             self._backpressure_monitor.stop()
 
-        # Stop partition manager (closes upstream queue)
-        if self._partition_manager:
-            self._partition_manager.stop()
-
         # Stop state producer (async - has background tasks)
         if self._state_producer:
             try:
@@ -403,61 +382,32 @@ class StageMaster:
 
         self.logger.info(f"Stage {self.stage_id} stopped")
 
-    async def _send_eof_markers(self) -> None:
-        """Send EOF markers to all output partitions."""
-        if not self._output_queue:
-            return
-
-        partition_count = self._partition_manager.partition_count
-
-        for partition in range(partition_count):
-            try:
-                eof_message = QueueMessage.create_eof(partition)
-                self._output_queue.produce(
-                    self._output_topic,
-                    eof_message.to_bytes(),
-                    partition=partition,
-                )
-                self.logger.debug(f"Sent EOF marker to partition {partition}")
-            except Exception as e:
-                self.logger.warning(f"Failed to send EOF to partition {partition}: {e}")
-
-        self.logger.info(f"Stage {self.stage_id} sent EOF markers to {partition_count} partitions")
-
     # =========================================================================
     # State/Metrics Methods
     # =========================================================================
 
     async def _init_state_producer(self) -> None:
         """Initialize state producer for metrics push."""
-        if not self.state_endpoint or not self.state_topic:
+        if not self.broker_endpoint or not self.state_queue_name:
             return
 
         try:
             from solstice.webui.state.producer import StateProducer
 
-            state_queue = await self._create_queue_from_endpoint(self.state_endpoint)
+            broker_url = f"{self.broker_endpoint.host}:{self.broker_endpoint.port}"
+            state_queue = WorkQueueQueueClient(broker_url, worker_id=f"state-{self.stage_id}")
+            state_queue.start()
+
             self._state_producer = StateProducer(
                 job_id=self.job_id,
                 queue_client=state_queue,
-                state_topic=self.state_topic,
+                state_queue_name=self.state_queue_name,
             )
             await self._state_producer.start()
             self.logger.debug("Stage state producer initialized")
         except Exception as e:
             self.logger.warning(f"Failed to init state producer: {e}")
             self._state_producer = None
-
-    async def _create_queue_from_endpoint(self, endpoint: QueueEndpoint) -> QueueClient:
-        """Create a queue client from an endpoint."""
-        queue: QueueClient
-        if endpoint.queue_type == QueueType.TANSU:
-            broker_url = f"{endpoint.host}:{endpoint.port}"
-            queue = TansuQueueClient(broker_url)
-        else:
-            queue = MemoryClient(endpoint.storage_url)
-        queue.start()
-        return queue
 
     async def _emit_stage_started(self) -> None:
         """Emit STAGE_STARTED event."""
@@ -512,20 +462,21 @@ class StageMaster:
         if self._worker_manager:
             await self._worker_manager.notify_upstream_finished()
 
-    def get_output_queue(self) -> Optional[QueueClient]:
+    def get_output_queue(self) -> Optional[WorkQueueQueueClient]:
         """Get the output queue for downstream stages."""
         return self._output_queue
 
-    def get_output_topic(self) -> str:
-        """Get the output topic name."""
-        return self._output_topic
+    def get_output_queue_name(self) -> str:
+        """Get the output queue name."""
+        return self._output_queue_name
 
     def get_status(self) -> StageStatus:
         """Get current stage status with queue metrics."""
         output_size = 0
         if self._output_queue:
             try:
-                output_size = self._output_queue.get_latest_offset(self._output_topic)
+                stats = self._output_queue.get_stats(self._output_queue_name)
+                output_size = stats.get("pending_count", 0)
             except Exception:
                 pass
 
@@ -576,12 +527,8 @@ class StageMaster:
             self._output_broker = None
 
     # =========================================================================
-    # Backward Compatibility (delegate to managers)
+    # Backward Compatibility
     # =========================================================================
-
-    def get_partition_assignment(self, worker_id: str) -> list:
-        """Get partition assignment for a worker (backward compatibility)."""
-        return self._partition_manager.get_assignment(worker_id)
 
     @property
     def _workers(self) -> Dict[str, Any]:
@@ -589,8 +536,3 @@ class StageMaster:
         if self._worker_manager:
             return self._worker_manager.workers
         return {}
-
-    @property
-    def _partition_count(self) -> int:
-        """Access partition count (backward compatibility)."""
-        return self._partition_manager.partition_count

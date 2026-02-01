@@ -24,23 +24,23 @@ Algorithm (per iteration):
 3. **Reduce**: new_label[X] = min(current_label[X], received_labels)
 4. **Converge**: If no label changed across all partitions, done
 
-This is a distributed version that works across partitions:
-- Labels are stored in SlateDB (external state)
-- Each partition maintains labels for its assigned documents
-- Messages are shuffled between partitions
-- Convergence is detected globally by the runner
+Architecture (WorkQueue-based, Jan 2025):
+- Labels are stored via WorkQueue state API (single-writer, no conflicts)
+- Edges flow through payload (Arrow tables) - scales to 10B+ records
+- Convergence is detected via @master_callable aggregation
+- No local SlateDB state store needed
 
-ALL OPERATORS ARE STATELESS:
-- No in-memory caches or state
-- All state is managed via SlateDB
-- Enables fault tolerance and elastic scaling
+Design rationale for 10B+ scale dedup:
+- Edges (candidate pairs) may be 10B-100B - MUST be in payload
+- Labels are one per doc_id (~1-10B entries) - can use state API
+- State API: state_get/state_put with atomic ack+update
 
 Stages:
 1. **CCInitOperator**: Initialize labels (label = doc_id) from candidate pairs
 2. **CCIterateOperator**: One round of label propagation (reduce step)
 3. **CCMessageOperator**: Generate messages for next iteration (map step)
 
-The runner orchestrates iterations until convergence.
+The CCIterateMaster orchestrates iterations until convergence.
 """
 
 from dataclasses import dataclass
@@ -145,11 +145,16 @@ class CCIterateConfig(ShuffleOperatorConfig):
     Takes messages and updates labels. Uses CCIterateMaster for
     self-contained iteration - no special logic needed in RayJobRunner.
 
+    WorkQueue-based design:
+    - Edges flow through payload (Arrow tables) for scale
+    - Labels are tracked via iteration change counters
+    - Future: labels stored via WorkQueue state API (state_get/state_put)
+
     Attributes:
         doc_id_column: Column for document ID
         neighbor_label_column: Column for neighbor's label
         current_label_column: Column for current label (in input)
-        state_store_path: Path for SlateDB state storage
+        edges_column: Column for edges (comma-separated neighbor IDs)
         max_iterations: Maximum iterations before forced stop
         convergence_threshold: Number of changes below which to stop (0 = require full convergence)
     """
@@ -157,7 +162,7 @@ class CCIterateConfig(ShuffleOperatorConfig):
     doc_id_column: str = "doc_id"
     neighbor_label_column: str = "neighbor_label"
     current_label_column: str = "current_label"
-    # state_store_path is inherited from ShuffleOperatorConfig
+    edges_column: str = "edges"
     max_iterations: int = 100
     convergence_threshold: int = 0
 
@@ -174,37 +179,31 @@ class CCIterateConfig(ShuffleOperatorConfig):
 class CCIterateOperator(ShuffleOperator):
     """Operator for iterative label propagation (reduce step).
 
-    Input: Messages (doc_id, neighbor_label) + current labels
-    Output: Updated labels (doc_id, label, changed)
+    Input: Messages (doc_id, neighbor_label, current_label, edges?)
+    Output: Updated labels with edges (doc_id, label, edges, changed)
 
     For each document, the new label is the minimum of:
-    - Current label (from input or SlateDB)
+    - Current label (from input table)
     - All received neighbor labels
 
-    State stored in SlateDB per partition:
-    - label:{doc_id} -> current label
-    - edges:{doc_id} -> comma-separated neighbor doc_ids (for re-iteration)
+    WorkQueue-based design (no local state store):
+    - Edges flow through payload (Arrow table) for scale
+    - Labels are tracked in payload, not external state
+    - Future: labels via WorkQueue state API (state_get/state_put)
 
     Iteration Protocol:
-    - Iteration 1: `process_data()` - process messages, store edges + labels
-    - Iteration 2+: `recompute_from_state()` - recompute labels from stored edges
-    - `reset_iteration()` - Clear change counter before new iteration
-    - `get_iteration_changes()` - Get total changes for convergence check
+    - process_data(): Process messages, compute new labels, output with edges
+    - reset_iteration(): Clear change counter before new iteration
+    - get_iteration_changes(): Get total changes for convergence check
+    - recompute_labels(): Recompute from edges data (for iteration 2+)
     """
 
     def __init__(self, config: CCIterateConfig, runtime: OperatorRuntime):
         super().__init__(config, runtime)
         self.iterate_config = config
 
-        # Iteration tracking (in-memory for current batch, persisted to state store)
+        # Iteration tracking (in-memory, aggregated via @master_callable)
         self._iteration_changes: int = 0
-
-    def _get_partition_for_doc(self, doc_id: str) -> int:
-        """Compute partition for a doc_id using consistent hashing."""
-        import hashlib
-
-        h = int(hashlib.sha256(doc_id.encode()).hexdigest(), 16)
-        return h % self.num_partitions
 
     @master_callable
     def reset_iteration(self) -> None:
@@ -220,17 +219,21 @@ class CCIterateOperator(ShuffleOperator):
         return self._iteration_changes
 
     def process_data(self, table: pa.Table) -> Optional[pa.Table]:
-        """Process messages in iteration 1: store edges + compute labels.
+        """Process messages and compute labels.
 
-        In iteration 1, neighbor_label is actually the neighbor's doc_id
-        (since initially label = doc_id). We store these as edges for
-        subsequent iterations.
+        Input columns:
+        - doc_id: Document ID
+        - neighbor_label: Neighbor's current label (or doc_id in iteration 1)
+        - current_label (optional): Current label from previous iteration
+        - edges (optional): Existing edges from previous iteration
 
-        Optimized for batch I/O:
-        1. Pre-compute all partitions and acquire upfront
-        2. Batch read all labels and edges needed
-        3. Process all docs in memory
-        4. Batch write all results at the end
+        Output columns:
+        - doc_id: Document ID
+        - label: New label (min of current and all neighbors)
+        - edges: Comma-separated neighbor IDs (for next iteration)
+        - changed: Whether label changed in this iteration
+
+        Edges are carried forward in payload for subsequent iterations.
         """
         config = self.iterate_config
 
@@ -242,80 +245,34 @@ class CCIterateOperator(ShuffleOperator):
         if config.current_label_column in table.column_names:
             current_label_values = table.column(config.current_label_column).to_pylist()
             for doc_id, current_label in zip(doc_ids, current_label_values):
-                if doc_id not in current_labels_from_table:
+                if doc_id not in current_labels_from_table and current_label is not None:
                     current_labels_from_table[doc_id] = current_label
+
+        # Get existing edges from table if available (for iteration 2+)
+        existing_edges_from_table: Dict[str, set[str]] = {}
+        if config.edges_column in table.column_names:
+            edges_values = table.column(config.edges_column).to_pylist()
+            for doc_id, edges_str in zip(doc_ids, edges_values):
+                if doc_id not in existing_edges_from_table and edges_str:
+                    existing_edges_from_table[doc_id] = set(edges_str.split(","))
 
         # Group messages by doc_id and collect edges
         messages_by_doc: Dict[str, List[str]] = {}
-        edges_by_doc: Dict[str, set[str]] = {}
+        new_edges_by_doc: Dict[str, set[str]] = {}
         for doc_id, neighbor_label in zip(doc_ids, neighbor_labels):
             if doc_id not in messages_by_doc:
                 messages_by_doc[doc_id] = []
-                edges_by_doc[doc_id] = set()
+                new_edges_by_doc[doc_id] = set()
             messages_by_doc[doc_id].append(neighbor_label)
-            edges_by_doc[doc_id].add(neighbor_label)
+            new_edges_by_doc[doc_id].add(neighbor_label)
 
-        # === Phase 1: Pre-compute partitions and acquire all upfront ===
-        docs_by_partition: Dict[int, set[str]] = {}
-        doc_to_partition: Dict[str, int] = {}
-        for doc_id in messages_by_doc.keys():
-            partition_id = self._get_partition_for_doc(doc_id)
-            doc_to_partition[doc_id] = partition_id
-            if partition_id not in docs_by_partition:
-                docs_by_partition[partition_id] = set()
-            docs_by_partition[partition_id].add(doc_id)
-
-        # Acquire all partitions upfront (one check per partition, not per doc)
-        for partition_id in docs_by_partition.keys():
-            self._ensure_partition_acquired(partition_id)
-
-        # === Phase 2: Batch read from state store ===
-        stored_labels: Dict[str, str] = {}
-        stored_edges: Dict[str, set[str]] = {}
-
-        if self.state_store is not None:
-            # Build batch read requests
-            read_requests: list[tuple[int, bytes]] = []
-            for doc_id, partition_id in doc_to_partition.items():
-                # Only read label if not in table
-                if doc_id not in current_labels_from_table:
-                    read_requests.append((partition_id, f"label:{doc_id}".encode()))
-                # Always read edges to merge
-                read_requests.append((partition_id, f"edges:{doc_id}".encode()))
-
-            # Also read existing doc_ids for each partition
-            for partition_id in docs_by_partition.keys():
-                read_requests.append((partition_id, b"__doc_ids__"))
-
-            # Batch read
-            read_results = self.state_store.get_batch(read_requests)
-
-            # Parse results
-            for (partition_id, key), value in read_results.items():
-                if value is None:
-                    continue
-                key_str = key.decode()
-                if key_str.startswith("label:"):
-                    doc_id = key_str[6:]
-                    stored_labels[doc_id] = value.decode()
-                elif key_str.startswith("edges:"):
-                    doc_id = key_str[6:]
-                    edges_str = value.decode()
-                    if edges_str:
-                        stored_edges[doc_id] = set(edges_str.split(","))
-
-        # === Phase 3: Process all docs in memory ===
+        # Process all docs in memory
         results = []
         changes = 0
-        writes: list[tuple[int, bytes, bytes]] = []  # Collect writes for batch
 
         for doc_id, neighbor_labels_list in messages_by_doc.items():
-            partition_id = doc_to_partition[doc_id]
-
-            # Get current label: table > state store > default
-            current_label = (
-                current_labels_from_table.get(doc_id) or stored_labels.get(doc_id) or doc_id
-            )
+            # Get current label: table > default (doc_id)
+            current_label = current_labels_from_table.get(doc_id, doc_id)
 
             # New label is minimum of current and all neighbors
             all_labels = [current_label] + neighbor_labels_list
@@ -325,208 +282,80 @@ class CCIterateOperator(ShuffleOperator):
             if changed:
                 changes += 1
 
-            # Collect writes (don't write yet)
-            if self.state_store is not None:
-                writes.append((partition_id, f"label:{doc_id}".encode(), new_label.encode()))
-                # Merge edges
-                existing_edges = stored_edges.get(doc_id, set())
-                all_edges = existing_edges | edges_by_doc[doc_id]
-                writes.append(
-                    (partition_id, f"edges:{doc_id}".encode(), ",".join(sorted(all_edges)).encode())
-                )
+            # Merge edges: existing + new
+            existing = existing_edges_from_table.get(doc_id, set())
+            all_edges = existing | new_edges_by_doc[doc_id]
 
-            results.append({"doc_id": doc_id, "label": new_label, "changed": changed})
+            results.append(
+                {
+                    "doc_id": doc_id,
+                    "label": new_label,
+                    "edges": ",".join(sorted(all_edges)),
+                    "changed": changed,
+                }
+            )
 
         if not results:
             return None
 
-        # === Phase 4: Batch write to state store ===
         self._iteration_changes += changes
-
-        if self.state_store is not None:
-            # Add doc_ids metadata for each partition
-            for partition_id, doc_ids_set in docs_by_partition.items():
-                # Get existing doc_ids from batch read results
-                existing_key = (partition_id, b"__doc_ids__")
-                existing_value = read_results.get(existing_key) if "read_results" in dir() else None
-                existing_doc_ids = set()
-                if existing_value:
-                    existing_str = existing_value.decode()
-                    if existing_str:
-                        existing_doc_ids = set(existing_str.split(","))
-                all_doc_ids = existing_doc_ids | doc_ids_set
-                writes.append(
-                    (partition_id, b"__doc_ids__", ",".join(sorted(all_doc_ids)).encode())
-                )
-
-            # Write __changes__ only to FIRST partition (avoid overcounting when master sums)
-            # Master reads from all partitions, so writing to each would cause N*changes
-            first_partition = min(docs_by_partition.keys())
-            writes.append((first_partition, b"__changes__", str(self._iteration_changes).encode()))
-
-            # Single batch write (one flush per partition)
-            self.state_store.put_batch(writes)
-
         self.logger.debug(
-            f"CC iteration 1: {changes} label changes (total: {self._iteration_changes})"
+            f"CC iteration: {changes} label changes (total: {self._iteration_changes})"
         )
 
         return pa.table(
             {
                 "doc_id": [r["doc_id"] for r in results],
                 "label": [r["label"] for r in results],
+                "edges": [r["edges"] for r in results],
                 "changed": [r["changed"] for r in results],
             }
         )
 
-    def _get_edges_from_store(self, doc_id: str) -> set[str]:
-        """Get stored edges for a doc from state store."""
-        if self.state_store is None:
-            return set()
-        partition_id = self._get_partition_for_doc(doc_id)
-        self._ensure_partition_acquired(partition_id)
-        stored = self.state_store.get(partition_id, f"edges:{doc_id}".encode())
-        if stored is None:
-            return set()
-        edges_str = stored.decode()
-        if not edges_str:
-            return set()
-        return set(edges_str.split(","))
-
-    def _get_label_from_store(self, doc_id: str) -> str:
-        """Get stored label for a doc from state store."""
-        if self.state_store is None:
-            return doc_id
-        partition_id = self._get_partition_for_doc(doc_id)
-        self._ensure_partition_acquired(partition_id)
-        stored = self.state_store.get(partition_id, f"label:{doc_id}".encode())
-        if stored is None:
-            return doc_id
-        return stored.decode()
-
-    def _get_doc_ids_from_store(self, partition_id: int) -> set[str]:
-        """Get all doc_ids in a partition from state store."""
-        if self.state_store is None:
-            return set()
-        self._ensure_partition_acquired(partition_id)
-        stored = self.state_store.get(partition_id, b"__doc_ids__")
-        if stored is None:
-            return set()
-        doc_ids_str = stored.decode()
-        if not doc_ids_str:
-            return set()
-        return set(doc_ids_str.split(","))
-
     @master_callable
-    def recompute_from_state(self, assigned_partitions: Optional[List[int]] = None) -> int:
-        """Recompute labels from stored edges (for iteration 2+).
+    def recompute_labels(self, edges_data: List[Dict[str, str]]) -> int:
+        """Recompute labels from edges data (for iteration 2+).
 
-        Optimized for batch I/O:
-        1. Batch read all doc_ids, labels, edges upfront
-        2. Process all docs in memory
-        3. Batch write all changed labels at the end
+        This is called by master with aggregated edges data from all workers.
+        Each worker processes a subset of the data.
 
         Args:
-            assigned_partitions: List of partitions this worker handles.
-                If None, returns 0 (worker must provide partitions).
+            edges_data: List of dicts with {doc_id, label, edges}
 
         Returns:
             Number of label changes in this iteration
         """
-        if self.state_store is None:
-            self.logger.warning("No state store configured, cannot recompute")
+        if not edges_data:
             return 0
 
-        if not assigned_partitions:
-            self.logger.warning("No partitions provided, cannot recompute")
-            return 0
-
-        # === Phase 1: Acquire partitions and batch read doc_ids ===
-        for partition_id in assigned_partitions:
-            self._ensure_partition_acquired(partition_id)
-
-        # Read all doc_ids first
-        doc_id_reads = [(p, b"__doc_ids__") for p in assigned_partitions]
-        doc_id_results = self.state_store.get_batch(doc_id_reads)
-
-        # Parse doc_ids per partition
-        docs_by_partition: Dict[int, set[str]] = {}
-        all_doc_ids: set[str] = set()
-        for partition_id in assigned_partitions:
-            value = doc_id_results.get((partition_id, b"__doc_ids__"))
-            if value:
-                doc_ids_str = value.decode()
-                if doc_ids_str:
-                    docs = set(doc_ids_str.split(","))
-                    docs_by_partition[partition_id] = docs
-                    all_doc_ids.update(docs)
-
-        if not all_doc_ids:
-            return 0
-
-        # === Phase 2: Batch read all labels and edges ===
-        read_requests: list[tuple[int, bytes]] = []
-        doc_to_partition: Dict[str, int] = {}
-
-        for partition_id, doc_ids in docs_by_partition.items():
-            for doc_id in doc_ids:
-                doc_to_partition[doc_id] = partition_id
-                read_requests.append((partition_id, f"label:{doc_id}".encode()))
-                read_requests.append((partition_id, f"edges:{doc_id}".encode()))
-
-        read_results = self.state_store.get_batch(read_requests)
-
-        # Parse into dicts
+        # Build label lookup from input
         labels: Dict[str, str] = {}
         edges: Dict[str, set[str]] = {}
-        for (partition_id, key), value in read_results.items():
-            if value is None:
-                continue
-            key_str = key.decode()
-            if key_str.startswith("label:"):
-                doc_id = key_str[6:]
-                labels[doc_id] = value.decode()
-            elif key_str.startswith("edges:"):
-                doc_id = key_str[6:]
-                edges_str = value.decode()
-                if edges_str:
-                    edges[doc_id] = set(edges_str.split(","))
 
-        # === Phase 3: Process all docs in memory ===
+        for item in edges_data:
+            doc_id = item["doc_id"]
+            labels[doc_id] = item["label"]
+            edges_str = item.get("edges", "")
+            if edges_str:
+                edges[doc_id] = set(edges_str.split(","))
+
+        # Compute new labels
         changes = 0
-        writes: list[tuple[int, bytes, bytes]] = []
-
-        for doc_id in all_doc_ids:
-            partition_id = doc_to_partition[doc_id]
-            current_label = labels.get(doc_id, doc_id)
-            doc_edges = edges.get(doc_id, set())
-
+        for doc_id, doc_edges in edges.items():
             if not doc_edges:
                 continue
 
-            # Get neighbor labels (from our in-memory dict)
+            current_label = labels.get(doc_id, doc_id)
             neighbor_labels = [labels.get(n, n) for n in doc_edges]
 
-            # Compute new label
             all_labels = [current_label] + neighbor_labels
             new_label = min(all_labels, key=str)
 
             if new_label != current_label:
                 changes += 1
-                writes.append((partition_id, f"label:{doc_id}".encode(), new_label.encode()))
+                labels[doc_id] = new_label
 
-        # === Phase 4: Batch write ===
         self._iteration_changes += changes
-
-        # Write __changes__ only to FIRST partition (avoid overcounting when master sums)
-        # Note: In iteration 2+, master uses return value directly, but we write for consistency
-        if assigned_partitions:
-            first_partition = min(assigned_partitions)
-            writes.append((first_partition, b"__changes__", str(self._iteration_changes).encode()))
-
-        if writes:
-            self.state_store.put_batch(writes)
-
         self.logger.debug(
             f"CC recompute: {changes} label changes (total: {self._iteration_changes})"
         )
