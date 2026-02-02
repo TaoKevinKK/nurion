@@ -441,16 +441,16 @@ impl WorkQueue for WorkQueueService {
 
         for queue in queues_to_check {
             match self.storage.get_queue_stats(&queue).await {
-                Ok((pending, claimed)) => {
-                    let meta = self.storage.get_meta(&queue).await.unwrap_or_default();
+                Ok(meta) => {
+                    let pending_count = meta.push_seq.saturating_sub(meta.claim_seq);
                     queues.insert(
                         queue.clone(),
                         QueueStats {
                             queue: queue.clone(),
-                            pending_count: pending as i64,
-                            claimed_count: claimed as i64,
-                            total_pushed: meta.push_seq as i64,
-                            total_acked: 0, // Could track this in meta if needed
+                            pending_count: pending_count as i64,
+                            claimed_count: meta.claimed_count as i64,
+                            total_pushed: meta.total_pushed as i64,
+                            total_acked: meta.total_acked as i64,
                         },
                     );
                 }
@@ -465,5 +465,55 @@ impl WorkQueue for WorkQueueService {
             total_workers: 0, // Not tracking workers in this simplified model
             uptime_secs: 0,
         }))
+    }
+
+    // =========================================================================
+    // Queue Completion API
+    // =========================================================================
+
+    async fn mark_queue_finished(
+        &self,
+        request: Request<MarkQueueFinishedRequest>,
+    ) -> Result<Response<MarkQueueFinishedResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.queue.is_empty() {
+            return Err(Status::invalid_argument("queue is required"));
+        }
+
+        match self.storage.mark_queue_finished(&req.queue).await {
+            Ok(()) => Ok(Response::new(MarkQueueFinishedResponse { success: true })),
+            Err(e) => {
+                tracing::error!("Failed to mark queue finished: {}", e);
+                Err(Status::internal("Storage error"))
+            }
+        }
+    }
+
+    async fn is_queue_finished(
+        &self,
+        request: Request<IsQueueFinishedRequest>,
+    ) -> Result<Response<IsQueueFinishedResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.queue.is_empty() {
+            return Err(Status::invalid_argument("queue is required"));
+        }
+
+        match self.storage.check_queue_completion(&req.queue).await {
+            Ok((finished, drained, pending_count, claimed_count)) => {
+                Ok(Response::new(IsQueueFinishedResponse {
+                    finished,
+                    drained,
+                    safe_to_exit: finished && drained,
+                    pending_count: pending_count as i64,
+                    claimed_count: claimed_count as i64,
+                }))
+            }
+            Err(e) => {
+                tracing::error!("Failed to check queue finished: {}", e);
+                Err(Status::internal("Storage error"))
+            }
+        }
     }
 }

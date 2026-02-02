@@ -640,7 +640,7 @@ class TestSparkSourceMaster:
         print(f"Produced {splits_produced} splits to source queue")
 
         # Verify output queue was created
-        output_queue = master.get_output_queue()
+        output_queue = master.get_queue_client()
         assert output_queue is not None
 
         # Wait for workers to process (with timeout)

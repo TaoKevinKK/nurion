@@ -41,7 +41,6 @@ from solstice.testing.fault_injection import (
     FAULT_QUEUE_PRODUCE,
     FAULT_QUEUE_FETCH,
     FAULT_QUEUE_COMMIT,
-    FAULT_STATE_STORE_PUT,
     FAULT_BEFORE_PROCESS,
     FAULT_AFTER_PROCESS,
     FAULT_BEFORE_MARK_PROCESSED,
@@ -332,43 +331,6 @@ class TestExactlyOnceSemantics(StabilityTestBase):
             "Duplicates after commit failure - exactly-once violated"
         )
         assert validator.verify_count(sink_data, expected_count)
-
-    @pytest.mark.asyncio
-    async def test_atomic_state_and_offset_update(self, ray_cluster):
-        """Verify atomic update of state and offset.
-
-        Scenario: State store put_batch must atomically update offset and state.
-        Expected: On failure, either both are saved or neither.
-        """
-        NUM_RECORDS = 500
-        validator = DataValidator()
-        source_data = generate_test_data_with_checksum(NUM_RECORDS)
-
-        # Fail state store put (simulates partial write failure)
-        self.set_fault(FAULT_STATE_STORE_PUT, after_count=4)
-
-        job = create_test_pipeline(
-            num_records=NUM_RECORDS,
-            batch_size=100,
-            min_workers=2,
-            max_workers=4,
-            collector_name=self.collector_name,
-            with_checksum=True,
-            source_data=source_data,
-        )
-
-        runner = RayJobRunner(job)
-        try:
-            await runner.initialize()
-            await asyncio.wait_for(runner.run(), timeout=60)
-        finally:
-            await runner.stop()
-
-        sink_data = get_sink_records(self.collector_name)
-
-        # Complete data despite state store failure (retry succeeds)
-        assert validator.verify_count(sink_data, NUM_RECORDS)
-        assert validator.verify_no_duplicates(sink_data)
 
 
 # =============================================================================
@@ -1061,7 +1023,7 @@ class TestCombinedFaultScenarios(StabilityTestBase):
     async def test_multiple_fault_points_simultaneously(self, ray_cluster):
         """Multiple faults across different components.
 
-        Scenario: Queue, state store, and processing faults together.
+        Scenario: Queue and processing faults together.
         Expected: System recovers from all, data complete.
         """
         NUM_RECORDS = 800
@@ -1071,7 +1033,6 @@ class TestCombinedFaultScenarios(StabilityTestBase):
         # Configure multiple fault points
         self.set_fault(FAULT_QUEUE_PRODUCE, after_count=5)
         self.set_fault(FAULT_QUEUE_FETCH, after_count=8)
-        self.set_fault(FAULT_STATE_STORE_PUT, after_count=3)
         self.set_fault(FAULT_BEFORE_PROCESS, after_count=10)
 
         job = create_test_pipeline(

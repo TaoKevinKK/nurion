@@ -190,8 +190,7 @@ class SourceMaster(StageMaster):
         # Generate splits and write to source queue
         await self._produce_splits()
 
-        # Create output queue (for downstream stages)
-        self._output_queue = await self._create_queue()
+        self._queue_client = await self._create_queue_client()
 
         # Set upstream queue name to our source queue (workers will consume from here)
         self.upstream_queue_name = self._source_queue_name
@@ -270,15 +269,57 @@ class SourceMaster(StageMaster):
     async def _notify_workers_splits_done(self) -> None:
         """Notify workers that all splits have been produced.
 
-        Workers use the unified exit mechanism:
-        - _upstream_finished flag is set
-        - queue drained (pending=0, claimed=0) check
-
-        This replaces the old EOF message approach.
+        1. Marks source queue as finished via RPC (authoritative signal)
+        2. Notifies workers that upstream is finished
+        3. Starts polling task to check queue completion and notify workers to exit
         """
+        # Mark source queue as finished - this is the authoritative signal
+        # that no more splits will be produced
+        if self._source_client:
+            try:
+                self._source_client.mark_queue_finished(self._source_queue_name)
+                self.logger.info(f"Marked source queue {self._source_queue_name} as finished")
+            except Exception as e:
+                self.logger.warning(f"Failed to mark source queue as finished: {e}")
+
         if self._worker_manager:
             await self._worker_manager.notify_upstream_finished()
             self.logger.info(f"Source {self.stage_id} notified workers: all splits produced")
+
+        # Start background task to poll for source queue completion
+        if self._source_client:
+            asyncio.create_task(
+                self._poll_source_queue_completion(),
+                name=f"poll_source_completion_{self.stage_id}",
+            )
+
+    async def _poll_source_queue_completion(self) -> None:
+        """Poll source queue until it's safe for workers to exit.
+
+        Checks is_queue_finished() RPC which returns safe_to_exit=True when:
+        1. Queue is marked as finished (done above)
+        2. Queue is drained (pending==0 && claimed==0)
+
+        When safe, notifies all workers via notify_safe_to_exit().
+        """
+        if not self._source_client:
+            return
+
+        poll_interval = 0.1  # 100ms
+        while self._running:
+            try:
+                result = self._source_client.is_queue_finished(self._source_queue_name)
+                if result.get("safe_to_exit", False):
+                    self.logger.debug(
+                        f"Source {self.stage_id} source queue drained, notifying workers"
+                    )
+                    if self._worker_manager:
+                        await self._worker_manager.notify_safe_to_exit()
+                    return
+            except Exception as e:
+                self.logger.debug(f"Error polling source queue completion: {e}")
+
+            await asyncio.sleep(poll_interval)
 
     async def _check_backpressure_before_produce(self) -> bool:
         """Check if we should pause production due to downstream backpressure.

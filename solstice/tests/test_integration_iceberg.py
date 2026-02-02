@@ -152,7 +152,7 @@ class TestIcebergPipeline:
     """Integration tests for full Iceberg pipeline with WorkQueue."""
 
     @pytest.mark.asyncio
-    async def test_full_pipeline_with_queue(self, iceberg_test_table, ray_cluster):
+    async def test_full_pipeline_with_queue(self, iceberg_test_table, ray_cluster, workqueue_backend):
         """Test complete IcebergSource pipeline with WorkQueue queue.
 
         This test verifies the full flow:
@@ -165,7 +165,7 @@ class TestIcebergPipeline:
 
         from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime, operator
         from solstice.core.stage import StageRuntime
-        from solstice.core.stage_master import StageMaster
+        from solstice.core.stage_master import QueueEndpoint, StageMaster
 
         # Create a simple pass-through operator for testing
         @dataclass
@@ -217,7 +217,11 @@ class TestIcebergPipeline:
         from solstice.core.split_payload_store import RaySplitPayloadStore
 
         runtime = StageRuntime(
-            broker_endpoint=None,
+            broker_endpoint=QueueEndpoint(
+                host="localhost",
+                port=workqueue_backend.port,
+                storage_url="memory://",
+            ),
             upstream_queue_name=None,
             state_queue_name=None,
         )
@@ -235,7 +239,7 @@ class TestIcebergPipeline:
         await master.start()
 
         # Verify queue was created
-        output_queue = master.get_output_queue()
+        output_queue = master.get_queue_client()
         assert output_queue is not None
         assert output_queue.health_check()
 

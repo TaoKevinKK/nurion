@@ -14,13 +14,13 @@
 
 """Fault injection framework for testing exactly-once semantics.
 
-This module provides environment-variable-based fault injection that works
-across Ray worker processes. All workers read the same env vars, ensuring
-consistent fault injection behavior.
+This module provides Ray-actor-based fault injection that works correctly
+across multiple worker processes. A shared Ray actor maintains fault state,
+ensuring consistent behavior regardless of which worker triggers the fault.
 
 Design principles:
 1. Zero overhead in production (disabled by default via env var)
-2. Consistent across all Ray workers (env vars are inherited)
+2. Consistent across all Ray workers (shared actor state)
 3. Reproducible failures via deterministic triggers
 
 Environment Variables:
@@ -32,20 +32,23 @@ Environment Variables:
     - QUEUE_PRODUCE, QUEUE_FETCH, QUEUE_COMMIT
     - BEFORE_PROCESS, AFTER_PROCESS
     - BEFORE_MARK_PROCESSED, AFTER_MARK_PROCESSED
-    - STATE_STORE_PUT, STATE_STORE_GET
 
 Usage in tests:
     import os
     os.environ["SOLSTICE_FAULT_INJECTION"] = "1"
     os.environ["SOLSTICE_FAULT_QUEUE_PRODUCE_AFTER"] = "3"  # Fail on 4th call
 
-    # Then run the pipeline - all workers will have the same fault config
+    # Reset to pick up new env vars
+    reset_fault_injector()
+
+    # Then run the pipeline - all workers share the same fault state
 """
 
-from dataclasses import dataclass, field
-from typing import Dict, Optional, Set
 import os
 import random
+from typing import Optional
+
+import ray
 
 
 class InjectedFaultError(Exception):
@@ -58,145 +61,78 @@ class InjectedFaultError(Exception):
     pass
 
 
-@dataclass
-class FaultConfig:
-    """Configuration for a single fault injection point."""
-
-    # Trigger conditions
-    fail_after_count: int = 0  # Fail after N successful calls (0 = never)
-    fail_probability: float = 0.0  # Random failure probability (0-1)
-    fail_once: bool = True  # Only fail once, then stop
-
-    # Failure behavior
-    exception_class: type = InjectedFaultError
-    exception_message: str = "Injected fault"
-
-    # State
-    call_count: int = field(default=0, init=False)
-    has_failed: bool = field(default=False, init=False)
+# Actor name for the shared fault state
+_FAULT_ACTOR_NAME = "solstice_fault_injector"
 
 
-class FaultInjector:
-    """Fault injection controller for testing.
+@ray.remote
+class _FaultStateActor:
+    """Ray actor that maintains shared fault injection state.
 
-    Register fault points and check them at critical locations.
-    Disabled by default (no-op in production).
-
-    Example:
-        injector = FaultInjector(enabled=True)
-
-        # Fail state_store.put_batch after 3 successful calls
-        injector.register(
-            "state_store.put_batch",
-            FaultConfig(fail_after_count=3)
-        )
-
-        # In code:
-        injector.check("state_store.put_batch")  # Raises on 4th call
+    All workers call this actor to check/update fault counters,
+    ensuring consistent behavior across processes.
     """
 
-    def __init__(self, enabled: bool = False):
-        self.enabled = enabled
-        self._faults: Dict[str, FaultConfig] = {}
-        self._triggered: Set[str] = set()
+    def __init__(self):
+        # fault_point -> {after_count, probability, call_count, has_failed, fail_once}
+        self._faults: dict[str, dict] = {}
 
-    def register(self, point: str, config: FaultConfig) -> "FaultInjector":
+    def register(
+        self,
+        point: str,
+        after_count: int = 0,
+        probability: float = 0.0,
+        fail_once: bool = True,
+    ) -> None:
         """Register a fault injection point."""
-        self._faults[point] = config
-        return self
+        self._faults[point] = {
+            "after_count": after_count,
+            "probability": probability,
+            "call_count": 0,
+            "has_failed": False,
+            "fail_once": fail_once,
+        }
 
-    def fail_after(
-        self,
-        point: str,
-        count: int,
-        exception: type = InjectedFaultError,
-        message: str = "Injected fault",
-    ) -> "FaultInjector":
-        """Convenience: fail after N successful calls."""
-        return self.register(
-            point,
-            FaultConfig(
-                fail_after_count=count,
-                exception_class=exception,
-                exception_message=message,
-            ),
-        )
-
-    def fail_randomly(
-        self,
-        point: str,
-        probability: float,
-        exception: type = InjectedFaultError,
-        message: str = "Random injected fault",
-    ) -> "FaultInjector":
-        """Convenience: fail with given probability."""
-        return self.register(
-            point,
-            FaultConfig(
-                fail_probability=probability,
-                fail_once=False,
-                exception_class=exception,
-                exception_message=message,
-            ),
-        )
-
-    def check(self, point: str) -> None:
-        """Check if fault should be triggered at this point.
-
-        Call this at critical points in the code. No-op if disabled.
-        """
-        if not self.enabled:
-            return
-
+    def check(self, point: str) -> bool:
+        """Check if fault should trigger. Returns True if should fail."""
         config = self._faults.get(point)
         if config is None:
-            return
+            return False
 
-        config.call_count += 1
+        config["call_count"] += 1
 
-        # Check if we should fail
         should_fail = False
 
         # Count-based trigger
-        if config.fail_after_count > 0:
-            if config.call_count > config.fail_after_count:
-                if not config.fail_once or not config.has_failed:
+        if config["after_count"] > 0:
+            if config["call_count"] > config["after_count"]:
+                if not config["fail_once"] or not config["has_failed"]:
                     should_fail = True
 
         # Probability-based trigger
-        if config.fail_probability > 0:
-            if random.random() < config.fail_probability:
-                if not config.fail_once or not config.has_failed:
+        if config["probability"] > 0:
+            if random.random() < config["probability"]:
+                if not config["fail_once"] or not config["has_failed"]:
                     should_fail = True
 
         if should_fail:
-            config.has_failed = True
-            self._triggered.add(point)
-            raise config.exception_class(config.exception_message)
+            config["has_failed"] = True
 
-    def was_triggered(self, point: str) -> bool:
-        """Check if a fault point was triggered."""
-        return point in self._triggered
+        return should_fail
 
     def reset(self) -> None:
         """Reset all fault states."""
-        self._triggered.clear()
         for config in self._faults.values():
-            config.call_count = 0
-            config.has_failed = False
+            config["call_count"] = 0
+            config["has_failed"] = False
 
     def clear(self) -> None:
         """Remove all registered faults."""
         self._faults.clear()
-        self._triggered.clear()
 
-
-# Global injector - lazy initialized from environment variables
-_global_injector: Optional[FaultInjector] = None
-_injector_initialized: bool = False
 
 # Mapping from env var suffix to fault point
-_FAULT_POINT_MAP: Dict[str, str] = {
+_FAULT_POINT_MAP: dict[str, str] = {
     "QUEUE_PRODUCE": "queue.produce",
     "QUEUE_FETCH": "queue.fetch",
     "QUEUE_COMMIT": "queue.commit",
@@ -204,75 +140,112 @@ _FAULT_POINT_MAP: Dict[str, str] = {
     "AFTER_PROCESS": "operator.after_process",
     "BEFORE_MARK_PROCESSED": "operator.before_mark_processed",
     "AFTER_MARK_PROCESSED": "operator.after_mark_processed",
-    "STATE_STORE_PUT": "state_store.put_batch",
-    "STATE_STORE_GET": "state_store.get",
 }
 
-
-def _init_global_injector() -> FaultInjector:
-    """Initialize global injector from environment variables.
-
-    Called lazily on first check_fault() call.
-    """
-    global _global_injector, _injector_initialized
-
-    enabled = os.environ.get("SOLSTICE_FAULT_INJECTION", "0") == "1"
-    injector = FaultInjector(enabled=enabled)
-
-    if enabled:
-        # Parse fault configs from environment
-        for env_suffix, fault_point in _FAULT_POINT_MAP.items():
-            # Check for _AFTER config (fail after N calls)
-            after_key = f"SOLSTICE_FAULT_{env_suffix}_AFTER"
-            after_val = os.environ.get(after_key)
-            if after_val:
-                try:
-                    count = int(after_val)
-                    injector.fail_after(fault_point, count)
-                except ValueError:
-                    pass
-
-            # Check for _PROB config (fail with probability)
-            prob_key = f"SOLSTICE_FAULT_{env_suffix}_PROB"
-            prob_val = os.environ.get(prob_key)
-            if prob_val:
-                try:
-                    prob = float(prob_val)
-                    injector.fail_randomly(fault_point, prob)
-                except ValueError:
-                    pass
-
-    _global_injector = injector
-    _injector_initialized = True
-    return injector
+# Cache for the actor handle
+_fault_actor: Optional[ray.actor.ActorHandle] = None
+_initialized: bool = False
 
 
-def _get_injector() -> FaultInjector:
-    """Get the global injector, initializing if needed."""
-    global _global_injector, _injector_initialized
-    if not _injector_initialized:
-        return _init_global_injector()
-    return _global_injector  # type: ignore
+def _get_or_create_actor() -> Optional[ray.actor.ActorHandle]:
+    """Get or create the fault state actor."""
+    global _fault_actor, _initialized
+
+    if not is_fault_injection_enabled():
+        return None
+
+    if _initialized and _fault_actor is not None:
+        return _fault_actor
+
+    try:
+        # Try to get existing actor
+        _fault_actor = ray.get_actor(_FAULT_ACTOR_NAME)
+    except ValueError:
+        # Create new actor
+        _fault_actor = _FaultStateActor.options(
+            name=_FAULT_ACTOR_NAME,
+            lifetime="detached",
+            get_if_exists=True,
+        ).remote()
+
+        # Register faults from environment variables
+        _register_faults_from_env(_fault_actor)
+
+    _initialized = True
+    return _fault_actor
+
+
+def _register_faults_from_env(actor: ray.actor.ActorHandle) -> None:
+    """Register fault configurations from environment variables."""
+    for env_suffix, fault_point in _FAULT_POINT_MAP.items():
+        after_count = 0
+        probability = 0.0
+
+        # Check for _AFTER config
+        after_key = f"SOLSTICE_FAULT_{env_suffix}_AFTER"
+        after_val = os.environ.get(after_key)
+        if after_val:
+            try:
+                after_count = int(after_val)
+            except ValueError:
+                pass
+
+        # Check for _PROB config
+        prob_key = f"SOLSTICE_FAULT_{env_suffix}_PROB"
+        prob_val = os.environ.get(prob_key)
+        if prob_val:
+            try:
+                probability = float(prob_val)
+            except ValueError:
+                pass
+
+        # Register if any config is set
+        if after_count > 0 or probability > 0:
+            ray.get(
+                actor.register.remote(
+                    fault_point,
+                    after_count=after_count,
+                    probability=probability,
+                    fail_once=(probability == 0),  # prob-based can fire multiple times
+                )
+            )
 
 
 def check_fault(point: str) -> None:
-    """Check fault at point using global injector.
+    """Check fault at point using shared Ray actor.
 
     No-op if SOLSTICE_FAULT_INJECTION env var is not "1".
     This is the function to call in production code.
     """
-    injector = _get_injector()
-    injector.check(point)
+    actor = _get_or_create_actor()
+    if actor is None:
+        return
+
+    try:
+        should_fail = ray.get(actor.check.remote(point))
+        if should_fail:
+            raise InjectedFaultError(f"Injected fault at {point}")
+    except ray.exceptions.RayActorError:
+        # Actor died, reset and retry
+        reset_fault_injector()
 
 
 def reset_fault_injector() -> None:
-    """Reset the global injector state (for tests).
+    """Reset the fault injector state.
 
-    Re-reads environment variables and reinitializes.
+    Kills the existing actor and clears cached references.
+    Call this between tests to ensure clean state.
     """
-    global _global_injector, _injector_initialized
-    _global_injector = None
-    _injector_initialized = False
+    global _fault_actor, _initialized
+
+    if _fault_actor is not None:
+        try:
+            ray.kill(_fault_actor)
+        except Exception:
+            pass
+
+    _fault_actor = None
+    _initialized = False
 
 
 def is_fault_injection_enabled() -> bool:
@@ -283,10 +256,6 @@ def is_fault_injection_enabled() -> bool:
 # =============================================================================
 # Fault Points (documented constants)
 # =============================================================================
-
-# State store faults
-FAULT_STATE_STORE_PUT = "state_store.put_batch"
-FAULT_STATE_STORE_GET = "state_store.get"
 
 # Queue faults
 FAULT_QUEUE_PRODUCE = "queue.produce"

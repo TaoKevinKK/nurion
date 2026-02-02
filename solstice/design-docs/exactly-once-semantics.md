@@ -1,5 +1,11 @@
 # Exactly-Once Semantics Design
 
+> ⚠️ **DEPRECATED** - This document describes the offset-based exactly-once design for the old Tansu/Kafka partition model.
+> With the new WorkQueue (single-queue multi-consumer) model introduced in PR #35, this design is no longer applicable.
+> See `workqueue-semantics.md` for the new design.
+>
+> _Deprecated: 2026-02-02_
+
 _Design document - January 2026_
 
 ---

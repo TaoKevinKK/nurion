@@ -15,15 +15,11 @@
 """Testing utilities for Solstice."""
 
 from solstice.testing.fault_injection import (
-    FaultInjector,
-    FaultConfig,
     InjectedFaultError,
     check_fault,
     reset_fault_injector,
     is_fault_injection_enabled,
     # Fault points
-    FAULT_STATE_STORE_PUT,
-    FAULT_STATE_STORE_GET,
     FAULT_QUEUE_PRODUCE,
     FAULT_QUEUE_FETCH,
     FAULT_QUEUE_COMMIT,
@@ -34,15 +30,11 @@ from solstice.testing.fault_injection import (
 )
 
 __all__ = [
-    "FaultInjector",
-    "FaultConfig",
     "InjectedFaultError",
     "check_fault",
     "reset_fault_injector",
     "is_fault_injection_enabled",
     # Fault points
-    "FAULT_STATE_STORE_PUT",
-    "FAULT_STATE_STORE_GET",
     "FAULT_QUEUE_PRODUCE",
     "FAULT_QUEUE_FETCH",
     "FAULT_QUEUE_COMMIT",

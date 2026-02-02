@@ -52,6 +52,14 @@ service WorkQueue {
 
   // Get queue statistics
   rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
+
+  // === Queue Completion API ===
+
+  // Mark a queue as finished (no more messages will be pushed)
+  rpc MarkQueueFinished(MarkQueueFinishedRequest) returns (MarkQueueFinishedResponse);
+
+  // Check if queue is finished and drained (safe to exit)
+  rpc IsQueueFinished(IsQueueFinishedRequest) returns (IsQueueFinishedResponse);
 }
 
 // ============================================================================
@@ -246,4 +254,28 @@ message StatePutRequest {
 message StatePutResponse {
   int32 puts_count = 1;            // Number of keys set
   int32 deletes_count = 2;         // Number of keys deleted
+}
+
+// ============================================================================
+// Queue Completion API Messages
+// ============================================================================
+
+message MarkQueueFinishedRequest {
+  string queue = 1;                // Queue to mark as finished
+}
+
+message MarkQueueFinishedResponse {
+  bool success = 1;
+}
+
+message IsQueueFinishedRequest {
+  string queue = 1;                // Queue to check
+}
+
+message IsQueueFinishedResponse {
+  bool finished = 1;               // True if queue marked as finished
+  bool drained = 2;                // True if pending==0 && claimed==0
+  bool safe_to_exit = 3;           // True if finished && drained (worker can exit)
+  int64 pending_count = 4;         // Current pending count
+  int64 claimed_count = 5;         // Current claimed count
 }

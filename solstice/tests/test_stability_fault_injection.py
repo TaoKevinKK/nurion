@@ -34,8 +34,6 @@ from solstice.testing.fault_injection import (
     FAULT_QUEUE_PRODUCE,
     FAULT_QUEUE_FETCH,
     FAULT_QUEUE_COMMIT,
-    FAULT_STATE_STORE_PUT,
-    FAULT_STATE_STORE_GET,
     FAULT_BEFORE_PROCESS,
     FAULT_AFTER_PROCESS,
 )
@@ -58,8 +56,6 @@ _POINT_TO_SUFFIX = {
     "operator.after_process": "AFTER_PROCESS",
     "operator.before_mark_processed": "BEFORE_MARK_PROCESSED",
     "operator.after_mark_processed": "AFTER_MARK_PROCESSED",
-    "state_store.put_batch": "STATE_STORE_PUT",
-    "state_store.get": "STATE_STORE_GET",
 }
 
 # Mark all tests in this module
@@ -365,90 +361,6 @@ class TestOperatorFaultInjection(FaultInjectionTestBase):
         )
 
 
-class TestStateStoreFaultInjection(FaultInjectionTestBase):
-    """Deterministic state store fault tests."""
-
-    @pytest.mark.asyncio
-    async def test_state_store_put_failure_recovery(self, ray_cluster):
-        """State store write fails - checkpoint must retry.
-
-        Tests that checkpoint operations are retried when state
-        store writes fail transiently.
-        """
-        NUM_RECORDS = 600
-        EXPLODE_FACTOR = 2
-        validator = DataValidator()
-
-        source_data = generate_test_data_with_checksum(NUM_RECORDS)
-        expected_count = NUM_RECORDS * EXPLODE_FACTOR
-
-        # Fail state put after 2 successful checkpoints
-        self.set_fault(FAULT_STATE_STORE_PUT, after_count=2)
-
-        job = create_test_pipeline(
-            num_records=NUM_RECORDS,
-            batch_size=150,
-            min_workers=2,
-            max_workers=4,
-            collector_name=self.collector_name,
-            with_checksum=True,
-            source_data=source_data,
-            transform_config=ExplodeConfig(factor=EXPLODE_FACTOR),
-        )
-
-        runner = RayJobRunner(job)
-        try:
-            await runner.initialize()
-            await asyncio.wait_for(runner.run(), timeout=60)
-        finally:
-            await runner.stop()
-
-        sink_data = get_sink_records(self.collector_name)
-
-        assert validator.verify_count(sink_data, expected_count), (
-            f"Data loss after state put failure: expected {expected_count}, got {len(sink_data)}"
-        )
-        assert validator.verify_explode_result(sink_data, NUM_RECORDS, EXPLODE_FACTOR)
-
-    @pytest.mark.asyncio
-    async def test_state_store_get_failure_recovery(self, ray_cluster):
-        """State store read fails - recovery must handle gracefully.
-
-        Tests that workers can recover even when state store reads fail
-        initially (e.g., during worker restart).
-        """
-        NUM_RECORDS = 500
-        validator = DataValidator()
-
-        source_data = generate_test_data_with_checksum(NUM_RECORDS)
-
-        # Fail state get on first attempt (simulates cold start issue)
-        self.set_fault(FAULT_STATE_STORE_GET, after_count=1)
-
-        job = create_test_pipeline(
-            num_records=NUM_RECORDS,
-            batch_size=100,
-            min_workers=2,
-            max_workers=4,
-            collector_name=self.collector_name,
-            with_checksum=True,
-            source_data=source_data,
-        )
-
-        runner = RayJobRunner(job)
-        try:
-            await runner.initialize()
-            await asyncio.wait_for(runner.run(), timeout=60)
-        finally:
-            await runner.stop()
-
-        sink_data = get_sink_records(self.collector_name)
-
-        assert validator.verify_count(sink_data, NUM_RECORDS), (
-            f"Data loss after state get failure: expected {NUM_RECORDS}, got {len(sink_data)}"
-        )
-
-
 class TestCombinedFaultScenarios(FaultInjectionTestBase):
     """Tests combining multiple fault injection points."""
 
@@ -459,7 +371,7 @@ class TestCombinedFaultScenarios(FaultInjectionTestBase):
         Tests system resilience when faults occur at:
         - Queue produce
         - Queue fetch
-        - State store put
+        - Operator processing
 
         All in the same pipeline run.
         """
@@ -471,7 +383,7 @@ class TestCombinedFaultScenarios(FaultInjectionTestBase):
         # Configure multiple fault points
         self.set_fault(FAULT_QUEUE_PRODUCE, after_count=3)
         self.set_fault(FAULT_QUEUE_FETCH, after_count=5)
-        self.set_fault(FAULT_STATE_STORE_PUT, after_count=2)
+        self.set_fault(FAULT_BEFORE_PROCESS, after_count=7)
 
         job = create_test_pipeline(
             num_records=NUM_RECORDS,

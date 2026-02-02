@@ -18,7 +18,11 @@ This worker implements the WorkQueue claim-based model:
 
 1. **Claim**: Atomically grab messages from the upstream queue
 2. **Process**: Execute the operator on each message
-3. **Ack/Forward**: Acknowledge processed messages (or forward to downstream)
+3. **Ack/Forward**: Atomically acknowledge upstream + push downstream (ack_and_forward)
+
+Key design: Uses `ack_and_forward` for atomic ack + push to prevent duplicates.
+If worker crashes between processing and ack, message returns to pending queue.
+With atomic ack_and_forward, downstream only receives data after successful commit.
 
 No partitions or consumer groups - workers compete for messages from a single queue.
 """
@@ -102,9 +106,8 @@ class StageWorker:
 
         self._state_producer: Optional[StateProducer] = None
 
-        # Queue connections (created lazily)
-        self.upstream_queue: Optional[WorkQueueQueueClient] = None
-        self.output_queue: Optional[WorkQueueQueueClient] = None
+        # Queue connection (single client for all queues)
+        self.queue_client: Optional[WorkQueueQueueClient] = None
 
         self.logger = create_ray_logger(f"Worker-{self.stage_id}-{self.worker_id}")
 
@@ -115,6 +118,7 @@ class StageWorker:
         # Worker-level state
         self._running = False
         self._upstream_finished = False
+        self._safe_to_exit = False  # Set by master when queue is confirmed drained
 
         # Buffer for split metrics (batch produce)
         self._pending_split_metrics: List[Any] = []
@@ -150,10 +154,8 @@ class StageWorker:
             )
 
         try:
-            # Create queue connections (single client for all queues)
-            self.upstream_queue = self._create_queue_client()
-            if self.output_queue_name:
-                self.output_queue = self.upstream_queue  # Same client, different queue
+            # Create queue connection (single client for all queues)
+            self.queue_client = self._create_queue_client()
 
             # Initialize state producer for WebUI
             await self._init_state_producer()
@@ -202,7 +204,7 @@ class StageWorker:
         - upstream_finished flag is set AND
         - queue is empty (pending_count == 0 AND claimed_count == 0)
         """
-        assert self.upstream_queue is not None
+        assert self.queue_client is not None
         assert self.upstream_queue_name is not None
         assert self._operator is not None
 
@@ -213,7 +215,7 @@ class StageWorker:
         while self._running:
             try:
                 # Claim messages from the queue
-                records = self.upstream_queue.claim(
+                records = self.queue_client.claim(
                     self.upstream_queue_name,
                     batch_size=self._batch_size,
                     timeout_ms=1000,
@@ -235,15 +237,25 @@ class StageWorker:
                     split_id = make_split_id(self.job_id, self.stage_id, record.msg_id)
 
                     check_fault(FAULT_BEFORE_PROCESS)
-                    await self._process_message(message, record, split_id)
+                    output_bytes = await self._process_message(message, record, split_id)
                     check_fault(FAULT_AFTER_PROCESS)
 
                     check_fault(FAULT_BEFORE_MARK_PROCESSED)
                     self._operator.processed_count += 1
                     check_fault(FAULT_AFTER_MARK_PROCESSED)
 
-                    # Ack the message after successful processing
-                    self.upstream_queue.ack(self.upstream_queue_name, [record.msg_id])
+                    # Atomic ack (+ forward if output exists)
+                    if output_bytes and self.output_queue_name:
+                        # Atomic: ack upstream + push downstream
+                        self.queue_client.ack_and_forward(
+                            upstream_queue=self.upstream_queue_name,
+                            upstream_msg_ids=[record.msg_id],
+                            downstream_queue=self.output_queue_name,
+                            downstream_payloads=[output_bytes],
+                        )
+                    else:
+                        # No output, just ack
+                        self.queue_client.ack(self.upstream_queue_name, [record.msg_id])
 
             except asyncio.CancelledError:
                 self.logger.info(f"Worker {self.worker_id} claim loop cancelled")
@@ -259,26 +271,28 @@ class StageWorker:
         )
 
     def _is_queue_drained(self) -> bool:
-        """Check if queue is fully drained (no pending, no in-flight messages)."""
-        if not self.upstream_queue or not self.upstream_queue_name:
-            return True
+        """Check if worker should exit.
 
-        try:
-            stats = self.upstream_queue.get_stats(self.upstream_queue_name)
-            pending = stats.get("pending_count", 0)
-            claimed = stats.get("claimed_count", 0)
-            return pending == 0 and claimed == 0
-        except Exception:
-            # If we can't get stats, assume not drained
-            return False
+        Returns True when master has confirmed the queue is fully drained
+        (finished flag set AND pending==0 AND claimed==0).
+
+        The master handles the RPC check and notifies workers via
+        notify_safe_to_exit() when it's safe to exit.
+        """
+        return self._safe_to_exit
 
     async def _process_message(
         self,
         message: QueueMessage,
         record: WorkQueueRecord,
         split_id: str,
-    ) -> None:
-        """Process a single message using the operator."""
+    ) -> Optional[bytes]:
+        """Process a single message using the operator.
+
+        Returns:
+            Output message bytes if there's output to forward, None otherwise.
+            The caller is responsible for atomic ack_and_forward.
+        """
         from solstice.core.models import Split, SplitPayload
 
         assert self._operator is not None
@@ -326,8 +340,8 @@ class StageWorker:
             output_records=output_records,
         )
 
-        # Produce output if any
-        if output_payload and self.output_queue and self.output_queue_name:
+        # Prepare output for atomic ack_and_forward (if any)
+        if output_payload and self.output_queue_name:
             payload_key = split_id
             self.payload_store.store(payload_key, output_payload)
 
@@ -340,12 +354,9 @@ class StageWorker:
                     "parent_message_id": message.message_id,
                 },
             )
+            return output_message.to_bytes()
 
-            self.output_queue.push(
-                self.output_queue_name,
-                output_message.to_bytes(),
-                metadata={"source_stage": self.stage_id},
-            )
+        return None
 
     async def _cleanup(self) -> None:
         """Clean up resources."""
@@ -362,9 +373,8 @@ class StageWorker:
             except Exception as e:
                 self.logger.warning(f"Error stopping state producer: {e}")
 
-        # Only stop upstream_queue (output_queue is the same client)
-        if self.upstream_queue:
-            self.upstream_queue.stop()
+        if self.queue_client:
+            self.queue_client.stop()
 
     # === Status and Control ===
 
@@ -372,6 +382,16 @@ class StageWorker:
         """Called by master when upstream stage(s) have finished."""
         self._upstream_finished = True
         self.logger.info(f"Worker {self.worker_id} notified: upstream finished")
+
+    def notify_safe_to_exit(self) -> None:
+        """Called by master when queue is confirmed drained and safe to exit.
+
+        This is the authoritative signal that:
+        1. Upstream has finished (queue marked as finished)
+        2. Queue is drained (pending==0 && claimed==0)
+        """
+        self._safe_to_exit = True
+        self.logger.info(f"Worker {self.worker_id} notified: safe to exit")
 
     def get_status(self) -> Dict[str, Any]:
         """Get current worker status."""

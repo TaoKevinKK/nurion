@@ -49,7 +49,7 @@ from solstice.core.stage_master import (
 )
 from solstice.operators.sources.source import SourceMaster
 from solstice.core.split_payload_store import RaySplitPayloadStore
-from solstice.queue import WorkQueueBrokerManager, WorkQueueQueueClient
+from solstice.queue import WorkQueueBrokerManager
 from solstice.runtime.autoscaler import SimpleAutoscaler
 from solstice.runtime.state_push import StatePushManager, StatePushConfig
 from solstice.utils.logging import create_ray_logger
@@ -133,7 +133,6 @@ class RayJobRunner:
         # Shared WorkQueue broker for all stages (reduces resource usage and improves stability)
         self._shared_broker: Optional[WorkQueueBrokerManager] = None
         self._broker_endpoint: Optional[QueueEndpoint] = None
-        self._shared_broker_client: Optional[WorkQueueQueueClient] = None
 
         # State
         self._initialized = False
@@ -179,21 +178,10 @@ class RayJobRunner:
             storage_url=self.workqueue_db_path or "memory://",
         )
 
-        # Create a client for the runner itself (for cleanup operations)
-        self._shared_broker_client = WorkQueueQueueClient(broker_url, worker_id="runner")
-        self._shared_broker_client.start()
-
         self.logger.info(f"Created shared WorkQueue broker at {broker_url}")
 
     async def _stop_shared_broker(self) -> None:
         """Stop the shared WorkQueue broker."""
-        if self._shared_broker_client:
-            try:
-                self._shared_broker_client.stop()
-            except Exception as e:
-                self.logger.warning(f"Error stopping shared broker client: {e}")
-            self._shared_broker_client = None
-
         if self._shared_broker:
             try:
                 self._shared_broker.stop()

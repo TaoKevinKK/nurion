@@ -99,6 +99,16 @@ class WorkQueueStub(object):
                 request_serializer=workqueue__pb2.GetStatsRequest.SerializeToString,
                 response_deserializer=workqueue__pb2.GetStatsResponse.FromString,
                 _registered_method=True)
+        self.MarkQueueFinished = channel.unary_unary(
+                '/workqueue.WorkQueue/MarkQueueFinished',
+                request_serializer=workqueue__pb2.MarkQueueFinishedRequest.SerializeToString,
+                response_deserializer=workqueue__pb2.MarkQueueFinishedResponse.FromString,
+                _registered_method=True)
+        self.IsQueueFinished = channel.unary_unary(
+                '/workqueue.WorkQueue/IsQueueFinished',
+                request_serializer=workqueue__pb2.IsQueueFinishedRequest.SerializeToString,
+                response_deserializer=workqueue__pb2.IsQueueFinishedResponse.FromString,
+                _registered_method=True)
 
 
 class WorkQueueServicer(object):
@@ -201,6 +211,22 @@ class WorkQueueServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def MarkQueueFinished(self, request, context):
+        """=== Queue Completion API ===
+
+        Mark a queue as finished (no more messages will be pushed)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def IsQueueFinished(self, request, context):
+        """Check if queue is finished and drained (safe to exit)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_WorkQueueServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -263,6 +289,16 @@ def add_WorkQueueServicer_to_server(servicer, server):
                     servicer.GetStats,
                     request_deserializer=workqueue__pb2.GetStatsRequest.FromString,
                     response_serializer=workqueue__pb2.GetStatsResponse.SerializeToString,
+            ),
+            'MarkQueueFinished': grpc.unary_unary_rpc_method_handler(
+                    servicer.MarkQueueFinished,
+                    request_deserializer=workqueue__pb2.MarkQueueFinishedRequest.FromString,
+                    response_serializer=workqueue__pb2.MarkQueueFinishedResponse.SerializeToString,
+            ),
+            'IsQueueFinished': grpc.unary_unary_rpc_method_handler(
+                    servicer.IsQueueFinished,
+                    request_deserializer=workqueue__pb2.IsQueueFinishedRequest.FromString,
+                    response_serializer=workqueue__pb2.IsQueueFinishedResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -594,6 +630,60 @@ class WorkQueue(object):
             '/workqueue.WorkQueue/GetStats',
             workqueue__pb2.GetStatsRequest.SerializeToString,
             workqueue__pb2.GetStatsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def MarkQueueFinished(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/workqueue.WorkQueue/MarkQueueFinished',
+            workqueue__pb2.MarkQueueFinishedRequest.SerializeToString,
+            workqueue__pb2.MarkQueueFinishedResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def IsQueueFinished(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/workqueue.WorkQueue/IsQueueFinished',
+            workqueue__pb2.IsQueueFinishedRequest.SerializeToString,
+            workqueue__pb2.IsQueueFinishedResponse.FromString,
             options,
             channel_credentials,
             insecure,

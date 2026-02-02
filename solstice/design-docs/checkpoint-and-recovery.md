@@ -1,5 +1,11 @@
 # Checkpoint, Recovery, and Stream-Based Architecture Design
 
+> ⚠️ **DEPRECATED** - This document describes the checkpoint/recovery design for the old Tansu/Kafka partition model.
+> With the new WorkQueue (single-queue multi-consumer) model introduced in PR #35, this design is no longer applicable.
+> See `workqueue-semantics.md` for the new design.
+>
+> _Deprecated: 2026-02-02_
+
 _Design discussion summary - December 5-6, 2025_
 
 ---

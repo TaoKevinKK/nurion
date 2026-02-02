@@ -126,33 +126,30 @@ class TestQueueFaultRecovery:
             # Note: We create a new broker instance instead of restarting the same one
             # because the underlying Rust/Tokio runtime may have residual state
             try:
-                if runner._shared_broker is not None:
-                    from solstice.queue import WorkQueueBrokerManager
+                from solstice.queue import WorkQueueBrokerManager
 
-                    old_broker = runner._shared_broker
-                    old_url = old_broker.get_broker_url()
-                    old_host, old_port_str = old_url.rsplit(":", 1)
-                    old_port = int(old_port_str)
-                    old_db_path = old_broker._db_path
+                old_broker = runner._shared_broker
+                old_url = old_broker.get_broker_url()
+                old_host, old_port_str = old_url.rsplit(":", 1)
+                old_port = int(old_port_str)
+                old_db_path = old_broker._db_path
 
-                    # Stop the old broker and wait for clean shutdown
-                    old_broker.stop()
-                    await asyncio.sleep(1.0)  # Wait for port to be released
+                # Stop the old broker and wait for clean shutdown
+                old_broker.stop()
+                await asyncio.sleep(1.0)  # Wait for port to be released
 
-                    # Create and start a new broker instance on the same port
-                    # Using the same db_path ensures data persistence
-                    new_broker = WorkQueueBrokerManager(
-                        db_path=old_db_path,
-                        port=old_port,
-                    )
-                    new_broker.start()
-                    await asyncio.sleep(0.5)  # Wait for broker to be ready
+                # Create and start a new broker instance on the same port
+                # Using the same db_path ensures data persistence
+                new_broker = WorkQueueBrokerManager(
+                    db_path=old_db_path,
+                    port=old_port,
+                )
+                new_broker.start()
+                await asyncio.sleep(0.5)  # Wait for broker to be ready
 
-                    # Replace the runner's broker reference
-                    runner._shared_broker = new_broker
-                    broker_restarted = True
-                else:
-                    pytest.skip("No shared broker available (using memory queue)")
+                # Replace the runner's broker reference
+                runner._shared_broker = new_broker
+                broker_restarted = True
             except Exception as e:
                 pytest.skip(f"Could not restart broker: {e}")
 

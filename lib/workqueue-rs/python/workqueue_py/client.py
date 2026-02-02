@@ -574,6 +574,63 @@ class WorkQueueClient:
             "uptime_secs": response.uptime_secs,
         }
 
+    # =========================================================================
+    # Queue Completion API
+    # =========================================================================
+
+    def mark_queue_finished(self, queue: str) -> bool:
+        """Mark a queue as finished (no more messages will be pushed).
+
+        This should be called by the upstream stage master after all messages
+        have been pushed to the queue.
+
+        Args:
+            queue: Queue name to mark as finished
+
+        Returns:
+            True if successfully marked
+
+        Raises:
+            grpc.RpcError: If the request fails
+        """
+        self._check_connected()
+
+        request = pb2.MarkQueueFinishedRequest(queue=queue)
+        response = self._stub.MarkQueueFinished(request)
+        return response.success
+
+    def is_queue_finished(self, queue: str) -> Dict[str, Any]:
+        """Check if queue is finished and safe to exit.
+
+        This provides an authoritative check for worker exit conditions,
+        avoiding race conditions from stale statistics.
+
+        Args:
+            queue: Queue name to check
+
+        Returns:
+            Dictionary with:
+                - finished: True if queue marked as finished by upstream
+                - drained: True if pending==0 && claimed==0
+                - safe_to_exit: True if finished && drained (worker can exit)
+                - pending_count: Current pending message count
+                - claimed_count: Current claimed message count
+
+        Raises:
+            grpc.RpcError: If the request fails
+        """
+        self._check_connected()
+
+        request = pb2.IsQueueFinishedRequest(queue=queue)
+        response = self._stub.IsQueueFinished(request)
+        return {
+            "finished": response.finished,
+            "drained": response.drained,
+            "safe_to_exit": response.safe_to_exit,
+            "pending_count": response.pending_count,
+            "claimed_count": response.claimed_count,
+        }
+
     def __enter__(self) -> "WorkQueueClient":
         """Context manager entry."""
         self.start()

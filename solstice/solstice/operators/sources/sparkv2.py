@@ -176,8 +176,8 @@ class SparkSourceV2Master(StageMaster):
         self._start_time = time.time()
         self._running = True
 
-        # 1. Create output_queue (JVM will write directly to this)
-        self._output_queue = await self._create_queue()
+        # 1. Create output queue (JVM will write directly to this)
+        self._queue_client = await self._create_queue_client()
 
         # 2. Execute Spark write (JVM writes to Object Store + output_queue)
         splits_count = await self._execute_spark_write()

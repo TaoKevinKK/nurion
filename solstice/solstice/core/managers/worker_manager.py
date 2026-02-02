@@ -83,6 +83,7 @@ class WorkerManager:
 
         # Upstream tracking
         self._upstream_finished = False
+        self._safe_to_exit = False
 
     @property
     def workers(self) -> Dict[str, ray.actor.ActorHandle]:
@@ -340,10 +341,14 @@ class WorkerManager:
     async def notify_worker_upstream_finished(self, worker_id: str) -> None:
         """Notify a specific worker that upstream has finished.
 
-        Used for newly spawned recovery workers.
+        Used for newly spawned recovery workers. Also notifies if safe_to_exit
+        is already true (queue was drained before this worker spawned).
         """
         worker = self._workers.get(worker_id)
-        if worker and self._upstream_finished:
+        if worker is None:
+            return
+
+        if self._upstream_finished:
             try:
                 worker.notify_upstream_finished.remote()
                 self._logger.debug(
@@ -351,6 +356,28 @@ class WorkerManager:
                 )
             except Exception as e:
                 self._logger.warning(f"Failed to notify {worker_id} of upstream completion: {e}")
+
+        if self._safe_to_exit:
+            try:
+                worker.notify_safe_to_exit.remote()
+                self._logger.debug(
+                    f"Notified recovered worker {worker_id}: safe to exit"
+                )
+            except Exception as e:
+                self._logger.warning(f"Failed to notify {worker_id} safe to exit: {e}")
+
+    async def notify_safe_to_exit(self) -> None:
+        """Notify all workers that it's safe to exit.
+
+        Called by master when queue is confirmed drained (finished + empty).
+        """
+        self._safe_to_exit = True
+        for worker_id, worker in self._workers.items():
+            try:
+                worker.notify_safe_to_exit.remote()
+                self._logger.debug(f"Notified worker {worker_id}: safe to exit")
+            except Exception as e:
+                self._logger.warning(f"Failed to notify worker {worker_id} safe to exit: {e}")
 
     def get_worker(self, worker_id: str) -> Optional[ray.actor.ActorHandle]:
         """Get a worker actor handle by ID."""

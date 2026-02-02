@@ -128,7 +128,7 @@ class TestSparkSourceV2Integration:
             await master.start()
 
             # Verify output_queue was created and has messages
-            output_queue = master.get_output_queue()
+            output_queue = master.get_queue_client()
             assert output_queue is not None
             assert output_queue.health_check()
 
@@ -199,7 +199,7 @@ class TestSparkSourceV2Integration:
 
             # Should have messages based on parallelism setting
             # Note: The exact count depends on data distribution, but should be > 0
-            output_queue = master.get_output_queue()
+            output_queue = master.get_queue_client()
             stats = output_queue.get_stats(master._output_queue_name)
             total_pushed = stats.get("total_pushed", 0)
             assert total_pushed > 0

@@ -29,16 +29,31 @@ use crate::types::{now_nanos, ClaimInfo, Message};
 
 pub type StorageError = Box<dyn std::error::Error + Send + Sync>;
 
-/// Queue metadata for O(1) claim operations
+/// Queue metadata for O(1) operations
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct QueueMeta {
     pub claim_seq: u64,
     pub push_seq: u64,
+    /// Number of currently claimed messages (O(1) stats)
+    #[serde(default)]
+    pub claimed_count: u64,
+    /// Total messages ever pushed (lifetime counter)
+    #[serde(default)]
+    pub total_pushed: u64,
+    /// Total messages ever acked (lifetime counter)
+    #[serde(default)]
+    pub total_acked: u64,
 }
 
 impl Default for QueueMeta {
     fn default() -> Self {
-        Self { claim_seq: 0, push_seq: 0 }
+        Self {
+            claim_seq: 0,
+            push_seq: 0,
+            claimed_count: 0,
+            total_pushed: 0,
+            total_acked: 0,
+        }
     }
 }
 
@@ -90,6 +105,10 @@ impl WorkQueueStorage {
         format!("state:{}:{}", namespace, key).into_bytes()
     }
 
+    fn finished_key(queue: &str) -> Vec<u8> {
+        format!("finished:{}", queue).into_bytes()
+    }
+
     // === Queue Metadata ===
 
     pub async fn get_meta(&self, queue: &str) -> Result<QueueMeta, StorageError> {
@@ -125,8 +144,10 @@ impl WorkQueueStorage {
             batch.put(&Self::pending_key(queue, seq), msg.msg_id.as_bytes());
         }
 
+        let msg_count = messages.len() as u64;
         let new_meta = QueueMeta {
-            push_seq: meta.push_seq + messages.len() as u64,
+            push_seq: meta.push_seq + msg_count,
+            total_pushed: meta.total_pushed + msg_count,
             ..meta
         };
         batch.put(&Self::meta_key(queue), &serde_json::to_vec(&new_meta)?);
@@ -184,7 +205,11 @@ impl WorkQueueStorage {
         }
 
         if !claimed.is_empty() {
-            let new_meta = QueueMeta { claim_seq: new_claim_seq, ..meta };
+            let new_meta = QueueMeta {
+                claim_seq: new_claim_seq,
+                claimed_count: meta.claimed_count + claimed.len() as u64,
+                ..meta
+            };
             batch.put(&Self::meta_key(queue), &serde_json::to_vec(&new_meta)?);
             self.db.write(batch).await?;
         }
@@ -207,17 +232,28 @@ impl WorkQueueStorage {
 
         let now_ns = now_nanos();
         let mut batch = WriteBatch::new();
+        let ack_count = msg_ids.len() as u64;
 
-        // 1. Move messages from claimed to acked
-        for msg_id in msg_ids {
-            batch.delete(&Self::claimed_key(queue, msg_id));
-            batch.put(&Self::acked_key(queue, now_ns, msg_id), &[]);
+        // 1. Move messages from claimed to acked + update upstream meta
+        if !msg_ids.is_empty() {
+            let upstream_meta = self.get_meta(queue).await?;
+            for msg_id in msg_ids {
+                batch.delete(&Self::claimed_key(queue, msg_id));
+                batch.put(&Self::acked_key(queue, now_ns, msg_id), &[]);
+            }
+            let new_upstream_meta = QueueMeta {
+                claimed_count: upstream_meta.claimed_count.saturating_sub(ack_count),
+                total_acked: upstream_meta.total_acked + ack_count,
+                ..upstream_meta
+            };
+            batch.put(&Self::meta_key(queue), &serde_json::to_vec(&new_upstream_meta)?);
         }
 
         // 2. Push downstream messages if provided
         if let (Some(downstream_queue), Some(messages)) = (opts.downstream_queue, opts.downstream_messages) {
             if !messages.is_empty() {
                 let downstream_meta = self.get_meta(downstream_queue).await?;
+                let msg_count = messages.len() as u64;
 
                 for (i, msg) in messages.iter().enumerate() {
                     let seq = downstream_meta.push_seq + i as u64;
@@ -226,7 +262,8 @@ impl WorkQueueStorage {
                 }
 
                 let new_meta = QueueMeta {
-                    push_seq: downstream_meta.push_seq + messages.len() as u64,
+                    push_seq: downstream_meta.push_seq + msg_count,
+                    total_pushed: downstream_meta.total_pushed + msg_count,
                     ..downstream_meta
                 };
                 batch.put(&Self::meta_key(downstream_queue), &serde_json::to_vec(&new_meta)?);
@@ -318,6 +355,7 @@ impl WorkQueueStorage {
 
         let meta = self.get_meta(queue).await?;
         let mut batch = WriteBatch::new();
+        let nack_count = msg_ids.len() as u64;
 
         for (i, msg_id) in msg_ids.iter().enumerate() {
             batch.delete(&Self::claimed_key(queue, msg_id));
@@ -325,7 +363,8 @@ impl WorkQueueStorage {
         }
 
         let new_meta = QueueMeta {
-            push_seq: meta.push_seq + msg_ids.len() as u64,
+            push_seq: meta.push_seq + nack_count,
+            claimed_count: meta.claimed_count.saturating_sub(nack_count),
             ..meta
         };
         batch.put(&Self::meta_key(queue), &serde_json::to_vec(&new_meta)?);
@@ -386,11 +425,9 @@ impl WorkQueueStorage {
 
     // === Query Operations ===
 
-    pub async fn get_queue_stats(&self, queue: &str) -> Result<(u64, u64), StorageError> {
-        let meta = self.get_meta(queue).await?;
-        let pending_count = meta.push_seq.saturating_sub(meta.claim_seq);
-        let claimed_count = self.scan_claimed(Some(queue)).await?.len() as u64;
-        Ok((pending_count, claimed_count))
+    /// Get queue stats - O(1) using counters in meta
+    pub async fn get_queue_stats(&self, queue: &str) -> Result<QueueMeta, StorageError> {
+        self.get_meta(queue).await
     }
 
     // === Delete Operations ===
@@ -520,6 +557,40 @@ impl WorkQueueStorage {
 
         self.db.write(batch).await?;
         Ok((puts.len(), deletes.len()))
+    }
+
+    // === Queue Completion API ===
+
+    /// Mark a queue as finished (no more messages will be pushed)
+    pub async fn mark_queue_finished(&self, queue: &str) -> Result<(), StorageError> {
+        self.db.put(&Self::finished_key(queue), b"1").await?;
+        self.db.flush().await?;
+        tracing::info!("Queue {} marked as finished", queue);
+        Ok(())
+    }
+
+    /// Check if queue is finished (marked by upstream)
+    pub async fn is_queue_finished(&self, queue: &str) -> Result<bool, StorageError> {
+        Ok(self.db.get(&Self::finished_key(queue)).await?.is_some())
+    }
+
+    /// Check if queue is finished AND drained (safe for worker to exit)
+    /// Returns (finished, drained, pending_count, claimed_count)
+    pub async fn check_queue_completion(&self, queue: &str) -> Result<(bool, bool, u64, u64), StorageError> {
+        let finished = self.is_queue_finished(queue).await?;
+        let meta = self.get_meta(queue).await?;
+
+        let pending_count = meta.push_seq.saturating_sub(meta.claim_seq);
+        let claimed_count = meta.claimed_count;
+        let drained = pending_count == 0 && claimed_count == 0;
+
+        Ok((finished, drained, pending_count, claimed_count))
+    }
+
+    /// Clear the finished flag (for queue reuse/testing)
+    pub async fn clear_queue_finished(&self, queue: &str) -> Result<(), StorageError> {
+        self.db.delete(&Self::finished_key(queue)).await?;
+        Ok(())
     }
 }
 
@@ -699,15 +770,18 @@ mod tests {
             storage.push_message(queue, &msg).await.unwrap();
         }
 
-        let (pending, claimed) = storage.get_queue_stats(queue).await.unwrap();
+        let meta = storage.get_queue_stats(queue).await.unwrap();
+        let pending = meta.push_seq.saturating_sub(meta.claim_seq);
         assert_eq!(pending, 5);
-        assert_eq!(claimed, 0);
+        assert_eq!(meta.claimed_count, 0);
+        assert_eq!(meta.total_pushed, 5);
 
         storage.claim_messages(queue, 3, "worker-1", "lease-1").await.unwrap();
 
-        let (pending, claimed) = storage.get_queue_stats(queue).await.unwrap();
+        let meta = storage.get_queue_stats(queue).await.unwrap();
+        let pending = meta.push_seq.saturating_sub(meta.claim_seq);
         assert_eq!(pending, 2);
-        assert_eq!(claimed, 3);
+        assert_eq!(meta.claimed_count, 3);
     }
 
     #[tokio::test]
@@ -787,5 +861,119 @@ mod tests {
 
         let claimed = storage.claim_messages(queue, 1, "worker-2", "lease-2").await.unwrap();
         assert_eq!(claimed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_counter_correctness_full_lifecycle() {
+        // Verify O(1) counters are maintained correctly through full message lifecycle
+        let storage = create_temp_storage().await;
+        let queue = "test-queue";
+
+        storage.create_queue(queue).await.unwrap();
+
+        // Initial state
+        let meta = storage.get_queue_stats(queue).await.unwrap();
+        assert_eq!(meta.claimed_count, 0);
+        assert_eq!(meta.total_pushed, 0);
+        assert_eq!(meta.total_acked, 0);
+
+        // Push 10 messages
+        let mut msg_ids = Vec::new();
+        for i in 0..10 {
+            let msg = Message::new(queue.to_string(), format!("msg{}", i).into_bytes());
+            msg_ids.push(msg.msg_id.clone());
+            storage.push_message(queue, &msg).await.unwrap();
+        }
+
+        let meta = storage.get_queue_stats(queue).await.unwrap();
+        assert_eq!(meta.claimed_count, 0, "No messages claimed yet");
+        assert_eq!(meta.total_pushed, 10, "10 messages pushed");
+        assert_eq!(meta.total_acked, 0, "No messages acked yet");
+
+        // Claim 5 messages
+        let claimed = storage.claim_messages(queue, 5, "worker-1", "lease-1").await.unwrap();
+        assert_eq!(claimed.len(), 5);
+
+        let meta = storage.get_queue_stats(queue).await.unwrap();
+        assert_eq!(meta.claimed_count, 5, "5 messages claimed");
+        assert_eq!(meta.total_pushed, 10);
+        assert_eq!(meta.total_acked, 0);
+
+        // Ack 3 messages
+        let ack_ids: Vec<String> = claimed[0..3].iter().map(|m| m.msg_id.clone()).collect();
+        storage.ack_messages(queue, &ack_ids).await.unwrap();
+
+        let meta = storage.get_queue_stats(queue).await.unwrap();
+        assert_eq!(meta.claimed_count, 2, "5 - 3 = 2 claimed");
+        assert_eq!(meta.total_pushed, 10);
+        assert_eq!(meta.total_acked, 3, "3 messages acked");
+
+        // Nack 2 messages (return to pending)
+        let nack_ids: Vec<String> = claimed[3..5].iter().map(|m| m.msg_id.clone()).collect();
+        storage.nack_messages(queue, &nack_ids).await.unwrap();
+
+        let meta = storage.get_queue_stats(queue).await.unwrap();
+        assert_eq!(meta.claimed_count, 0, "All claimed messages handled");
+        assert_eq!(meta.total_pushed, 10);
+        assert_eq!(meta.total_acked, 3);
+
+        // Verify pending count: 10 original - 5 claimed + 2 nacked back = 7 pending
+        let pending = meta.push_seq.saturating_sub(meta.claim_seq);
+        assert_eq!(pending, 7, "7 messages pending (5 unclaimed + 2 nacked)");
+
+        // Claim and ack remaining
+        let remaining = storage.claim_messages(queue, 10, "worker-2", "lease-2").await.unwrap();
+        assert_eq!(remaining.len(), 7);
+
+        let remaining_ids: Vec<String> = remaining.iter().map(|m| m.msg_id.clone()).collect();
+        storage.ack_messages(queue, &remaining_ids).await.unwrap();
+
+        let meta = storage.get_queue_stats(queue).await.unwrap();
+        assert_eq!(meta.claimed_count, 0, "All messages processed");
+        assert_eq!(meta.total_pushed, 10);
+        assert_eq!(meta.total_acked, 10, "All 10 messages acked (including re-acked nacked ones)");
+    }
+
+    #[tokio::test]
+    async fn test_counter_correctness_ack_and_forward() {
+        // Verify counters are correct with ack_and_forward
+        let storage = create_temp_storage().await;
+
+        storage.create_queue("upstream").await.unwrap();
+        storage.create_queue("downstream").await.unwrap();
+
+        // Push to upstream
+        for i in 0..5 {
+            let msg = Message::new("upstream".to_string(), format!("msg{}", i).into_bytes());
+            storage.push_message("upstream", &msg).await.unwrap();
+        }
+
+        // Claim from upstream
+        let claimed = storage.claim_messages("upstream", 5, "worker-1", "lease-1").await.unwrap();
+        assert_eq!(claimed.len(), 5);
+
+        // Ack upstream and forward to downstream (2 outputs per input)
+        for msg in &claimed {
+            let downstream_msgs: Vec<Message> = (0..2)
+                .map(|i| Message::new("downstream".to_string(), format!("out-{}-{}", msg.msg_id, i).into_bytes()))
+                .collect();
+            storage.ack_and_forward("upstream", &[msg.msg_id.clone()], "downstream", &downstream_msgs).await.unwrap();
+        }
+
+        // Verify upstream counters
+        let upstream_meta = storage.get_queue_stats("upstream").await.unwrap();
+        assert_eq!(upstream_meta.claimed_count, 0, "All upstream claimed messages acked");
+        assert_eq!(upstream_meta.total_pushed, 5);
+        assert_eq!(upstream_meta.total_acked, 5);
+
+        // Verify downstream counters
+        let downstream_meta = storage.get_queue_stats("downstream").await.unwrap();
+        assert_eq!(downstream_meta.claimed_count, 0, "No downstream messages claimed yet");
+        assert_eq!(downstream_meta.total_pushed, 10, "5 inputs * 2 outputs = 10");
+        assert_eq!(downstream_meta.total_acked, 0);
+
+        // Verify downstream pending
+        let downstream_pending = downstream_meta.push_seq.saturating_sub(downstream_meta.claim_seq);
+        assert_eq!(downstream_pending, 10);
     }
 }

@@ -309,6 +309,20 @@ class WorkQueueQueueClient:
     def get_pending_count(self, queue: str) -> int:
         return self.get_stats(queue).get("pending_count", 0)
 
+    # Queue Completion API
+    def mark_queue_finished(self, queue: str) -> bool:
+        """Mark queue as finished (no more messages will be pushed)."""
+        self._check()
+        return self._client.mark_queue_finished(queue)
+
+    def is_queue_finished(self, queue: str) -> Dict[str, int]:
+        """Check if queue is finished and safe to exit.
+
+        Returns dict with: finished, drained, safe_to_exit, pending_count, claimed_count
+        """
+        self._check()
+        return self._client.is_queue_finished(queue)
+
     def _check(self) -> None:
         if self._client is None:
             raise RuntimeError("Client not started")

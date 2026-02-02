@@ -162,6 +162,52 @@ jobs:
         retention-days: 1
 
   # ============================================================================
+  # Test workqueue-rs (Rust unit tests)
+  # ============================================================================
+
+  test-workqueue-rs:
+    name: Workqueue-rs Tests
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Get changed files
+      id: changed-files
+      uses: tj-actions/changed-files@v45
+      with:
+        files: |
+          lib/workqueue-rs/**
+
+    - name: Skip if no workqueue-rs changes
+      if: steps.changed-files.outputs.any_changed == 'false' && github.event_name == 'pull_request'
+      run: echo "No workqueue-rs files changed, skipping..."
+
+    - name: Set up Rust
+      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install protoc
+      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
+      uses: arduino/setup-protoc@v3
+      with:
+        version: "25.x"
+
+    - name: Rust cache
+      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: "lib/workqueue-rs -> target"
+
+    - name: Run Rust tests
+      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
+      run: |
+        cd lib/workqueue-rs
+        cargo test --release
+
+  # ============================================================================
   # Lint and code quality checks
   # ============================================================================
 

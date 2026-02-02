@@ -51,10 +51,7 @@ import asyncio
 import time
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
-from solstice.queue import (
-    WorkQueueBrokerManager,
-    WorkQueueQueueClient,
-)
+from solstice.queue import WorkQueueQueueClient
 from solstice.utils.logging import create_ray_logger
 from solstice.core.split_payload_store import SplitPayloadStore
 from solstice.core.models import (
@@ -122,9 +119,8 @@ class StageMaster:
         # SplitPayloadStore - shared across all stages
         self.payload_store = payload_store
 
-        # Output queue (managed by master)
-        self._output_broker: Optional[WorkQueueBrokerManager] = None
-        self._output_queue: Optional[WorkQueueQueueClient] = None
+        # Queue client and output queue
+        self._queue_client: Optional[WorkQueueQueueClient] = None
         self._output_queue_name = f"{job_id}_{self.stage_id}_output"
 
         # State
@@ -147,35 +143,14 @@ class StageMaster:
         self._recovery_manager: Optional[RecoveryManager] = None
         self._backpressure_monitor: Optional[BackpressureMonitor] = None
 
-    async def _create_queue(self) -> WorkQueueQueueClient:
-        """Create output queue using WorkQueue."""
-        # Use broker endpoint from runtime, otherwise create local broker
-        if self.broker_endpoint:
-            broker_url = f"{self.broker_endpoint.host}:{self.broker_endpoint.port}"
-            queue = WorkQueueQueueClient(broker_url, worker_id=f"master-{self.stage_id}")
-            queue.start()
-            self.logger.info(f"Connected to broker at {broker_url}")
-        else:
-            # Create local broker for this stage
-            import tempfile
+    async def _create_queue_client(self) -> WorkQueueQueueClient:
+        """Create queue client and output queue."""
+        assert self.broker_endpoint is not None, "broker_endpoint is required"
 
-            db_path = f"file://{tempfile.gettempdir()}/workqueue_{self.job_id}_{self.stage_id}"
-
-            self._output_broker = WorkQueueBrokerManager(db_path=db_path)
-            self._output_broker.start()
-
-            broker_url = self._output_broker.get_broker_url()
-            queue = WorkQueueQueueClient(broker_url, worker_id=f"master-{self.stage_id}")
-            queue.start()
-
-            # Update broker_endpoint with the local broker info
-            host, port_str = broker_url.rsplit(":", 1)
-            self.broker_endpoint = QueueEndpoint(
-                host=host,
-                port=int(port_str),
-                storage_url=db_path,
-            )
-            self.logger.info(f"Created local broker at {broker_url}")
+        broker_url = f"{self.broker_endpoint.host}:{self.broker_endpoint.port}"
+        queue = WorkQueueQueueClient(broker_url, worker_id=f"master-{self.stage_id}")
+        queue.start()
+        self.logger.info(f"Connected to broker at {broker_url}")
 
         # Create the output queue
         queue.create_queue(self._output_queue_name)
@@ -217,11 +192,11 @@ class StageMaster:
             # Source stages have no upstream queue
             return False
 
-        if not self._output_queue:
+        if not self._queue_client:
             return False
 
         try:
-            stats = self._output_queue.get_stats(self.upstream_queue_name)
+            stats = self._queue_client.get_stats(self.upstream_queue_name)
             pending = stats.get("pending_count", 0)
             claimed = stats.get("claimed_count", 0)
 
@@ -246,7 +221,7 @@ class StageMaster:
         self._start_time = time.time()
 
         # Create output queue
-        self._output_queue = await self._create_queue()
+        self._queue_client = await self._create_queue_client()
 
         # Initialize managers now that we have the output endpoint
         self._init_managers()
@@ -346,8 +321,14 @@ class StageMaster:
                 # Emit periodic metrics
                 await self._emit_stage_metrics()
 
-            # No EOF marker needed - downstream workers detect completion via:
-            # notify_upstream_finished() + queue drained (pending=0, claimed=0)
+            # Mark output queue as finished - downstream workers can now safely exit
+            # when the queue is drained (pending=0, claimed=0)
+            if self._queue_client:
+                try:
+                    self._queue_client.mark_queue_finished(self._output_queue_name)
+                    self.logger.debug(f"Marked output queue {self._output_queue_name} as finished")
+                except Exception as e:
+                    self.logger.warning(f"Failed to mark output queue as finished: {e}")
 
             # Emit completion event
             await self._emit_stage_completed()
@@ -455,16 +436,54 @@ class StageMaster:
     # =========================================================================
 
     async def notify_upstream_finished(self) -> None:
-        """Notify this stage that all upstream stages have finished."""
+        """Notify this stage that all upstream stages have finished.
+
+        Starts a background task to poll the upstream queue for completion.
+        When the queue is drained, workers are notified they can safely exit.
+        """
         self._upstream_finished = True
         self.logger.info(f"Stage {self.stage_id} notified: upstream finished")
 
         if self._worker_manager:
             await self._worker_manager.notify_upstream_finished()
 
-    def get_output_queue(self) -> Optional[WorkQueueQueueClient]:
-        """Get the output queue for downstream stages."""
-        return self._output_queue
+        # Start background task to poll for queue completion
+        if self.upstream_queue_name and self._queue_client:
+            asyncio.create_task(
+                self._poll_queue_completion(),
+                name=f"poll_completion_{self.stage_id}",
+            )
+
+    async def _poll_queue_completion(self) -> None:
+        """Poll upstream queue until it's safe for workers to exit.
+
+        Checks is_queue_finished() RPC which returns safe_to_exit=True when:
+        1. Queue is marked as finished (by upstream master)
+        2. Queue is drained (pending==0 && claimed==0)
+
+        When safe, notifies all workers via notify_safe_to_exit().
+        """
+        if not self._queue_client or not self.upstream_queue_name:
+            return
+
+        poll_interval = 0.1  # 100ms
+        while self._running:
+            try:
+                result = self._queue_client.is_queue_finished(self.upstream_queue_name)
+                if result.get("safe_to_exit", False):
+                    self.logger.debug(
+                        f"Stage {self.stage_id} upstream queue drained, notifying workers"
+                    )
+                    await self._worker_manager.notify_safe_to_exit()
+                    return
+            except Exception as e:
+                self.logger.debug(f"Error polling queue completion: {e}")
+
+            await asyncio.sleep(poll_interval)
+
+    def get_queue_client(self) -> Optional[WorkQueueQueueClient]:
+        """Get the queue client for this stage."""
+        return self._queue_client
 
     def get_output_queue_name(self) -> str:
         """Get the output queue name."""
@@ -473,9 +492,9 @@ class StageMaster:
     def get_status(self) -> StageStatus:
         """Get current stage status with queue metrics."""
         output_size = 0
-        if self._output_queue:
+        if self._queue_client:
             try:
-                stats = self._output_queue.get_stats(self._output_queue_name)
+                stats = self._queue_client.get_stats(self._output_queue_name)
                 output_size = stats.get("pending_count", 0)
             except Exception:
                 pass
@@ -518,13 +537,10 @@ class StageMaster:
         return 0
 
     async def cleanup_queue(self) -> None:
-        """Clean up output queue (called by runner after all consumers done)."""
-        if self._output_queue:
-            self._output_queue.stop()
-            self._output_queue = None
-        if self._output_broker:
-            self._output_broker.stop()
-            self._output_broker = None
+        """Clean up queue client (called by runner after all consumers done)."""
+        if self._queue_client:
+            self._queue_client.stop()
+            self._queue_client = None
 
     # =========================================================================
     # Backward Compatibility
