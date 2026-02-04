@@ -18,15 +18,15 @@ import click
 import uvicorn
 
 from solstice.webui.app import create_webui_app
-from solstice.webui.storage.slatedb_storage import PortalStorage
+from solstice.webui.state.manager import JobStateManager
 
 
 @click.command()
 @click.option(
-    "--storage-path",
+    "--workqueue-db-path",
     "-s",
     required=True,
-    help="SlateDB storage path (e.g., s3://bucket/solstice-history/ or /tmp/solstice-webui/)",
+    help="WorkQueue storage path (e.g., file:///tmp/workqueue.db)",
 )
 @click.option(
     "--host",
@@ -46,22 +46,21 @@ from solstice.webui.storage.slatedb_storage import PortalStorage
     is_flag=True,
     help="Enable auto-reload for development",
 )
-def history_server(storage_path: str, host: str, port: int, reload: bool):
+def history_server(workqueue_db_path: str, host: str, port: int, reload: bool):
     """Start Solstice History Server for viewing completed jobs.
 
     The History Server provides read-only access to archived job data
-    stored in SlateDB. It uses the same WebUI interface as the embedded
-    mode but reads data from historical archives instead of live jobs.
+    stored in WorkQueue storage. It uses the same WebUI interface as the embedded
+    mode but reads data from storage instead of live jobs.
 
     Example:
-        solstice history-server -s s3://my-bucket/solstice-history/ -p 8080
-        solstice history-server -s /tmp/solstice-webui/ --reload
+        solstice history-server -s file:///tmp/workqueue.db -p 8080
     """
     click.echo("╔════════════════════════════════════════════╗")
     click.echo("║   Solstice History Server                 ║")
     click.echo("╚════════════════════════════════════════════╝")
     click.echo()
-    click.echo(f"Storage:  {storage_path}")
+    click.echo(f"Storage:  {workqueue_db_path}")
     click.echo(f"Address:  http://{host}:{port}")
     click.echo()
     click.echo("Press Ctrl+C to stop")
@@ -69,7 +68,7 @@ def history_server(storage_path: str, host: str, port: int, reload: bool):
 
     # Initialize storage (read-only, caches readers per job)
     try:
-        storage = PortalStorage(storage_path)
+        storage = JobStateManager(workqueue_db_path)
         click.echo("✓ Connected to storage (read-only)")
     except Exception as e:
         click.echo(f"✗ Failed to initialize storage: {e}", err=True)

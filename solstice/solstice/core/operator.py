@@ -248,13 +248,6 @@ class Operator(ABC):
 
         self.task: Optional[asyncio.Task[None]] = None
 
-        # Metrics
-        self.processed_count: int = 0
-        self.error_count: int = 0
-        self.total_input_records: int = 0
-        self.total_output_records: int = 0
-        self.total_processing_time: float = 0.0
-
     @property
     def config(self) -> OperatorConfig:
         """User-defined configuration (immutable)."""
@@ -279,20 +272,6 @@ class Operator(ABC):
     def stage_id(self) -> str:
         """Stage ID from runtime."""
         return self._runtime.stage_id
-
-    # =========================================================================
-    # Metrics
-    # =========================================================================
-
-    def get_metrics(self) -> Dict[str, Any]:
-        """Get current metrics."""
-        return {
-            "processed_count": self.processed_count,
-            "error_count": self.error_count,
-            "total_input_records": self.total_input_records,
-            "total_output_records": self.total_output_records,
-            "total_processing_time": self.total_processing_time,
-        }
 
     # =========================================================================
     # Abstract Methods

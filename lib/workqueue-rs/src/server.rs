@@ -56,6 +56,14 @@ impl WorkQueueBrokerInner {
         );
 
         let storage = Arc::new(WorkQueueStorage::new(&config.db_path).await?);
+        Self::new_with_storage(config, storage).await
+    }
+
+    /// Create a new broker instance using existing storage
+    pub async fn new_with_storage(
+        config: WorkQueueConfig,
+        storage: Arc<WorkQueueStorage>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let state = Arc::new(WorkQueueState::new());
 
         // Recovery and GC tasks now only use storage (no memory state to recover)
@@ -120,16 +128,29 @@ impl WorkQueueBrokerInner {
         Ok(actual_addr.port())
     }
 
-    /// Stop the broker
+    /// Stop the broker gracefully (async version)
+    pub async fn stop_async(&mut self) {
+        tracing::info!("Stopping WorkQueue broker...");
+
+        // Stop our background tasks that use storage
+        self.recovery_task.stop_async().await;
+        self.gc_task.stop_async().await;
+    }
+
+    /// Stop the broker (sync version - signals stop but doesn't wait)
     pub fn stop(&mut self) {
         tracing::info!("Stopping WorkQueue broker...");
         self.recovery_task.stop();
         self.gc_task.stop();
+        // Note: storage.close() cannot be called here because it's async
+        // The async version should be preferred for clean shutdown
     }
 }
 
 impl Drop for WorkQueueBrokerInner {
     fn drop(&mut self) {
+        // Use sync stop in Drop - can't block
+        // Note: This may not cleanly close SlateDB, but it's the best we can do in Drop
         self.stop();
     }
 }

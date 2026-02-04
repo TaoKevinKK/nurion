@@ -23,7 +23,7 @@ from typing import Optional
 import uvicorn
 
 from solstice.webui.app import create_webui_app
-from solstice.webui.storage import JobStorage
+from solstice.webui.state.manager import JobStateManager
 from solstice.utils.logging import create_ray_logger
 
 
@@ -42,14 +42,13 @@ def _find_available_port(host: str, start_port: int, max_tries: int = 200) -> in
 class EmbeddedWebUIServer:
     """Run WebUI inside the job driver process.
 
-    Reads metrics from JobStorage (SlateDB) which is populated by
-    JobStateManager consuming from WorkQueue state queue.
+    Reads metadata directly from WorkQueue storage (pyO3) via JobStateManager.
     """
 
     def __init__(
         self,
         job_id: str,
-        storage: JobStorage,
+        storage: JobStateManager,
         host: str = "0.0.0.0",
         port_base: int = 5000,
     ):

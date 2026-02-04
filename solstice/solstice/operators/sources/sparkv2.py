@@ -177,7 +177,7 @@ class SparkSourceV2Master(StageMaster):
         self._running = True
 
         # 1. Create output queue (JVM will write directly to this)
-        self._queue_client = await self._create_queue_client()
+        await self._create_queue_client()
 
         # 2. Execute Spark write (JVM writes to Object Store + output_queue)
         splits_count = await self._execute_spark_write()
@@ -286,12 +286,6 @@ class SparkSourceV2Master(StageMaster):
             self._spark = None
             self._spark_initialized = False
             self.logger.info("Stopped Spark session")
-
-    def get_status(self):
-        """Get current source status."""
-        status = super().get_status()
-        status.metrics["splits_produced"] = self._splits_produced
-        return status
 
 
 # Set master_class after class definition

@@ -2,7 +2,7 @@
 
 > NOTE: This document references the former Tansu/Kafka queue model. The current
 > implementation uses the embedded WorkQueue backend. See
-> `design-docs/work-queue-redesign.md`.
+> `../work-queue-redesign.md`.
 
 _Design Document - December 2025_
 
@@ -12,7 +12,7 @@ _Design Document - December 2025_
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| **Backpressure Monitor** | ✅ Complete | `BackpressureMonitor` class in `managers/` |
+| **Backpressure Monitor** | ⚠️ Deprecated | Replaced by job-level backpressure (`runtime/backpressure.py`) |
 | **Queue Lag Tracking** | ✅ Complete | Via queue backend methods |
 | **Autoscaler Integration** | ✅ Complete | `SimpleAutoscaler` uses lag metrics |
 | **Dynamic Partition Management** | ✅ Complete | `PartitionManager` handles assignment |
@@ -103,20 +103,20 @@ The improved system consists of three main components working together:
 │  │  Partition 0 │ Partition 1 │ Partition 2 │ Partition 3    │  │
 │  └──────────────┼─────────────┼──────────────┼──────────────┘  │
 └─────────────────┼─────────────┼──────────────┼─────────────────┘
-                   │             │             │
-         ┌─────────┘             │             └─────────┐
-         │                       │                       │
-    ┌────▼────┐            ┌──────▼──────┐          ┌────▼────┐
-    │ Worker 1│            │  Worker 2   │          │ Worker 3 │
-    │ (P0)    │            │  (P1, P2)   │          │  (P3)    │
-    └─────────┘            └─────────────┘          └──────────┘
-         │                       │                       │
-         └───────────────────────┼───────────────────────┘
-                                 │
-                    ┌────────────▼────────────┐
-                    │   Downstream Stage      │
-                    │   (Consumes from all)   │
-                    └─────────────────────────┘
+                  │             │             │
+        ┌─────────┘             │             └─────────┐
+        │                       │                       │
+   ┌────▼────┐            ┌──────▼──────┐          ┌────▼────┐
+   │ Worker 1│            │  Worker 2   │          │ Worker 3 │
+   │ (P0)    │            │  (P1, P2)   │          │  (P3)    │
+   └─────────┘            └─────────────┘          └──────────┘
+        │                       │                       │
+        └───────────────────────┼───────────────────────┘
+                                │
+                   ┌────────────▼────────────┐
+                   │   Downstream Stage      │
+                   │   (Consumes from all)   │
+                   └─────────────────────────┘
 ```
 
 ## Solutions
@@ -126,18 +126,18 @@ The improved system consists of three main components working together:
 **Implementation Points**:
 
 1. **Dynamic partition count**: Adjust partition count based on worker count
-   - In `StageMaster._create_queue`, create partitions based on `max_workers` or current worker count
-   - Partition count = min(max_workers, actual needed partition count)
-   - Support partition rebalance when workers are dynamically adjusted
+  - In `StageMaster._create_queue`, create partitions based on `max_workers` or current worker count
+  - Partition count = min(max_workers, actual needed partition count)
+  - Support partition rebalance when workers are dynamically adjusted
 
 2. **Partition assignment strategy**:
-   - Use Kafka Consumer Group protocol for partition assignment
-   - Each worker is assigned to different partitions for true parallel consumption
-   - Trigger rebalance to reassign partitions when worker count changes
+  - Use Kafka Consumer Group protocol for partition assignment
+  - Each worker is assigned to different partitions for true parallel consumption
+  - Trigger rebalance to reassign partitions when worker count changes
 
 3. **Backward compatibility**:
-   - For single worker scenarios, maintain 1 partition
-   - For multi-worker scenarios, automatically use multiple partitions
+  - For single worker scenarios, maintain 1 partition
+  - For multi-worker scenarios, automatically use multiple partitions
 
 **Files Modified**:
 - `solstice/solstice/core/stage_master.py` - Modified `_create_queue` method to dynamically set partition count
@@ -149,23 +149,23 @@ The improved system consists of three main components working together:
 **Implementation Points**:
 
 1. **Partition progress monitoring**:
-   - Monitor consumption progress for each partition (latest_offset vs committed_offset)
-   - Calculate lag (pending messages) for each partition
-   - Periodically collect partition-level metrics
+  - Monitor consumption progress for each partition (latest_offset vs committed_offset)
+  - Calculate lag (pending messages) for each partition
+  - Periodically collect partition-level metrics
 
 2. **Skew detection algorithm**:
-   - Calculate standard deviation or coefficient of variation of all partition lags
-   - If lag difference exceeds threshold (e.g., max_lag > avg_lag * 2), skew is detected
-   - Record skewed partition IDs and lag values
+  - Calculate standard deviation or coefficient of variation of all partition lags
+  - If lag difference exceeds threshold (e.g., max_lag > avg_lag * 2), skew is detected
+  - Record skewed partition IDs and lag values
 
 3. **Skew mitigation strategies**:
-   - **Short-term mitigation**: Prioritize scheduling workers processing partitions with high lag
-   - **Long-term mitigation**: Consider partition size distribution during next repartition
-   - **Alerting**: Log skew events for operations monitoring
+  - **Short-term mitigation**: Prioritize scheduling workers processing partitions with high lag
+  - **Long-term mitigation**: Consider partition size distribution during next repartition
+  - **Alerting**: Log skew events for operations monitoring
 
 4. **Metrics exposure**:
-   - Add partition-level lag information to `StageMetrics`
-   - Provide skew detection results to autoscaler and monitoring systems
+  - Add partition-level lag information to `StageMetrics`
+  - Provide skew detection results to autoscaler and monitoring systems
 
 **Files Modified**:
 - `solstice/solstice/core/stage_master.py` - Add partition progress monitoring and skew detection
@@ -177,30 +177,30 @@ The improved system consists of three main components working together:
 **Implementation Points**:
 
 1. **Backpressure signal generation**:
-   - In `StageMaster`, generate backpressure signals based on queue lag, queue size, worker utilization, etc.
-   - Calculate slow-down factor (0.0-1.0), where 0.0 means complete pause, 1.0 means normal rate
-   - Implement `get_backpressure_signal` method (framework exists, needs completion)
+  - In `StageMaster`, generate backpressure signals based on queue lag, queue size, worker utilization, etc.
+  - Calculate slow-down factor (0.0-1.0), where 0.0 means complete pause, 1.0 means normal rate
+  - Implement `get_backpressure_signal` method (framework exists, needs completion)
 
 2. **Backpressure signal propagation**:
-   - Propagate backpressure signals to upstream via `MetaService` or direct calls
-   - Upstream stages adjust data production/processing rate based on backpressure signals
-   - Support multi-level propagation (stage A -> stage B -> stage C)
+  - Propagate backpressure signals to upstream via `MetaService` or direct calls
+  - Upstream stages adjust data production/processing rate based on backpressure signals
+  - Support multi-level propagation (stage A -> stage B -> stage C)
 
 3. **Source rate control**:
-   - Implement universal rate control mechanism in `SourceMaster` base class
-   - Adjust split production rate based on downstream backpressure signals
-   - Support pause/resume data production
-   - All sources (SparkV2, Lance, File, Iceberg, etc.) inherit this mechanism
+  - Implement universal rate control mechanism in `SourceMaster` base class
+  - Adjust split production rate based on downstream backpressure signals
+  - Support pause/resume data production
+  - All sources (SparkV2, Lance, File, Iceberg, etc.) inherit this mechanism
 
 4. **Operator rate control**:
-   - Support backpressure awareness in `Operator` base class
-   - Operators can adjust processing rate based on backpressure signals
-   - For stateful operators, support pausing processing
+  - Support backpressure awareness in `Operator` base class
+  - Operators can adjust processing rate based on backpressure signals
+  - For stateful operators, support pausing processing
 
 5. **SparkV2 Source special handling**:
-   - In `SparkSourceV2Master._execute_spark_write`, periodically check downstream backpressure state
-   - If backpressure is detected, pause or slow down Spark data writing
-   - Implement streaming write instead of one-time write of all data
+  - In `SparkSourceV2Master._execute_spark_write`, periodically check downstream backpressure state
+  - If backpressure is detected, pause or slow down Spark data writing
+  - Implement streaming write instead of one-time write of all data
 
 **Files Modified**:
 - `solstice/solstice/core/stage_master.py` - Complete backpressure signal generation and propagation
@@ -305,8 +305,8 @@ stateDiagram-v2
 1. `StageMaster.start()` is called
 2. `_create_queue()` is invoked
 3. `_compute_partition_count()` calculates partition count:
-   - If `partition_count` is explicitly set in config, use that value
-   - Otherwise: `max(1, min(max_workers, current_worker_count or max_workers))`
+  - If `partition_count` is explicitly set in config, use that value
+  - Otherwise: `max(1, min(max_workers, current_worker_count or max_workers))`
 4. Queue backend creates topic with computed partition count
 5. Workers are spawned and assigned to partitions via consumer group
 
@@ -315,9 +315,9 @@ stateDiagram-v2
 2. Kafka/Tansu automatically assigns partitions to workers
 3. Each worker consumes from its assigned partition(s)
 4. When worker count changes:
-   - New workers join consumer group → triggers rebalance
-   - Existing workers may be reassigned to different partitions
-   - Rebalance is handled by Kafka/Tansu consumer group protocol
+  - New workers join consumer group → triggers rebalance
+  - Existing workers may be reassigned to different partitions
+  - Rebalance is handled by Kafka/Tansu consumer group protocol
 
 **Shutdown Phase**:
 1. Workers leave consumer group gracefully
@@ -356,22 +356,22 @@ def _compute_partition_count(self) -> int:
 When workers start consuming:
 
 1. **Worker Registration**:
-   - Each worker creates a consumer with `group_id = f"{job_id}_{stage_id}"`
-   - Consumer subscribes to the topic (not manual assignment)
-   - Kafka/Tansu broker assigns partitions automatically
+  - Each worker creates a consumer with `group_id = f"{job_id}_{stage_id}"`
+  - Consumer subscribes to the topic (not manual assignment)
+  - Kafka/Tansu broker assigns partitions automatically
 
 2. **Partition Assignment**:
-   - If N workers and M partitions (M >= N):
-     - Each worker gets at least floor(M/N) partitions
-     - Some workers may get one extra partition
-   - If N workers and M partitions (M < N):
-     - Only M workers get partitions
-     - Remaining workers wait (will get partitions when M increases or other workers leave)
+  - If N workers and M partitions (M >= N):
+    - Each worker gets at least floor(M/N) partitions
+    - Some workers may get one extra partition
+  - If N workers and M partitions (M < N):
+    - Only M workers get partitions
+    - Remaining workers wait (will get partitions when M increases or other workers leave)
 
 3. **Rebalance Triggers**:
-   - New worker joins
-   - Worker leaves (graceful shutdown or crash)
-   - Partition count changes (rare, requires topic recreation)
+  - New worker joins
+  - Worker leaves (graceful shutdown or crash)
+  - Partition count changes (rare, requires topic recreation)
 
 #### Implementation Details
 
@@ -771,83 +771,83 @@ All three mechanisms require comprehensive unit tests to ensure correctness:
 **Test Cases**:
 
 1. **Partition Count Calculation**:
-   - Test with `partition_count=None` (auto mode)
-   - Test with explicit `partition_count` value
-   - Test with `max_workers=1` → should return 1 partition
-   - Test with `max_workers=4` → should return 4 partitions
-   - Test with `max_workers=8, current_workers=2` → should return 8 partitions
+  - Test with `partition_count=None` (auto mode)
+  - Test with explicit `partition_count` value
+  - Test with `max_workers=1` → should return 1 partition
+  - Test with `max_workers=4` → should return 4 partitions
+  - Test with `max_workers=8, current_workers=2` → should return 8 partitions
 
 2. **Queue Creation**:
-   - Test Tansu backend creates topic with correct partition count
-   - Test Memory backend warns and uses 1 partition when multiple requested
-   - Test partition count is stored in `_partition_count` attribute
+  - Test Tansu backend creates topic with correct partition count
+  - Test Memory backend warns and uses 1 partition when multiple requested
+  - Test partition count is stored in `_partition_count` attribute
 
 3. **Consumer Group Assignment**:
-   - Test worker creates consumer with correct group_id
-   - Test consumer subscribes (not manual assign) when group_id provided
-   - Test manual assignment fallback when group_id is None
+  - Test worker creates consumer with correct group_id
+  - Test consumer subscribes (not manual assign) when group_id provided
+  - Test manual assignment fallback when group_id is None
 
 4. **Rebalance Handling**:
-   - Test new worker joining triggers rebalance
-   - Test worker leaving triggers rebalance
-   - Test offset commit during rebalance
+  - Test new worker joining triggers rebalance
+  - Test worker leaving triggers rebalance
+  - Test offset commit during rebalance
 
 #### 2. Skew Detection Tests
 
 **Test Cases**:
 
 1. **Partition Lag Calculation**:
-   - Test lag calculation for single partition
-   - Test lag calculation for multiple partitions
-   - Test handling of missing committed offset (defaults to 0)
-   - Test handling of partition with no data (lag = 0)
+  - Test lag calculation for single partition
+  - Test lag calculation for multiple partitions
+  - Test handling of missing committed offset (defaults to 0)
+  - Test handling of partition with no data (lag = 0)
 
 2. **Skew Detection Algorithm**:
-   - Test no skew: all partitions have similar lag
-   - Test skew detected: one partition has 3x average lag
-   - Test edge case: all partitions have lag = 0
-   - Test edge case: only one partition has data
-   - Test threshold boundary: max_lag = avg_lag * threshold exactly
+  - Test no skew: all partitions have similar lag
+  - Test skew detected: one partition has 3x average lag
+  - Test edge case: all partitions have lag = 0
+  - Test edge case: only one partition has data
+  - Test threshold boundary: max_lag = avg_lag * threshold exactly
 
 3. **Skew Ratio Calculation**:
-   - Test skew_ratio = 1.0 when no skew
-   - Test skew_ratio = 2.5 when max_lag = 2.5 * avg_lag
-   - Test skew_ratio = 0.0 when avg_lag = 0
+  - Test skew_ratio = 1.0 when no skew
+  - Test skew_ratio = 2.5 when max_lag = 2.5 * avg_lag
+  - Test skew_ratio = 0.0 when avg_lag = 0
 
 4. **Metrics Collection**:
-   - Test `get_partition_metrics()` returns correct structure
-   - Test metrics include all partitions
-   - Test metrics are included in `StageMetrics`
+  - Test `get_partition_metrics()` returns correct structure
+  - Test metrics include all partitions
+  - Test metrics are included in `StageMetrics`
 
 #### 3. Backpressure Tests
 
 **Test Cases**:
 
 1. **Backpressure Detection**:
-   - Test activation when lag > threshold
-   - Test activation when queue_size > threshold
-   - Test deactivation with hysteresis (lag < threshold * 0.7)
-   - Test no activation when lag < threshold
-   - Test state persistence across multiple checks
+  - Test activation when lag > threshold
+  - Test activation when queue_size > threshold
+  - Test deactivation with hysteresis (lag < threshold * 0.7)
+  - Test no activation when lag < threshold
+  - Test state persistence across multiple checks
 
 2. **Backpressure Signal Generation**:
-   - Test signal is None when backpressure not active
-   - Test signal contains correct slow_down_factor
-   - Test signal contains correct reason message
-   - Test signal timestamp is set
+  - Test signal is None when backpressure not active
+  - Test signal contains correct slow_down_factor
+  - Test signal contains correct reason message
+  - Test signal timestamp is set
 
 3. **Source Rate Control**:
-   - Test `_check_backpressure_before_produce()` returns True when downstream has backpressure
-   - Test returns False when no downstream backpressure
-   - Test checks all downstream stages
-   - Test handles missing downstream stage gracefully
-   - Test `_produce_splits()` pauses when backpressure detected
-   - Test production resumes when backpressure clears
+  - Test `_check_backpressure_before_produce()` returns True when downstream has backpressure
+  - Test returns False when no downstream backpressure
+  - Test checks all downstream stages
+  - Test handles missing downstream stage gracefully
+  - Test `_produce_splits()` pauses when backpressure detected
+  - Test production resumes when backpressure clears
 
 4. **Backpressure Propagation**:
-   - Test signal propagation to upstream stages
-   - Test multi-level propagation (A -> B -> C)
-   - Test propagation handles missing upstream gracefully
+  - Test signal propagation to upstream stages
+  - Test multi-level propagation (A -> B -> C)
+  - Test propagation handles missing upstream gracefully
 
 ### Integration Tests
 
@@ -930,19 +930,19 @@ async def test_multi_partition_parallel_consumption():
 ### Stress Tests
 
 1. **High Concurrency**:
-   - 16 partitions, 16 workers
-   - Verify all partitions consumed in parallel
-   - Measure throughput improvement vs single partition
+  - 16 partitions, 16 workers
+  - Verify all partitions consumed in parallel
+  - Measure throughput improvement vs single partition
 
 2. **Extreme Skew**:
-   - 1 partition has 10000 messages, others have 10
-   - Verify skew detection works
-   - Verify system doesn't crash
+  - 1 partition has 10000 messages, others have 10
+  - Verify skew detection works
+  - Verify system doesn't crash
 
 3. **Rapid Backpressure Changes**:
-   - Rapidly toggle backpressure on/off
-   - Verify no race conditions
-   - Verify source responds correctly
+  - Rapidly toggle backpressure on/off
+  - Verify no race conditions
+  - Verify source responds correctly
 
 ### Test Implementation Files
 
@@ -1021,10 +1021,9 @@ class BackpressureConfig:
 ## References
 
 - [Queue Issues to Resolve](queue-issues-to-resolve.md)
-- [Dynamic Worker Scaling](dynamic-worker-scaling.md)
+- [Dynamic Worker Scaling](../dynamic-worker-scaling.md)
 - [Architecture Overview](architecture.md)
 
 ---
 
 _Last updated: December 2025_
-

@@ -32,12 +32,11 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import ray
 
 from solstice.queue import WorkQueueQueueClient, WorkQueueRecord
-from solstice.webui.state.producer import StateProducer
 from solstice.utils.logging import create_ray_logger
 from solstice.core.models import (
     QueueEndpoint,
@@ -53,6 +52,7 @@ from solstice.testing.fault_injection import (
     FAULT_BEFORE_PROCESS,
     FAULT_AFTER_PROCESS,
 )
+from solstice.webui.state.schema import encode_json, event_key, job_namespace, split_key
 
 if TYPE_CHECKING:
     from solstice.core.stage import Stage
@@ -70,11 +70,21 @@ class WorkerRuntime:
     broker_endpoint: Optional[QueueEndpoint] = None
     upstream_queue_name: Optional[str] = None
     output_queue_name: Optional[str] = None
-    state_queue_name: Optional[str] = None
 
     # Processing config
     batch_size: int = 100
     claim_timeout_secs: float = 60.0
+
+
+@dataclass(frozen=True)
+class ProcessResult:
+    """Processing result for a single message."""
+
+    output_message_bytes: Optional[bytes]
+    input_rows: int
+    input_bytes: int
+    output_rows: int
+    output_bytes: int
 
 
 class PayloadMissingError(RuntimeError):
@@ -105,7 +115,6 @@ class StageWorker:
         self.broker_endpoint = runtime.broker_endpoint
         self.upstream_queue_name = runtime.upstream_queue_name
         self.output_queue_name = runtime.output_queue_name
-        self.state_queue_name = runtime.state_queue_name
 
         # Processing config
         self._batch_size = runtime.batch_size
@@ -114,8 +123,6 @@ class StageWorker:
         # Store references
         self.stage = stage
         self.payload_store = payload_store
-
-        self._state_producer: Optional[StateProducer] = None
 
         # Queue connection (single client for all queues)
         self.queue_client: Optional[WorkQueueQueueClient] = None
@@ -129,9 +136,6 @@ class StageWorker:
         # Worker-level state
         self._running = False
         self._safe_to_exit = False  # Set by master when queue is confirmed drained
-
-        # Buffer for split metrics (batch produce)
-        self._pending_split_metrics: List[Any] = []
 
     def _init_operator(self) -> None:
         """Initialize Operator instance."""
@@ -172,42 +176,12 @@ class StageWorker:
         try:
             # Create queue connection (single client for all queues)
             self.queue_client = self._create_queue_client()
-
-            # Initialize state producer for WebUI
-            await self._init_state_producer()
-            await self._emit_worker_started()
-
-            # Start periodic metrics reporter
-            metrics_task = asyncio.create_task(
-                self._periodic_metrics_loop(),
-                name=f"metrics_{self.worker_id}",
-            )
-
-            try:
-                await self._run_claim_loop()
-                self.logger.info(f"Worker {self.worker_id} claim loop completed")
-            finally:
-                metrics_task.cancel()
-                try:
-                    await metrics_task
-                except asyncio.CancelledError:
-                    pass
-
-            self.logger.info(f"Worker {self.worker_id} emitting stopped event")
-            await self._emit_worker_stopped(reason="completed")
-
-            # Collect stats
-            op = self._operator
-            return {
-                "worker_id": self.worker_id,
-                "processed_count": op.processed_count if op else 0,
-                "error_count": op.error_count if op else 0,
-            }
+            await self._run_claim_loop()
+            self.logger.info(f"Worker {self.worker_id} claim loop completed")
+            return {"worker_id": self.worker_id}
 
         except Exception as e:
             self.logger.error(f"Worker {self.worker_id} failed: {e}")
-            await self._emit_exception(e)
-            await self._emit_worker_stopped(reason="failed")
             raise
         finally:
             self._running = False
@@ -250,16 +224,16 @@ class StageWorker:
                 # Process each claimed message
                 for record in records:
                     if not record.claim_token:
-                        raise RuntimeError(
-                            f"Missing claim_token for message {record.msg_id}"
-                        )
+                        raise RuntimeError(f"Missing claim_token for message {record.msg_id}")
 
                     message = QueueMessage.from_bytes(record.value)
                     split_id = make_split_id(self.job_id, self.stage_id, record.msg_id)
 
                     try:
                         check_fault(FAULT_BEFORE_PROCESS)
-                        output_bytes = await self._process_message(message, record, split_id)
+                        process_start = time.time()
+                        result = await self._process_message(message, record, split_id)
+                        processing_ms = max(0.0, (time.time() - process_start) * 1000.0)
                         check_fault(FAULT_AFTER_PROCESS)
                     except PayloadMissingError as e:
                         if self.upstream_queue_name:
@@ -267,28 +241,56 @@ class StageWorker:
                                 f"Payload missing for msg_id={e.msg_id}, "
                                 f"nacking for retry: {e.payload_key}"
                             )
+                            event_puts = self._build_event_puts(
+                                event_type="nack",
+                                record=record,
+                                split_id=split_id,
+                                message=message,
+                                processing_ms=0.0,
+                                input_rows=0,
+                                input_bytes=0,
+                                output_rows=0,
+                                output_bytes=0,
+                                reason="payload_missing",
+                            )
                             self.queue_client.nack(
                                 self.upstream_queue_name,
                                 [record.msg_id],
                                 claim_tokens=[record.claim_token],
                                 reason="payload_missing",
+                                state_namespace=job_namespace(self.job_id),
+                                state_puts=event_puts,
                             )
                             continue
                         raise
 
                     check_fault(FAULT_BEFORE_MARK_PROCESSED)
-                    self._operator.processed_count += 1
                     check_fault(FAULT_AFTER_MARK_PROCESSED)
 
+                    event_puts = self._build_event_puts(
+                        event_type="ack",
+                        record=record,
+                        split_id=split_id,
+                        message=message,
+                        processing_ms=processing_ms,
+                        input_rows=result.input_rows,
+                        input_bytes=result.input_bytes,
+                        output_rows=result.output_rows,
+                        output_bytes=result.output_bytes,
+                        reason="completed",
+                    )
+
                     # Atomic ack (+ forward if output exists)
-                    if output_bytes and self.output_queue_name:
+                    if result.output_message_bytes and self.output_queue_name:
                         # Atomic: ack upstream + push downstream
                         self.queue_client.ack_and_forward(
                             upstream_queue=self.upstream_queue_name,
                             upstream_msg_ids=[record.msg_id],
                             upstream_claim_tokens=[record.claim_token],
                             downstream_queue=self.output_queue_name,
-                            downstream_payloads=[output_bytes],
+                            downstream_payloads=[result.output_message_bytes],
+                            state_namespace=job_namespace(self.job_id),
+                            state_puts=event_puts,
                         )
                     else:
                         # No output, just ack
@@ -296,6 +298,8 @@ class StageWorker:
                             self.upstream_queue_name,
                             [record.msg_id],
                             claim_tokens=[record.claim_token],
+                            state_namespace=job_namespace(self.job_id),
+                            state_puts=event_puts,
                         )
 
             except asyncio.CancelledError:
@@ -314,18 +318,12 @@ class StageWorker:
                     is_broker_error = True
 
                 if is_broker_error:
-                    self.logger.error(
-                        f"Worker {self.worker_id} broker error, stopping: {e}"
-                    )
+                    self.logger.error(f"Worker {self.worker_id} broker error, stopping: {e}")
                     raise RuntimeError("broker_unavailable") from e
-                if self._operator:
-                    self._operator.error_count += 1
                 self.logger.error(f"Error in worker {self.worker_id}: {e}")
                 await asyncio.sleep(0.1)
 
-        self.logger.info(
-            f"Worker {self.worker_id} finished: processed={self._operator.processed_count if self._operator else 0}"
-        )
+        self.logger.info(f"Worker {self.worker_id} finished")
 
     def _should_exit(self) -> bool:
         """Check if worker should exit.
@@ -344,11 +342,11 @@ class StageWorker:
         message: QueueMessage,
         record: WorkQueueRecord,
         split_id: str,
-    ) -> Optional[bytes]:
+    ) -> ProcessResult:
         """Process a single message using the operator.
 
         Returns:
-            Output message bytes if there's output to forward, None otherwise.
+            ProcessResult containing output bytes and metrics.
             The caller is responsible for atomic ack_and_forward.
         """
         from solstice.core.models import Split, SplitPayload
@@ -379,24 +377,12 @@ class StageWorker:
             )
 
         # Process with operator
-        start_time = time.time()
         output_payload = self._operator.process_split(split, payload)
-        process_time_ms = (time.time() - start_time) * 1000
 
-        # Update metrics
-        input_records = len(payload) if payload else 0
-        output_records = len(output_payload) if output_payload else 0
-        self._operator.total_input_records += input_records
-        self._operator.total_output_records += output_records
-        self._operator.total_processing_time += process_time_ms / 1000
-
-        # Record split metric for batch sending
-        self._record_split_metric(
-            msg_id=record.msg_id,
-            process_time_ms=process_time_ms,
-            input_records=input_records,
-            output_records=output_records,
-        )
+        input_rows = len(payload) if payload else 0
+        input_bytes = int(payload.data.nbytes) if payload else 0
+        output_rows = len(output_payload) if output_payload else 0
+        output_bytes = int(output_payload.data.nbytes) if output_payload else 0
 
         # Prepare output for atomic ack_and_forward (if any)
         if output_payload and self.output_queue_name:
@@ -412,9 +398,72 @@ class StageWorker:
                     "parent_message_id": message.message_id,
                 },
             )
-            return output_message.to_bytes()
+            return ProcessResult(
+                output_message_bytes=output_message.to_bytes(),
+                input_rows=input_rows,
+                input_bytes=input_bytes,
+                output_rows=output_rows,
+                output_bytes=output_bytes,
+            )
 
-        return None
+        return ProcessResult(
+            output_message_bytes=None,
+            input_rows=input_rows,
+            input_bytes=input_bytes,
+            output_rows=output_rows,
+            output_bytes=output_bytes,
+        )
+
+    def _build_event_puts(
+        self,
+        event_type: str,
+        record: WorkQueueRecord,
+        split_id: str,
+        message: QueueMessage,
+        processing_ms: float,
+        input_rows: int,
+        input_bytes: int,
+        output_rows: int,
+        output_bytes: int,
+        reason: str,
+    ) -> Dict[str, bytes]:
+        ts_ns = time.time_ns()
+        queue_wait_ms = max(0.0, (time.time() - record.created_at) * 1000.0)
+        parent_message_id = message.metadata.get("parent_message_id")
+        source_stage = message.metadata.get("source_stage")
+
+        base_event = {
+            "event_type": event_type,
+            "timestamp": time.time(),
+            "worker_id": self.worker_id,
+            "processing_ms": processing_ms,
+            "queue_wait_ms": queue_wait_ms,
+            "input_rows": input_rows,
+            "input_bytes": input_bytes,
+            "output_rows": output_rows,
+            "output_bytes": output_bytes,
+            "reason": reason,
+        }
+        split_event = dict(base_event)
+        split_event.update(
+            {
+                "timestamp_ns": ts_ns,
+                "stage_id": self.stage_id,
+                "split_id": split_id,
+                "parent_message_id": parent_message_id,
+                "source_stage": source_stage,
+            }
+        )
+        if parent_message_id is None:
+            split_event.pop("parent_message_id", None)
+        if source_stage is None:
+            split_event.pop("source_stage", None)
+
+        puts = {
+            event_key(self.stage_id, ts_ns, record.msg_id): encode_json(base_event),
+            split_key(split_id): encode_json(split_event),
+        }
+        return puts
 
     async def _cleanup(self) -> None:
         """Clean up resources."""
@@ -424,12 +473,6 @@ class StageWorker:
             except Exception as e:
                 self.logger.warning(f"Error closing operator: {e}")
             self._operator = None
-
-        if self._state_producer:
-            try:
-                await self._state_producer.stop()
-            except Exception as e:
-                self.logger.warning(f"Error stopping state producer: {e}")
 
         if self.queue_client:
             self.queue_client.stop()
@@ -450,19 +493,12 @@ class StageWorker:
         """Get current worker status."""
         import os
 
-        op = self._operator
-
         return {
             "worker_id": self.worker_id,
             "stage_id": self.stage_id,
             "pid": os.getpid(),
             "running": self._running,
             "safe_to_exit": self._safe_to_exit,
-            "processed_count": op.processed_count if op else 0,
-            "error_count": op.error_count if op else 0,
-            "input_records": op.total_input_records if op else 0,
-            "output_records": op.total_output_records if op else 0,
-            "processing_time_s": op.total_processing_time if op else 0,
         }
 
     def stop(self) -> None:
@@ -485,155 +521,3 @@ class StageWorker:
             raise ValueError(f"Method '{method_name}' is not marked @master_callable.")
 
         return method(*args, **kwargs)
-
-    # === State Producer and Events ===
-
-    async def _init_state_producer(self) -> None:
-        """Initialize state producer for metrics push."""
-        if not self.broker_endpoint or not self.state_queue_name:
-            return
-
-        try:
-            state_queue = self._create_queue_client()
-            self._state_producer = StateProducer(
-                job_id=self.job_id,
-                queue_client=state_queue,
-                state_queue_name=self.state_queue_name,
-            )
-            await self._state_producer.start()
-            self.logger.debug("State producer initialized")
-        except Exception as e:
-            self.logger.warning(f"Failed to init state producer: {e}")
-            self._state_producer = None
-
-    async def _emit_worker_started(self) -> None:
-        """Emit WORKER_STARTED event."""
-        if not self._state_producer:
-            return
-
-        try:
-            from solstice.webui.state.messages import worker_started_message
-
-            msg = worker_started_message(
-                job_id=self.job_id,
-                stage_id=self.stage_id,
-                worker_id=self.worker_id,
-            )
-            await self._state_producer.produce(msg)
-        except Exception as e:
-            self.logger.debug(f"Failed to emit worker started: {e}")
-
-    async def _emit_worker_stopped(self, reason: str = "completed") -> None:
-        """Emit WORKER_STOPPED event."""
-        if not self._state_producer:
-            return
-
-        try:
-            from solstice.webui.state.messages import worker_stopped_message
-
-            msg = worker_stopped_message(
-                job_id=self.job_id,
-                stage_id=self.stage_id,
-                worker_id=self.worker_id,
-                reason=reason,
-            )
-            await self._state_producer.produce(msg)
-        except Exception as e:
-            self.logger.debug(f"Failed to emit worker stopped: {e}")
-
-    async def _periodic_metrics_loop(self, interval_s: float = 5.0) -> None:
-        """Background task to emit worker state and split metrics periodically."""
-        while self._running:
-            try:
-                await asyncio.sleep(interval_s)
-                if self._running:
-                    await self._emit_worker_state()
-                    await self._emit_split_metrics_batch()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                self.logger.debug(f"Error in periodic metrics loop: {e}")
-
-    def _record_split_metric(
-        self,
-        msg_id: str,
-        process_time_ms: float,
-        input_records: int = 0,
-        output_records: int = 0,
-    ) -> None:
-        """Record a split metric for later batching."""
-        from solstice.webui.state.messages import SplitMetric
-
-        self._pending_split_metrics.append(
-            SplitMetric(
-                stage_id=self.stage_id,
-                msg_id=msg_id,
-                worker_id=self.worker_id,
-                process_time_ms=process_time_ms,
-                input_records=input_records,
-                output_records=output_records,
-            )
-        )
-
-    async def _emit_worker_state(self) -> None:
-        """Emit WORKER_STATE message."""
-        if not self._state_producer:
-            return
-
-        try:
-            from solstice.webui.state.messages import worker_state_message
-
-            msg = worker_state_message(
-                job_id=self.job_id,
-                stage_id=self.stage_id,
-                worker_id=self.worker_id,
-                status="RUNNING" if self._running else "STOPPED",
-            )
-            await self._state_producer.produce(msg)
-        except Exception as e:
-            self.logger.debug(f"Failed to emit worker state: {e}")
-
-    async def _emit_split_metrics_batch(self) -> None:
-        """Emit SPLIT_METRICS_BATCH message."""
-        if not self._state_producer:
-            return
-
-        if not self._pending_split_metrics:
-            return
-
-        try:
-            from solstice.webui.state.messages import split_metrics_batch_message
-
-            metrics = self._pending_split_metrics
-            self._pending_split_metrics = []
-
-            msg = split_metrics_batch_message(
-                job_id=self.job_id,
-                stage_id=self.stage_id,
-                worker_id=self.worker_id,
-                metrics=metrics,
-            )
-            await self._state_producer.produce(msg)
-        except Exception as e:
-            self.logger.debug(f"Failed to emit split metrics batch: {e}")
-
-    async def _emit_exception(self, exception: Exception) -> None:
-        """Emit EXCEPTION event."""
-        if not self._state_producer:
-            return
-
-        try:
-            import traceback
-            from solstice.webui.state.messages import exception_message
-
-            msg = exception_message(
-                job_id=self.job_id,
-                stage_id=self.stage_id,
-                worker_id=self.worker_id,
-                exception_type=type(exception).__name__,
-                message=str(exception),
-                stacktrace=traceback.format_exc(),
-            )
-            await self._state_producer.produce(msg)
-        except Exception as e:
-            self.logger.debug(f"Failed to emit exception: {e}")

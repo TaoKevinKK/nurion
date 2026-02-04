@@ -7,12 +7,14 @@ from workqueue_py.workqueue_py import (  # type: ignore
     BrokerConfig as _BrokerConfig,
     BrokerError as _BrokerError,
     WorkQueueBroker as _WorkQueueBroker,
+    WorkQueueStorageReader as _WorkQueueStorageReader,
 )
 
 # Re-export for better IDE support
 BrokerConfig = _BrokerConfig
 BrokerError = _BrokerError
 WorkQueueBroker = _WorkQueueBroker
+WorkQueueStorageReader = _WorkQueueStorageReader
 
 
 class BrokerEventHandler:
@@ -66,5 +68,6 @@ __all__ = [
     "BrokerConfig",
     "BrokerError",
     "WorkQueueBroker",
+    "WorkQueueStorageReader",
     "BrokerEventHandler",
 ]

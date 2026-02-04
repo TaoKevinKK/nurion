@@ -16,7 +16,7 @@
 
 SourceMaster is responsible for:
 1. Generating splits via the abstract plan_splits() method
-2. Writing split metadata to a source queue (WorkQueue)
+2. Writing split metadata to a planner queue (WorkQueue)
 3. Spawning workers that consume from this queue and process data
 
 Architecture:
@@ -48,9 +48,9 @@ Architecture:
     └─────────────────────────────────────────────────────────────────┘
 
 Key design decisions:
-- SourceMaster uses WorkQueue for source queue
-- Split metadata is pushed to source queue, workers read actual data
-- Workers claim from source queue, produce to output queue
+- SourceMaster uses WorkQueue for planner queue
+- Split metadata is pushed to planner queue, workers read actual data
+- Workers claim from planner queue, produce to output queue
 - No partition assignment - workers compete for messages
 """
 
@@ -71,13 +71,10 @@ from tenacity import (
 
 from solstice.core.models import Split
 from solstice.core.stage_master import (
-    QueueEndpoint,
     QueueMessage,
-    StageStatus,
     StageMaster,
 )
 from solstice.queue import (
-    WorkQueueBrokerManager,
     WorkQueueQueueClient,
 )
 from solstice.utils.logging import create_ray_logger
@@ -98,8 +95,8 @@ class SourceMaster(StageMaster):
 
     SourceMaster extends StageMaster with split generation capability:
     1. Generate splits via plan_splits()
-    2. Write split metadata to a source queue
-    3. Spawn workers that claim from source queue
+    2. Write split metadata to a planner queue
+    3. Spawn workers that claim from planner queue
     4. Workers produce output to output queue (for downstream stages)
 
     This design ensures:
@@ -126,62 +123,35 @@ class SourceMaster(StageMaster):
             runtime=runtime,
         )
 
-        # Source queue (for split metadata, distinct from output queue)
-        self._source_broker: Optional[WorkQueueBrokerManager] = None
-        self._source_client: Optional[WorkQueueQueueClient] = None
-        self._source_queue_name = f"{job_id}_{self.stage_id}_source"
-        self._source_endpoint: Optional[QueueEndpoint] = None
+        # Planner queue name (for split metadata, distinct from output queue)
+        self._planner_queue_name = f"{job_id}_{self.stage_id}_planner"
 
         # Metrics
         self._splits_produced = 0
         self._splits_production_done = False
 
-        # Backpressure configuration (from stage)
-        self._backpressure_threshold_queue_size = stage.backpressure_threshold_queue_size
-
         # Override logger
         self.logger = create_ray_logger(f"SourceMaster-{self.stage_id}")
 
-    async def _create_source_queue(self) -> WorkQueueQueueClient:
-        """Connect to shared broker and create source queue.
+    async def _create_planner_queue(self) -> None:
+        """Create queue client and planner queue.
 
         All stages use the same shared broker managed by RayJobRunner.
-
-        Returns:
-            WorkQueueQueueClient for pushing/claiming messages.
         """
-        endpoint = self.runtime.broker_endpoint
-        if not endpoint:
-            raise RuntimeError(f"Source {self.stage_id}: broker_endpoint is required")
+        # Create shared queue client (also used for output queue)
+        await self._create_queue_client()
 
-        broker_url = f"{endpoint.host}:{endpoint.port}"
-        from solstice.queue.workqueue import _compute_heartbeat_interval
-
-        client = WorkQueueQueueClient(
-            broker_url,
-            worker_id=f"source-{self.stage_id}",
-            heartbeat_interval_secs=_compute_heartbeat_interval(self.runtime.claim_timeout_secs),
-        )
-        client.start()
-        self._source_client = client
-
-        self._source_endpoint = QueueEndpoint(
-            host=endpoint.host,
-            port=endpoint.port,
-            storage_url=endpoint.storage_url,
-        )
-
-        client.create_queue(self._source_queue_name)
-        self.logger.info(f"Connected to broker at {broker_url} for source {self.stage_id}")
-        return client
+        # Create planner queue
+        self._queue_client.create_queue(self._planner_queue_name)
+        self.logger.info(f"Created planner queue {self._planner_queue_name}")
 
     async def start(self) -> None:
         """Start the source master.
 
-        1. Create source queue for split metadata
-        2. Generate splits and write to source queue
+        1. Create planner queue for split metadata
+        2. Generate splits and write to planner queue
         3. Create output queue (via parent StageMaster)
-        4. Spawn workers that consume from source queue
+        4. Spawn workers that consume from planner queue
         """
         if self._running:
             return
@@ -190,16 +160,14 @@ class SourceMaster(StageMaster):
         self._start_time = time.time()
         self._running = True
 
-        # Create source queue (broker + client for split metadata)
-        await self._create_source_queue()
+        # Create queue client and planner queue
+        await self._create_planner_queue()
 
-        # Generate splits and write to source queue
+        # Generate splits and write to planner queue
         await self._produce_splits()
 
-        self._queue_client = await self._create_queue_client()
-
-        # Set upstream queue name to our source queue (workers will consume from here)
-        self.upstream_queue_name = self._source_queue_name
+        # Set upstream queue name to our planner queue (workers will consume from here)
+        self.upstream_queue_name = self._planner_queue_name
 
         # Initialize managers (must be called after output queue is created)
         self._init_managers()
@@ -207,8 +175,8 @@ class SourceMaster(StageMaster):
         # Assert managers are initialized (for type checker)
         assert self._worker_manager is not None
 
-        # Update worker manager with source queue info (workers consume from source queue)
-        self._worker_manager.set_upstream_queue_name(self._source_queue_name)
+        # Update worker manager with planner queue info (workers consume from planner queue)
+        self._worker_manager.set_upstream_queue_name(self._planner_queue_name)
 
         # Spawn workers (min workers are required, so is_min_worker=True)
         for i in range(self.stage.min_parallelism):
@@ -225,7 +193,7 @@ class SourceMaster(StageMaster):
         )
 
     async def _produce_splits(self) -> None:
-        """Generate splits and write to source queue with backpressure awareness."""
+        """Generate splits and write to planner queue with backpressure awareness."""
         self.logger.info(f"Generating splits for source {self.stage_id}")
 
         split_iterator = self.plan_splits()
@@ -275,31 +243,29 @@ class SourceMaster(StageMaster):
     async def _notify_workers_splits_done(self) -> None:
         """Notify workers that all splits have been produced.
 
-        1. Marks source queue as finished via RPC (authoritative signal)
+        1. Marks planner queue as finished via RPC (authoritative signal)
         2. Notifies workers that upstream is finished
         3. Starts polling task to check queue completion and notify workers to exit
         """
-        # Mark source queue as finished - this is the authoritative signal
+        # Mark planner queue as finished - this is the authoritative signal
         # that no more splits will be produced
-        if self._source_client:
+        if self._queue_client:
             try:
-                self._source_client.mark_queue_finished(self._source_queue_name)
-                self.logger.info(
-                    f"Marked source queue {self._source_queue_name} as finished"
-                )
+                self._queue_client.mark_queue_finished(self._planner_queue_name)
+                self.logger.info(f"Marked planner queue {self._planner_queue_name} as finished")
             except Exception as e:
-                self.logger.warning(f"Failed to mark source queue as finished: {e}")
+                self.logger.warning(f"Failed to mark planner queue as finished: {e}")
 
-        # Start background task to poll for source queue completion
+        # Start background task to poll for planner queue completion
         # Workers will be notified via notify_safe_to_exit when queue is drained
-        if self._source_client:
+        if self._queue_client:
             asyncio.create_task(
-                self._poll_source_queue_completion(),
+                self._poll_planner_queue_completion(),
                 name=f"poll_source_completion_{self.stage_id}",
             )
 
-    async def _poll_source_queue_completion(self) -> None:
-        """Poll source queue until it's safe for workers to exit.
+    async def _poll_planner_queue_completion(self) -> None:
+        """Poll planner queue until it's safe for workers to exit.
 
         Checks is_queue_finished() RPC which returns safe_to_exit=True when:
         1. Queue is marked as finished (done above)
@@ -307,7 +273,7 @@ class SourceMaster(StageMaster):
 
         When safe, notifies all workers via notify_safe_to_exit().
         """
-        if not self._source_client:
+        if not self._queue_client:
             return
 
         poll_interval = 0.1  # 100ms
@@ -316,11 +282,11 @@ class SourceMaster(StageMaster):
 
         while self._running:
             try:
-                result = self._source_client.is_queue_finished(self._source_queue_name)
+                result = self._queue_client.is_queue_finished(self._planner_queue_name)
                 consecutive_errors = 0  # Reset on success
                 if result.get("safe_to_exit", False):
                     self.logger.debug(
-                        f"Source {self.stage_id} source queue drained, notifying workers"
+                        f"Source {self.stage_id} planner queue drained, notifying workers"
                     )
                     if self._worker_manager:
                         await self._worker_manager.notify_safe_to_exit()
@@ -332,10 +298,8 @@ class SourceMaster(StageMaster):
                         f"Source {self.stage_id} failed to poll queue completion "
                         f"after {max_consecutive_errors} consecutive errors: {e}"
                     )
-                    raise RuntimeError(
-                        f"Failed to poll source queue completion: {e}"
-                    ) from e
-                self.logger.debug(f"Error polling source queue completion: {e}")
+                    raise RuntimeError(f"Failed to poll planner queue completion: {e}") from e
+                self.logger.debug(f"Error polling planner queue completion: {e}")
 
             await asyncio.sleep(poll_interval)
 
@@ -345,37 +309,18 @@ class SourceMaster(StageMaster):
         Returns:
             True if production should be paused, False otherwise
         """
-        # Check if we have downstream stages configured
-        if not self._downstream_stage_refs:
+        provider = self._backpressure_provider
+        if not provider:
             return False
 
-        # Check all downstream stages for backpressure
-        for stage_id, stage_ref in self._downstream_stage_refs.items():
-            try:
-                # Get status from downstream stage (sync method)
-                status = stage_ref.get_status()
-
-                # Check if backpressure is active
-                if status.backpressure_active:
-                    self.logger.debug(
-                        f"Backpressure detected from downstream stage {stage_id}, "
-                        f"pausing split production"
-                    )
-                    return True
-
-                # Also check queue size if available
-                # Use a threshold (e.g., 80% of max queue size)
-                queue_size = status.output_queue_size
-                if queue_size > self._backpressure_threshold_queue_size * 0.8:
-                    self.logger.debug(
-                        f"Downstream queue size {queue_size} approaching threshold, "
-                        f"slowing down production"
-                    )
-                    return True
-
-            except Exception as e:
-                self.logger.debug(f"Error checking backpressure from {stage_id}: {e}")
-                # Continue checking other downstream stages
+        try:
+            if provider.should_pause(self.stage_id):
+                self.logger.debug(
+                    f"Backpressure detected for {self.stage_id}, pausing split production"
+                )
+                return True
+        except Exception as e:
+            self.logger.debug(f"Error checking backpressure for {self.stage_id}: {e}")
 
         return False
 
@@ -401,7 +346,7 @@ class SourceMaster(StageMaster):
         await _do_produce()
 
     async def _produce_split(self, split: Split) -> None:
-        """Produce a split to the source queue.
+        """Produce a split to the planner queue.
 
         The split metadata is serialized and pushed to the queue.
         Workers will claim this and use the SourceOperator to read actual data.
@@ -418,10 +363,10 @@ class SourceMaster(StageMaster):
             },
         )
 
-        # Push to source queue
-        if not self._source_client:
-            raise RuntimeError("Source client not initialized")
-        self._source_client.push(self._source_queue_name, message.to_bytes())
+        # Push to planner queue
+        if not self._queue_client:
+            raise RuntimeError("Queue client not initialized")
+        self._queue_client.push(self._planner_queue_name, message.to_bytes())
 
         self.logger.debug(f"Produced split {split.split_id}")
 
@@ -436,36 +381,10 @@ class SourceMaster(StageMaster):
         """
         raise NotImplementedError("plan_splits must be implemented by subclasses")
 
-    async def cleanup_queue(self) -> None:
-        """Clean up queues. Called by runner after all consumers are done."""
-        if self._source_client:
-            self._source_client.stop()
-            self._source_client = None
-        await super().cleanup_queue()
-
     def get_source_client(self) -> Optional[WorkQueueQueueClient]:
-        """Get the source queue client (for debugging/testing)."""
-        return self._source_client
+        """Get the queue client (for debugging/testing)."""
+        return self._queue_client
 
-    def get_source_queue_name(self) -> str:
-        """Get the source queue name."""
-        return self._source_queue_name
-
-    def get_source_endpoint(self) -> Optional[QueueEndpoint]:
-        """Get the source endpoint (for debugging/testing)."""
-        return self._source_endpoint
-
-    def get_status(self) -> StageStatus:
-        """Get current source status with queue metrics."""
-        status = super().get_status()
-
-        # Add source queue size
-        if self._source_client:
-            try:
-                stats = self._source_client.get_stats(self._source_queue_name)
-                status.metrics["source_queue_pending"] = stats.get("pending_count", 0)
-            except Exception:
-                pass
-
-        status.metrics["splits_produced"] = self._splits_produced
-        return status
+    def get_planner_queue_name(self) -> str:
+        """Get the planner queue name."""
+        return self._planner_queue_name

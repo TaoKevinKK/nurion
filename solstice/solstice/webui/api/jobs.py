@@ -15,11 +15,8 @@
 """Jobs API - list and retrieve job information.
 
 Architecture:
-- JobRunner writes to JobStorage (SlateDB) via JobStateManager
-- Portal/History Server reads from JobStorage (read-only)
-- Both running and completed jobs use the same code path
-
-Note: storage is guaranteed to exist (app won't start without it).
+- JobRunner writes metadata to WorkQueue state (gRPC)
+- WebUI reads directly from WorkQueue storage (pyO3)
 """
 
 from typing import Any, Dict, Optional

@@ -2,7 +2,7 @@
 
 > NOTE: This document references the former Tansu/Kafka queue model. The current
 > implementation uses the embedded WorkQueue backend. See
-> `design-docs/work-queue-redesign.md`.
+> `../work-queue-redesign.md`.
 
 ## Overview
 
@@ -65,10 +65,9 @@ Source.output_queue <── pull ── Transform.workers ── produce ──>
   - Coordinate shutdown.
 
 * `StageMaster`: Manages the output queue and a pool of StageWorkers. Delegates to component managers:
-  - `PartitionManager`: Partition assignment and rebalancing
   - `WorkerManager`: Worker lifecycle (spawn, stop, status tracking)
   - `RecoveryManager`: Failure tracking and worker recovery
-  - `BackpressureMonitor`: Queue lag monitoring and scaling signals
+  - Backpressure/autoscaling use job-level WorkQueue stats
 
 * `StageWorker`: Executes the user operator over batches. Responsibilities:
   - Pull messages from upstream queue.
@@ -153,7 +152,7 @@ When all stages are complete, the runner stops the job.
 ### Natural Backpressure (Pull Model)
 
 * **Queue lag-based throttling**: When downstream workers can't keep up, upstream queue fills up, naturally throttling producers.
-* **Lag monitoring**: `BackpressureMonitor` tracks queue lag and can signal autoscaler to adjust worker count.
+* **Lag monitoring**: Job-level WorkQueue stats drive backpressure/autoscaling decisions.
 * **No explicit backpressure signals needed**: Downstream controls the flow rate by its pull frequency.
 
 ### Worker Scheduling

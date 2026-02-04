@@ -15,7 +15,7 @@
 """FastAPI application factory for Solstice WebUI.
 
 Provides shared utilities and app factory for runtime and history modes.
-Storage is injected via the JobStorageReader interface.
+Storage is injected via JobStateManager.
 """
 
 import os
@@ -26,7 +26,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from solstice.webui.storage import JobStorageReader
+from solstice.webui.state.manager import JobStateManager
 from solstice.utils.logging import create_ray_logger
 
 
@@ -37,7 +37,7 @@ STATIC_DIR = WEBUI_DIR / "static"
 
 
 def create_webui_app(
-    storage: JobStorageReader,
+    storage: JobStateManager,
     title: str = "Solstice WebUI",
     base_path: str = "",
 ) -> FastAPI:
@@ -47,7 +47,7 @@ def create_webui_app(
     All routes read from the injected storage adapter.
 
     Args:
-        storage: Storage instance for reading data (PortalStorage)
+        storage: JobStateManager instance for reading data
         title: Application title
         base_path: URL prefix for all routes (e.g., "/solstice" for Portal, "" for History Server)
 
@@ -154,12 +154,6 @@ def create_webui_app(
         # Get workers for this stage
         workers = storage.list_workers(job_id, stage_id=stage_id, limit=500)
 
-        # Get partition offsets (Gauge metrics)
-        partition_offsets = storage.get_partition_offsets(job_id, stage_id=stage_id)
-
-        # Get throughput (rate calculations)
-        throughput = storage.get_throughput(job_id, stage_id=stage_id, time_range_s=60.0)
-
         return templates.TemplateResponse(
             "stage_detail.html",
             {
@@ -167,8 +161,6 @@ def create_webui_app(
                 "job_id": job_id,
                 "stage": stage_data,
                 "workers": workers,
-                "partition_offsets": partition_offsets,
-                "throughput": throughput,
             },
         )
 
@@ -179,9 +171,6 @@ def create_webui_app(
         stages = job_data.get("stages", [])
         workers = storage.list_workers(job_id, limit=500)
 
-        # Get throughput for the whole job
-        throughput = storage.get_throughput(job_id, time_range_s=60.0)
-
         return templates.TemplateResponse(
             "workers.html",
             {
@@ -189,7 +178,6 @@ def create_webui_app(
                 "job": job_data,
                 "stages": stages,
                 "workers": workers,
-                "throughput": throughput,
             },
         )
 
@@ -205,13 +193,6 @@ def create_webui_app(
             "status": "UNKNOWN",
         }
         worker_events = storage.list_worker_events(job_id, worker_id=worker_id, limit=50)
-
-        # Get rate metrics for this worker
-        worker_rates = {
-            "input_records_per_sec": storage.rate(job_id, worker_id, "input_records", 60.0),
-            "output_records_per_sec": storage.rate(job_id, worker_id, "output_records", 60.0),
-            "splits_per_sec": storage.rate(job_id, worker_id, "processed_count", 60.0),
-        }
 
         # Live debugging: query Ray actor info
         try:
@@ -236,7 +217,6 @@ def create_webui_app(
                 "job_id": job_id,
                 "worker": worker_data,
                 "worker_events": worker_events,
-                "worker_rates": worker_rates,
                 "now": now,
             },
         )

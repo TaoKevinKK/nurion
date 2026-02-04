@@ -17,7 +17,6 @@
 This module contains shared data classes:
 - Split/SplitPayload: Data processing units
 - Record: Single record flowing through pipeline
-- WorkerMetrics/StageMetrics: Runtime metrics
 - FailurePolicy/FailureTracker: Worker fault tolerance
 - QueueMessage/MessageType: Inter-stage message format
 - StageStatus: Stage runtime status
@@ -71,71 +70,6 @@ class Split:
             data_range=data_range or {},
             parent_split_ids=[self.split_id],
         )
-
-
-@dataclass
-class WorkerMetrics:
-    """Metrics reported by a worker"""
-
-    worker_id: str
-    stage_id: str
-    input_records: int
-    output_records: int
-    processing_time: float
-    cpu_usage: float = 0.0
-    memory_usage: float = 0.0
-    timestamp: float = field(default_factory=time.time)
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for serialization."""
-        return {
-            "worker_id": self.worker_id,
-            "stage_id": self.stage_id,
-            "input_records": self.input_records,
-            "output_records": self.output_records,
-            "processing_time": self.processing_time,
-            "cpu_usage": self.cpu_usage,
-            "memory_usage": self.memory_usage,
-            "timestamp": self.timestamp,
-        }
-
-
-@dataclass
-class StageMetrics:
-    """Metrics reported by a stage master"""
-
-    stage_id: str
-    worker_count: int
-    input_records: int
-    output_records: int
-    total_processing_time: float  # seconds
-    pending_splits: int
-    inflight_results: int
-    output_buffer_size: int = 0  # Size of output buffer (Pull model)
-    backpressure_active: bool = False
-    uptime_secs: float = 0.0
-    timestamp: float = field(default_factory=time.time)
-    # Queue stats (pending/claimed counts)
-    pending_count: int = 0
-    claimed_count: int = 0
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for serialization."""
-        return {
-            "stage_id": self.stage_id,
-            "worker_count": self.worker_count,
-            "input_records": self.input_records,
-            "output_records": self.output_records,
-            "total_processing_time": self.total_processing_time,
-            "pending_splits": self.pending_splits,
-            "inflight_results": self.inflight_results,
-            "output_buffer_size": self.output_buffer_size,
-            "backpressure_active": self.backpressure_active,
-            "uptime_secs": self.uptime_secs,
-            "pending_count": self.pending_count,
-            "claimed_count": self.claimed_count,
-            "timestamp": self.timestamp,
-        }
 
 
 @dataclass
@@ -530,6 +464,21 @@ class StageStatus:
     failure_message: Optional[str] = None
     metrics: Dict[str, Any] = field(default_factory=dict)
     backpressure_active: bool = False  # Backpressure status
+
+
+# =============================================================================
+# Queue Stats
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class QueueStats:
+    """WorkQueue stats snapshot for a single queue."""
+
+    pending_count: int = 0
+    claimed_count: int = 0
+    total_pushed: int = 0
+    total_acked: int = 0
 
 
 # =============================================================================

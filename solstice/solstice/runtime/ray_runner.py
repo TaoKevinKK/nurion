@@ -40,7 +40,6 @@ from solstice.checkpoint import (
 if TYPE_CHECKING:
     from solstice.core.stage import Stage
     from solstice.webui.job_webui import JobWebUI
-    from solstice.webui.storage import JobStorage
     from solstice.webui.runtime_server import EmbeddedWebUIServer
 from solstice.core.stage import StageRuntime
 from solstice.core.stage_master import (
@@ -51,8 +50,10 @@ from solstice.operators.sources.source import SourceMaster
 from solstice.core.split_payload_store import RaySplitPayloadStore
 from solstice.queue import WorkQueueBrokerManager
 from solstice.runtime.autoscaler import SimpleAutoscaler
-from solstice.runtime.state_push import StatePushManager, StatePushConfig
+from solstice.runtime.backpressure import JobBackpressureController
+from solstice.runtime.queue_stats import QueueStatsClient, StageQueueConfig
 from solstice.utils.logging import create_ray_logger
+from solstice.webui.state.writer import WorkQueueStateWriter
 
 
 @dataclass
@@ -118,21 +119,15 @@ class RayJobRunner:
         self._webui: Optional["JobWebUI"] = None
         self._webui_server: Optional["EmbeddedWebUIServer"] = None
         self._webui_port: Optional[int] = None
-        self._webui_storage: Optional["JobStorage"] = None
-        self._webui_attempt_id: Optional[str] = None
-
-        # State push manager (encapsulates broker, producer, manager)
-        self._state_push = StatePushManager(
-            job_id=job.job_id,
-            config=StatePushConfig(
-                enabled=config.webui.enabled,
-                storage_url=config.workqueue_db_path or "memory://state/",
-            ),
-        )
+        self._webui_storage: Optional[Any] = None
+        self._state_writer: Optional[WorkQueueStateWriter] = None
 
         # Shared WorkQueue broker for all stages (reduces resource usage and improves stability)
         self._shared_broker: Optional[WorkQueueBrokerManager] = None
         self._broker_endpoint: Optional[QueueEndpoint] = None
+        self._queue_stats_client: Optional[QueueStatsClient] = None
+        self._backpressure_controller: Optional[JobBackpressureController] = None
+        self._stage_queue_configs: Dict[str, StageQueueConfig] = {}
 
         # State
         self._initialized = False
@@ -243,17 +238,21 @@ class RayJobRunner:
         # Try to recover from checkpoint if enabled
         await self._try_recover_checkpoint()
 
-        # Create shared storage for WebUI (used by both StatePush and JobWebUI)
-        storage = None
-        if self.job.config.webui.enabled:
-            storage = await self._create_webui_storage()
-
-        # Initialize state push infrastructure (if WebUI enabled)
-        if storage is not None:
-            await self._state_push.start(storage=storage)
-
         # Create shared WorkQueue broker for all stages (if using WorkQueue)
         await self._create_shared_broker()
+
+        # Initialize state writer (gRPC) for WebUI metadata
+        if self.job.config.webui.enabled and self._broker_endpoint:
+            self._state_writer = WorkQueueStateWriter(
+                job_id=self.job.job_id,
+                broker_endpoint=self._broker_endpoint,
+                claim_timeout_secs=self.job.config.claim_timeout_secs,
+            )
+            self._state_writer.start()
+
+        # Create storage for WebUI (WorkQueue reader)
+        if self.job.config.webui.enabled:
+            self._webui_storage = await self._create_webui_storage()
 
         # Build reverse DAG (stage -> its upstreams)
         self._reverse_dag = self.job.build_reverse_dag()
@@ -294,14 +293,17 @@ class RayJobRunner:
             self._masters[stage_id] = master
             self.logger.info(f"Created {type(master).__name__} for stage {stage_id}")
 
-        # Wire downstream references for backpressure propagation
-        self._wire_downstream_refs()
-
-        # Emit JOB_STARTED event
-        await self._state_push.emit_job_started(
-            dag_edges=self.job.dag_edges,
-            stages=[self._stage_info(s) for s in self.job.stages.values()],
-        )
+        # Build queue config map and attach job-level backpressure controller
+        self._stage_queue_configs = self._build_stage_queue_configs()
+        self._queue_stats_client = self._create_queue_stats_client()
+        if self._queue_stats_client:
+            self._backpressure_controller = JobBackpressureController(
+                queue_stats=self._queue_stats_client,
+                stage_configs=self._stage_queue_configs,
+                dag_edges=self.job.dag_edges,
+            )
+            for master in self._masters.values():
+                master.set_backpressure_provider(self._backpressure_controller)
 
         # Initialize WebUI if enabled
         if self.job.config.webui.enabled:
@@ -310,20 +312,26 @@ class RayJobRunner:
         self._initialized = True
         self.logger.info(f"Initialized {len(self._masters)} stages")
 
-    def _wire_downstream_refs(self) -> None:
-        """Connect masters with their downstream refs so backpressure works."""
-        for upstream_id, downstream_ids in self.job.dag_edges.items():
-            upstream_master = self._masters.get(upstream_id)
-            if upstream_master is None:
-                continue
+    def _build_stage_queue_configs(self) -> Dict[str, StageQueueConfig]:
+        configs: Dict[str, StageQueueConfig] = {}
+        for stage_id, master in self._masters.items():
+            cfg = StageQueueConfig(
+                stage_id=stage_id,
+                input_queue_name=master.runtime.upstream_queue_name,
+                output_queue_name=master._output_queue_name,
+                backpressure_threshold_lag=master.stage.backpressure_threshold_lag,
+                backpressure_threshold_queue_size=master.stage.backpressure_threshold_queue_size,
+            )
+            configs[stage_id] = cfg
+        return configs
 
-            downstream_refs = {
-                downstream_id: self._masters[downstream_id]
-                for downstream_id in downstream_ids
-                if downstream_id in self._masters
-            }
-            if downstream_refs:
-                upstream_master.set_downstream_stage_refs(downstream_refs)
+    def _create_queue_stats_client(self) -> Optional[QueueStatsClient]:
+        if not self._broker_endpoint:
+            return None
+        return QueueStatsClient(
+            endpoint=self._broker_endpoint,
+            claim_timeout_secs=self.job.config.claim_timeout_secs,
+        )
 
     def _build_stage_runtime(
         self,
@@ -339,7 +347,6 @@ class RayJobRunner:
         return StageRuntime(
             broker_endpoint=self._broker_endpoint,
             upstream_queue_name=upstream_queue_name,
-            state_queue_name=self._state_push.queue_name,
             claim_timeout_secs=self.job.config.claim_timeout_secs,
         )
 
@@ -351,7 +358,33 @@ class RayJobRunner:
             "operator_type": type(stage.operator_config).__name__,
             "min_parallelism": p[0] if isinstance(p, tuple) else p,
             "max_parallelism": p[1] if isinstance(p, tuple) else p,
+            "num_cpus": stage.num_cpus,
+            "num_gpus": stage.num_gpus,
+            "memory_mb": stage.memory_mb,
+            "status": "PENDING",
         }
+
+    def _write_job_state(self, status: str, end_time: Optional[float] = None) -> None:
+        """Write job state and index into WorkQueue state."""
+        if not self._state_writer:
+            return
+        start_time = self._start_time or time.time()
+        job_data = {
+            "job_id": self.job.job_id,
+            "status": status,
+            "start_time": start_time,
+            "end_time": end_time,
+            "dag_edges": self.job.dag_edges,
+            "stages": [self._stage_info(s) for s in self.job.stages.values()],
+        }
+        summary = {
+            "job_id": self.job.job_id,
+            "status": status,
+            "start_time": start_time,
+            "end_time": end_time,
+        }
+        self._state_writer.write_job_index(summary)
+        self._state_writer.write_job(job_data)
 
     def _create_master(
         self,
@@ -437,6 +470,7 @@ class RayJobRunner:
             await self.initialize()
         self._running = True
         self._start_time = time.time()
+        self._write_job_state(status="RUNNING")
         deadline = time.time() + timeout if timeout else None
 
         try:
@@ -551,10 +585,16 @@ class RayJobRunner:
 
         # Emit job completed event before stopping state infrastructure
         status = "FAILED" if self._error else "COMPLETED"
-        await self._state_push.emit_job_completed(status, self._start_time)
+        self._write_job_state(status=status, end_time=time.time())
+        if self._state_writer:
+            self._state_writer.stop()
+            self._state_writer = None
 
-        # Clean up state push infrastructure
-        await self._state_push.stop()
+        # Stop queue stats client
+        if self._queue_stats_client:
+            self._queue_stats_client.stop()
+            self._queue_stats_client = None
+            self._backpressure_controller = None
 
         # Stop shared broker (after all stages are done)
         await self._stop_shared_broker()
@@ -570,7 +610,11 @@ class RayJobRunner:
         if autoscale_config is None:
             return
 
-        self._autoscaler = SimpleAutoscaler(autoscale_config)
+        self._autoscaler = SimpleAutoscaler(
+            autoscale_config,
+            queue_stats_client=self._queue_stats_client,
+            stage_queue_configs=self._stage_queue_configs,
+        )
         self._autoscale_task = asyncio.create_task(
             self._autoscaler.run_loop(self._masters),
             name="autoscaler",
@@ -681,50 +725,28 @@ class RayJobRunner:
     # === WebUI Integration ===
 
     async def _create_webui_storage(self):
-        """Create storage for WebUI (shared between StatePush and JobWebUI).
+        """Create WorkQueue-backed storage for WebUI."""
+        from solstice.webui.state.manager import JobStateManager
 
-        Returns:
-            JobStorage instance
-        """
-        import uuid
-        from datetime import datetime
-        from solstice.webui.storage import JobStorage
-
-        # Generate attempt_id for this run (timestamp + short random suffix)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self._webui_attempt_id = f"{timestamp}_{uuid.uuid4().hex[:4]}"
-
-        # Create isolated storage path for this job attempt
-        base_path = self.job.config.webui.storage_path.rstrip("/")
-        job_storage_path = f"{base_path}/{self.job.job_id}/{self._webui_attempt_id}"
-
-        self._webui_storage = JobStorage(job_storage_path)
-        self.logger.info(f"WebUI storage at {job_storage_path}")
-
+        db_path = self.workqueue_db_path or "memory://"
+        reader = self._shared_broker.get_storage_reader() if self._shared_broker else None
+        self._webui_storage = JobStateManager(db_path, storage=reader)
+        self.logger.info(f"WebUI storage using WorkQueue db: {db_path}")
         return self._webui_storage
 
     async def _initialize_webui(self) -> None:
         """Initialize WebUI components.
 
-        - Creates JobWebUI instance using pre-created storage
-        - Starts collectors and embedded WebUI server
-
-        Note: Storage is created earlier in _create_webui_storage() to be
-        shared with StatePushManager.
+        - Creates JobWebUI instance using WorkQueue storage
+        - Starts embedded WebUI server
         """
         try:
             from solstice.webui.job_webui import JobWebUI
             from solstice.webui.runtime_server import EmbeddedWebUIServer
 
-            # Create JobWebUI using pre-created storage
+            # Create JobWebUI using WorkQueue storage
             assert self._webui_storage is not None, "webui_storage not initialized"
-            assert self._webui_attempt_id is not None, "webui_attempt_id not initialized"
-            self._webui = JobWebUI(
-                self,
-                self._webui_storage,
-                attempt_id=self._webui_attempt_id,
-                state_manager=self._state_push.state_manager,
-            )
+            self._webui = JobWebUI(self, state_writer=self._state_writer)
 
             # Start WebUI
             await self._webui.start()

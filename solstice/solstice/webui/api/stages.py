@@ -15,10 +15,8 @@
 """Stages API - stage metrics and details.
 
 Architecture:
-- JobRunner writes to JobStorage (SlateDB) via JobStateManager
-- Portal/History Server reads from JobStorage (read-only)
-
-Note: storage is guaranteed to exist (app won't start without it).
+- JobRunner writes metadata to WorkQueue state (gRPC)
+- WebUI reads directly from WorkQueue storage (pyO3)
 """
 
 import time

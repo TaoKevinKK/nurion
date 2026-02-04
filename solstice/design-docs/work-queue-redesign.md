@@ -1181,7 +1181,7 @@ class RebuildPolicy(Enum):
 - [SlateDB Documentation](https://github.com/slatedb/slatedb)
 - [tonic gRPC](https://github.com/hyperium/tonic)
 - [PyO3 User Guide](https://pyo3.rs/)
-- Existing design: `tansu-pyo3-binding.md`
+- Existing design: `deprecated-design/tansu-pyo3-binding.md`
 - Existing design: `exactly-once-semantics.md`
 
 ---

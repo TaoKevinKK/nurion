@@ -90,6 +90,14 @@ impl WorkQueueStorage {
         Ok(Self { db })
     }
 
+    /// Close the storage gracefully.
+    /// This should be called before dropping the storage to ensure all background
+    /// tasks are properly shut down and avoid "channel closed" panics.
+    pub async fn close(&self) -> Result<(), StorageError> {
+        self.db.close().await?;
+        Ok(())
+    }
+
     // === Key Generation ===
 
     fn meta_key(queue: &str) -> Vec<u8> {
@@ -556,6 +564,33 @@ impl WorkQueueStorage {
             Some(claim_tokens),
             Some(worker_id),
             Some(lease_id),
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    pub async fn nack_messages_with_state(
+        &self,
+        queue: &str,
+        msg_ids: &[String],
+        claim_tokens: &[String],
+        worker_id: &str,
+        lease_id: &str,
+        state_namespace: &str,
+        state_puts: &HashMap<String, Vec<u8>>,
+        state_deletes: &[String],
+    ) -> Result<(), StorageError> {
+        self.nack_messages_internal(
+            queue,
+            msg_ids,
+            Some(claim_tokens),
+            Some(worker_id),
+            Some(lease_id),
+            Some(state_namespace),
+            Some(state_puts),
+            Some(state_deletes),
         )
         .await
     }
@@ -566,7 +601,7 @@ impl WorkQueueStorage {
         queue: &str,
         msg_ids: &[String],
     ) -> Result<(), StorageError> {
-        self.nack_messages_internal(queue, msg_ids, None, None, None)
+        self.nack_messages_internal(queue, msg_ids, None, None, None, None, None, None)
             .await
     }
 
@@ -577,6 +612,9 @@ impl WorkQueueStorage {
         claim_tokens: Option<&[String]>,
         worker_id: Option<&str>,
         lease_id: Option<&str>,
+        state_namespace: Option<&str>,
+        state_puts: Option<&HashMap<String, Vec<u8>>>,
+        state_deletes: Option<&[String]>,
     ) -> Result<(), StorageError> {
         if msg_ids.is_empty() {
             return Ok(());
@@ -647,6 +685,23 @@ impl WorkQueueStorage {
                 ..meta
             };
             txn.put(&Self::meta_key(queue), &serde_json::to_vec(&new_meta)?)?;
+
+            let has_state_updates = state_namespace.is_some()
+                && (state_puts.map_or(false, |puts| !puts.is_empty())
+                    || state_deletes.map_or(false, |deletes| !deletes.is_empty()));
+            if has_state_updates {
+                let namespace = state_namespace.unwrap();
+                if let Some(puts) = state_puts {
+                    for (key, value) in puts {
+                        txn.put(&Self::state_key(namespace, key), value)?;
+                    }
+                }
+                if let Some(deletes) = state_deletes {
+                    for key in deletes {
+                        txn.delete(&Self::state_key(namespace, key))?;
+                    }
+                }
+            }
 
             match txn.commit().await {
                 Ok(()) => return Ok(()),
@@ -798,7 +853,7 @@ impl WorkQueueStorage {
         let all_claimed = self.scan_claimed(None).await?;
 
         // Group expired by queue
-        let mut expired_by_queue: HashMap<String, Vec<String>> = HashMap::new();
+        let mut expired_by_queue: HashMap<String, Vec<ClaimInfo>> = HashMap::new();
         for (queue, msg_id, claim_info) in all_claimed {
             if let Some(leases) = active_leases {
                 if let Some(last_seen) = leases.get(&claim_info.lease_id) {
@@ -809,13 +864,44 @@ impl WorkQueueStorage {
             }
 
             if now - claim_info.claimed_at > timeout_secs {
-                expired_by_queue.entry(queue).or_default().push(msg_id);
+                let mut info = claim_info.clone();
+                info.msg_id = msg_id;
+                expired_by_queue.entry(queue).or_default().push(info);
             }
         }
 
         let mut total = 0;
-        for (queue, msg_ids) in expired_by_queue {
+        for (queue, claims) in expired_by_queue {
+            let msg_ids: Vec<String> = claims.iter().map(|c| c.msg_id.clone()).collect();
             self.nack_messages_unchecked(&queue, &msg_ids).await?;
+
+            let mut puts = HashMap::new();
+            let ts_ns = now_nanos();
+            for claim in &claims {
+                let key = format!("timeout:{}:{}:{}", queue, ts_ns, claim.msg_id);
+                let event = serde_json::json!({
+                    "event_type": "timeout",
+                    "timestamp_ns": ts_ns,
+                    "timestamp": now,
+                    "queue": queue,
+                    "msg_id": claim.msg_id,
+                    "worker_id": claim.worker_id,
+                    "lease_id": claim.lease_id,
+                    "claimed_at": claim.claimed_at,
+                    "input_rows": 0,
+                    "input_bytes": 0,
+                    "output_rows": 0,
+                    "output_bytes": 0,
+                    "processing_ms": 0,
+                    "queue_wait_ms": 0,
+                    "reason": "claim_timeout",
+                });
+                puts.insert(key, serde_json::to_vec(&event)?);
+            }
+            if !puts.is_empty() {
+                let _ = self.state_put_batch("wq_events", &puts, &[]).await?;
+            }
+
             total += msg_ids.len();
         }
 
@@ -859,6 +945,42 @@ impl WorkQueueStorage {
 
         self.db.write(batch).await?;
         Ok((puts.len(), deletes.len()))
+    }
+
+    pub async fn state_scan_prefix(
+        &self,
+        namespace: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
+        let key_prefix = format!("state:{}:{}", namespace, prefix).into_bytes();
+        let mut iter = self.db.scan_prefix(&key_prefix).await?;
+        let mut results = Vec::new();
+        let namespace_prefix = format!("state:{}:", namespace);
+
+        while let Ok(Some(kv)) = iter.next().await {
+            let key_str = String::from_utf8_lossy(&kv.key);
+            if let Some(suffix) = key_str.strip_prefix(&namespace_prefix) {
+                results.push((suffix.to_string(), kv.value.to_vec()));
+                if limit > 0 && results.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    pub async fn list_queues(&self) -> Result<Vec<String>, StorageError> {
+        let mut iter = self.db.scan_prefix(b"meta:").await?;
+        let mut queues = Vec::new();
+        while let Ok(Some(kv)) = iter.next().await {
+            let key_str = String::from_utf8_lossy(&kv.key);
+            if let Some(queue) = key_str.strip_prefix("meta:") {
+                queues.push(queue.to_string());
+            }
+        }
+        Ok(queues)
     }
 
     // === Queue Completion API ===

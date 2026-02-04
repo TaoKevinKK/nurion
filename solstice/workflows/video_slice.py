@@ -397,7 +397,6 @@ def create_job(
         - use_cache: Cache downloaded remote videos locally (default: False)
         - sink_parallelism: Sink workers - int or tuple (min, max) for dynamic scaling (default: auto)
         - ray_address: Ray cluster address (default: "ray://localhost:8265")
-        - webui_storage_path: SlateDB root path for WebUI (optional)
 
     Args:
         job_id: Unique job identifier
@@ -430,7 +429,6 @@ def create_job(
     skip_missing_videos = config.get("skip_missing_videos", True)
     jpeg_quality = config.get("jpeg_quality", 95)
     use_cache = config.get("use_cache", False)
-    webui_storage_path = config.get("webui_storage_path")
     # sink_parallelism can be int or tuple (min, max) for dynamic scaling
     sink_parallelism = config.get("sink_parallelism", None)
     # Auto-calculate sink parallelism based on slice parallelism
@@ -457,7 +455,6 @@ def create_job(
             ray_init_kwargs=ray_init_kwargs,
             webui=WebUIConfig(
                 enabled=True,
-                storage_path=webui_storage_path or WebUIConfig.storage_path,
             ),
             autoscale_config=AutoscaleConfig(
                 enabled=False,  # Disable autoscaling for now
@@ -553,7 +550,6 @@ async def run_video_slice_job(
     slice_parallelism: Any = (4, 150),  # int or tuple (min, max)
     sink_parallelism: Any = None,  # int or tuple (min, max), None = auto
     ray_address: str = "ray://localhost:8265",
-    webui_storage_path: Optional[str] = None,
     **kwargs,
 ) -> None:
     """
@@ -589,7 +585,6 @@ async def run_video_slice_job(
         "slice_parallelism": slice_parallelism,
         "sink_parallelism": sink_parallelism,
         "ray_address": ray_address,
-        "webui_storage_path": webui_storage_path,
         **kwargs,
     }
 
@@ -640,11 +635,6 @@ if __name__ == "__main__":
         default=None,
         help="Run a single-video ffmpeg test and exit",
     )
-    parser.add_argument(
-        "--webui-storage-path",
-        default=None,
-        help="SlateDB root path for WebUI (e.g. s3://bucket/solstice/)",
-    )
 
     args = parser.parse_args()
 
@@ -652,9 +642,6 @@ if __name__ == "__main__":
     logger = logging.getLogger(__name__)
     logger.info("AWS_ACCESS_KEY_ID set: %s", bool(os.getenv("AWS_ACCESS_KEY_ID")))
     logger.info("AWS_ENDPOINT_URL: %s", os.getenv("AWS_ENDPOINT_URL"))
-    if args.webui_storage_path and args.webui_storage_path.startswith("s3://"):
-        bucket = args.webui_storage_path[5:].split("/", 1)[0]
-        _log_s3_head(bucket)
 
     if args.test_video_path:
         try:
@@ -692,6 +679,5 @@ if __name__ == "__main__":
             video_path_json_key=args.video_path_json_key,
             jpeg_quality=args.jpeg_quality,
             skip_missing_videos=not args.no_skip_missing,
-            webui_storage_path=args.webui_storage_path,
         )
     )

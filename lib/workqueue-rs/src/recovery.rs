@@ -23,6 +23,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, Duration};
 
@@ -36,6 +37,7 @@ pub struct RecoveryTask {
     state: Arc<WorkQueueState>,
     config: WorkQueueConfig,
     running: Arc<AtomicBool>,
+    shutdown_notify: Arc<Notify>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -50,6 +52,7 @@ impl RecoveryTask {
             state,
             config,
             running: Arc::new(AtomicBool::new(false)),
+            shutdown_notify: Arc::new(Notify::new()),
             handle: None,
         }
     }
@@ -65,22 +68,35 @@ impl RecoveryTask {
         let storage = self.storage.clone();
         let state = self.state.clone();
         let running = self.running.clone();
+        let shutdown_notify = self.shutdown_notify.clone();
         let interval_secs = self.config.recovery_interval_secs;
         let timeout_secs = self.config.claim_timeout_secs;
 
         let handle = tokio::spawn(async move {
             let mut ticker = interval(Duration::from_secs_f64(interval_secs));
 
-            while running.load(Ordering::SeqCst) {
-                ticker.tick().await;
+            loop {
+                tokio::select! {
+                    biased;
+                    // Check for shutdown signal first (highest priority)
+                    _ = shutdown_notify.notified() => {
+                        break;
+                    }
+                    _ = ticker.tick() => {
+                        // Double-check running flag after waking up
+                        if !running.load(Ordering::SeqCst) {
+                            break;
+                        }
 
-                let lease_snapshot = state.lease_snapshot();
-                // Recovery is now handled entirely by storage
-                if let Err(e) = storage
-                    .recover_expired_claims(timeout_secs, Some(&lease_snapshot))
-                    .await
-                {
-                    tracing::error!("Recovery error: {}", e);
+                        let lease_snapshot = state.lease_snapshot();
+                        // Recovery is now handled entirely by storage
+                        if let Err(e) = storage
+                            .recover_expired_claims(timeout_secs, Some(&lease_snapshot))
+                            .await
+                        {
+                            tracing::error!("Recovery error: {}", e);
+                        }
+                    }
                 }
             }
         });
@@ -93,12 +109,33 @@ impl RecoveryTask {
         );
     }
 
-    /// Stop the recovery task
+    /// Stop the recovery task gracefully.
+    /// This signals the task to stop and waits for it to complete.
+    pub async fn stop_async(&mut self) {
+        // Signal the task to stop
+        self.running.store(false, Ordering::SeqCst);
+        self.shutdown_notify.notify_one();
+
+        // Wait for the task to finish gracefully
+        if let Some(handle) = self.handle.take() {
+            // Wait for task to complete (with timeout for safety)
+            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        }
+
+        tracing::info!("Recovery task stopped");
+    }
+
+    /// Stop the recovery task (sync version).
+    /// Signals the task to stop but doesn't wait for completion.
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
+        self.shutdown_notify.notify_one();
 
+        // We can't block here, just let the task finish naturally
+        // The handle will be dropped which doesn't abort the task
         if let Some(handle) = self.handle.take() {
-            handle.abort();
+            // Detach the handle - task will complete on its own
+            drop(handle);
         }
 
         tracing::info!("Recovery task stopped");
@@ -107,7 +144,10 @@ impl RecoveryTask {
 
 impl Drop for RecoveryTask {
     fn drop(&mut self) {
-        self.stop();
+        // Signal stop but don't block
+        self.running.store(false, Ordering::SeqCst);
+        self.shutdown_notify.notify_one();
+        // Don't abort - let the task finish naturally to avoid SlateDB panic
     }
 }
 
@@ -116,6 +156,7 @@ pub struct GcTask {
     storage: Arc<WorkQueueStorage>,
     config: WorkQueueConfig,
     running: Arc<AtomicBool>,
+    shutdown_notify: Arc<Notify>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -125,6 +166,7 @@ impl GcTask {
             storage,
             config,
             running: Arc::new(AtomicBool::new(false)),
+            shutdown_notify: Arc::new(Notify::new()),
             handle: None,
         }
     }
@@ -139,6 +181,7 @@ impl GcTask {
 
         let storage = self.storage.clone();
         let running = self.running.clone();
+        let shutdown_notify = self.shutdown_notify.clone();
         let interval_secs = self.config.gc_interval_secs;
         let retention_secs = self.config.acked_retention_secs;
         let retention_ns = (retention_secs * 1_000_000_000.0) as u64;
@@ -146,11 +189,23 @@ impl GcTask {
         let handle = tokio::spawn(async move {
             let mut ticker = interval(Duration::from_secs_f64(interval_secs));
 
-            while running.load(Ordering::SeqCst) {
-                ticker.tick().await;
+            loop {
+                tokio::select! {
+                    biased;
+                    // Check for shutdown signal first (highest priority)
+                    _ = shutdown_notify.notified() => {
+                        break;
+                    }
+                    _ = ticker.tick() => {
+                        // Double-check running flag after waking up
+                        if !running.load(Ordering::SeqCst) {
+                            break;
+                        }
 
-                if let Err(e) = storage.gc_acked_messages(retention_ns).await {
-                    tracing::error!("GC error: {}", e);
+                        if let Err(e) = storage.gc_acked_messages(retention_ns).await {
+                            tracing::error!("GC error: {}", e);
+                        }
+                    }
                 }
             }
         });
@@ -163,12 +218,29 @@ impl GcTask {
         );
     }
 
-    /// Stop the GC task
+    /// Stop the GC task gracefully.
+    /// This signals the task to stop and waits for it to complete.
+    pub async fn stop_async(&mut self) {
+        // Signal the task to stop
+        self.running.store(false, Ordering::SeqCst);
+        self.shutdown_notify.notify_one();
+
+        // Wait for the task to finish gracefully
+        if let Some(handle) = self.handle.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        }
+
+        tracing::info!("GC task stopped");
+    }
+
+    /// Stop the GC task (sync version).
+    /// Signals the task to stop but doesn't wait for completion.
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
+        self.shutdown_notify.notify_one();
 
         if let Some(handle) = self.handle.take() {
-            handle.abort();
+            drop(handle);
         }
 
         tracing::info!("GC task stopped");
@@ -177,6 +249,9 @@ impl GcTask {
 
 impl Drop for GcTask {
     fn drop(&mut self) {
-        self.stop();
+        // Signal stop but don't block
+        self.running.store(false, Ordering::SeqCst);
+        self.shutdown_notify.notify_one();
+        // Don't abort - let the task finish naturally to avoid SlateDB panic
     }
 }

@@ -40,33 +40,6 @@
                 <div class="metric-value">{{ stage.output_queue_size|default(0)|format_number }}</div>
                 <div class="metric-label">Queue Size</div>
             </div>
-            <div class="metric-card">
-                <div class="metric-value">{{ (stage.input_count|default(stage.input_records if stage.input_records else 0)|default(0))|format_number }}</div>
-                <div class="metric-label">Input Records</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-value">{{ (stage.output_count|default(stage.output_records if stage.output_records else 0)|default(0))|format_number }}</div>
-                <div class="metric-label">Output Records</div>
-            </div>
-        </div>
-    </section>
-    
-    <!-- Throughput (rate calculations) -->
-    <section>
-        <h2>Throughput (last 60s)</h2>
-        <div class="metrics-grid">
-            <div class="metric-card">
-                <div class="metric-value">{{ "%.1f"|format(throughput.total_input_rate|default(0)) }}</div>
-                <div class="metric-label">Input/sec</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-value">{{ "%.1f"|format(throughput.total_output_rate|default(0)) }}</div>
-                <div class="metric-label">Output/sec</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-value">{{ "%.1f"|format(throughput.total_splits_rate|default(0)) }}</div>
-                <div class="metric-label">Splits/sec</div>
-            </div>
         </div>
     </section>
     
@@ -100,16 +73,12 @@
                     <tr>
                         <th style="width: 25%;">Worker ID</th>
                         <th style="width: 10%;">Status</th>
-                        <th class="number" style="width: 12%;">Input/s</th>
-                        <th class="number" style="width: 12%;">Output/s</th>
-                        <th class="number" style="width: 12%;">Processed</th>
                         <th style="width: 15%;">Partitions</th>
                         <th style="width: 10%;">Links</th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for worker in workers %}
-                    {% set worker_throughput = throughput.workers|selectattr('worker_id', 'equalto', worker.worker_id)|first if throughput.workers else none %}
                     <tr>
                         <td class="monospace" style="font-size: 0.75rem;">
                             <a href="{{ base_path }}/jobs/{{ job_id }}/workers/{{ worker.worker_id }}">
@@ -119,21 +88,6 @@
                         <td>
                             <span class="badge badge-{{ worker.status|lower }}">{{ worker.status }}</span>
                         </td>
-                        <td class="number">
-                            {% if worker_throughput %}
-                            {{ "%.1f"|format(worker_throughput.input_records_per_sec|default(0)) }}
-                            {% else %}
-                            -
-                            {% endif %}
-                        </td>
-                        <td class="number">
-                            {% if worker_throughput %}
-                            {{ "%.1f"|format(worker_throughput.output_records_per_sec|default(0)) }}
-                            {% else %}
-                            -
-                            {% endif %}
-                        </td>
-                        <td class="number">{{ worker.processed_count|default(0)|format_number }}</td>
                         <td class="monospace" style="font-size: 0.75rem;">
                             {% if worker.assigned_partitions %}
                             {{ worker.assigned_partitions|join(', ') }}
@@ -152,47 +106,8 @@
             </table>
         </div>
         {% else %}
-        <p><em>No workers currently running</em></p>
+        <p><em>No worker events recorded yet</em></p>
         {% endif %}
-    </section>
-    
-    <!-- Partition Offsets (Gauge metrics) -->
-    {% if partition_offsets %}
-    <section>
-        <details open>
-            <summary>Partition Offsets</summary>
-            <div class="table-container" style="max-height: 300px; overflow-y: auto;">
-                <table>
-                    <thead>
-                        <tr>
-                            <th style="width: 30%;">Worker</th>
-                            <th style="width: 15%;">Partition</th>
-                            <th class="number" style="width: 25%;">Current Offset</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {% for worker_id, offsets in partition_offsets.items() %}
-                        {% for partition_id, offset in offsets.items() %}
-                        <tr>
-                            <td class="monospace" style="font-size: 0.75rem;">{{ worker_id[:16] }}...</td>
-                            <td>{{ partition_id }}</td>
-                            <td class="number">{{ offset|format_number }}</td>
-                        </tr>
-                        {% endfor %}
-                        {% endfor %}
-                    </tbody>
-                </table>
-            </div>
-        </details>
-    </section>
-    {% endif %}
-    
-    <!-- Throughput Chart -->
-    <section>
-        <h3>Throughput History</h3>
-        <div style="height: 200px; position: relative;">
-            <canvas id="throughputChart"></canvas>
-        </div>
     </section>
     
     <!-- Back link -->
@@ -202,111 +117,4 @@
 </article>
 {% endblock %}
 
-{% block extra_scripts %}
-<script>
-(function() {
-    const jobId = '{{ job_id }}';
-    const stageId = '{{ stage.stage_id }}';
-    const basePath = '{{ base_path }}';
-    
-    // Throughput history data
-    const MAX_POINTS = 60;
-    let throughputData = {
-        labels: [],
-        datasets: [
-            {
-                label: 'Input/sec',
-                data: [],
-                borderColor: 'rgb(59, 130, 246)',
-                backgroundColor: 'rgba(59, 130, 246, 0.1)',
-                fill: false,
-                tension: 0.3
-            },
-            {
-                label: 'Output/sec',
-                data: [],
-                borderColor: 'rgb(34, 197, 94)',
-                backgroundColor: 'rgba(34, 197, 94, 0.1)',
-                fill: false,
-                tension: 0.3
-            }
-        ]
-    };
-    
-    // Initialize chart
-    const ctx = document.getElementById('throughputChart');
-    if (!ctx) return;
-    
-    const chart = new Chart(ctx, {
-        type: 'line',
-        data: throughputData,
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: {
-                legend: { display: true, position: 'top' }
-            },
-            scales: {
-                x: { 
-                    display: true,
-                    title: { display: false }
-                },
-                y: { 
-                    beginAtZero: true,
-                    title: { display: true, text: 'Records/sec' }
-                }
-            },
-            animation: { duration: 0 }
-        }
-    });
-    
-    // Fetch throughput from API
-    async function fetchThroughput() {
-        try {
-            const response = await fetch(`${basePath}/api/jobs/${jobId}/stages/${stageId}/throughput?time_range_s=60`);
-            if (response.ok) {
-                const data = await response.json();
-                return {
-                    input: data.total_input_rate || 0,
-                    output: data.total_output_rate || 0
-                };
-            }
-        } catch (e) {
-            console.log('Failed to fetch throughput:', e);
-        }
-        return { input: 0, output: 0 };
-    }
-    
-    // Add initial data point
-    async function initChart() {
-        const data = await fetchThroughput();
-        const time = new Date().toLocaleTimeString();
-        throughputData.labels.push(time);
-        throughputData.datasets[0].data.push(data.input);
-        throughputData.datasets[1].data.push(data.output);
-        chart.update();
-    }
-    
-    initChart();
-    
-    // Update chart when HTMX refreshes the page
-    document.body.addEventListener('htmx:afterSwap', async function(e) {
-        if (e.detail.target && e.detail.target.classList.contains('compact')) {
-            const data = await fetchThroughput();
-            const time = new Date().toLocaleTimeString();
-            
-            if (throughputData.labels.length >= MAX_POINTS) {
-                throughputData.labels.shift();
-                throughputData.datasets[0].data.shift();
-                throughputData.datasets[1].data.shift();
-            }
-            
-            throughputData.labels.push(time);
-            throughputData.datasets[0].data.push(data.input);
-            throughputData.datasets[1].data.push(data.output);
-            chart.update();
-        }
-    });
-})();
-</script>
-{% endblock %}
+{% block extra_scripts %}{% endblock %}

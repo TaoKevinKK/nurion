@@ -25,52 +25,11 @@
         </div>
     </header>
     
-    <!-- Worker Metrics (Counters - cumulative) -->
     <section>
-        <h2>Cumulative Metrics</h2>
-        <div class="metrics-grid">
-            <div class="metric-card">
-                <div class="metric-value">{{ worker.input_records|default(0)|format_number }}</div>
-                <div class="metric-label">Input Records</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-value">{{ worker.output_records|default(0)|format_number }}</div>
-                <div class="metric-label">Output Records</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-value">{{ worker.processed_count|default(0)|format_number }}</div>
-                <div class="metric-label">Splits Processed</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-value">
-                    {% if worker.processing_time %}
-                    {{ "%.2f"|format(worker.processing_time) }}s
-                    {% else %}
-                    -
-                    {% endif %}
-                </div>
-                <div class="metric-label">Processing Time</div>
-            </div>
-        </div>
-    </section>
-    
-    <!-- Throughput (rate calculations) -->
-    <section>
-        <h2>Throughput (last 60s)</h2>
-        <div class="metrics-grid">
-            <div class="metric-card">
-                <div class="metric-value">{{ "%.1f"|format(worker_rates.input_records_per_sec|default(0)) }}</div>
-                <div class="metric-label">Input/sec</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-value">{{ "%.1f"|format(worker_rates.output_records_per_sec|default(0)) }}</div>
-                <div class="metric-label">Output/sec</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-value">{{ "%.2f"|format(worker_rates.splits_per_sec|default(0)) }}</div>
-                <div class="metric-label">Splits/sec</div>
-            </div>
-        </div>
+        <p style="color: var(--pico-muted-color);">
+            Worker-level throughput and record counters are not collected.
+            Use WorkQueue queue stats on the stage page for progress.
+        </p>
     </section>
     
     <!-- Lifecycle Info -->
@@ -180,14 +139,6 @@
         </details>
     </section>
     {% endif %}
-    
-    <!-- Throughput Chart -->
-    <section>
-        <h3>Throughput History</h3>
-        <div style="height: 200px; position: relative;">
-            <canvas id="workerThroughputChart"></canvas>
-        </div>
-    </section>
     
     <!-- Worker Events -->
     {% if worker_events %}
@@ -304,108 +255,5 @@ document.addEventListener('alpine:init', () => {
     }));
 });
 
-// Throughput chart
-(function() {
-    const jobId = '{{ job_id }}';
-    const workerId = '{{ worker.worker_id }}';
-    const basePath = '{{ base_path }}';
-    
-    const MAX_POINTS = 60;
-    let throughputData = {
-        labels: [],
-        datasets: [
-            {
-                label: 'Input/sec',
-                data: [],
-                borderColor: 'rgb(59, 130, 246)',
-                fill: false,
-                tension: 0.3
-            },
-            {
-                label: 'Output/sec',
-                data: [],
-                borderColor: 'rgb(34, 197, 94)',
-                fill: false,
-                tension: 0.3
-            },
-            {
-                label: 'Splits/sec',
-                data: [],
-                borderColor: 'rgb(249, 115, 22)',
-                fill: false,
-                tension: 0.3
-            }
-        ]
-    };
-    
-    const ctx = document.getElementById('workerThroughputChart');
-    if (!ctx) return;
-    
-    const chart = new Chart(ctx, {
-        type: 'line',
-        data: throughputData,
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: {
-                legend: { display: true, position: 'top' }
-            },
-            scales: {
-                x: { display: true },
-                y: { 
-                    beginAtZero: true,
-                    title: { display: true, text: 'Rate' }
-                }
-            },
-            animation: { duration: 0 }
-        }
-    });
-    
-    // Fetch metrics from API
-    async function fetchMetrics() {
-        try {
-            const response = await fetch(`${basePath}/api/jobs/${jobId}/workers/${workerId}/metrics`);
-            if (response.ok) {
-                const data = await response.json();
-                return data.rates || {};
-            }
-        } catch (e) {
-            console.log('Failed to fetch metrics:', e);
-        }
-        return {};
-    }
-    
-    // Initialize with current values
-    async function initChart() {
-        const rates = await fetchMetrics();
-        const time = new Date().toLocaleTimeString();
-        throughputData.labels.push(time);
-        throughputData.datasets[0].data.push(rates.input_records_per_sec || 0);
-        throughputData.datasets[1].data.push(rates.output_records_per_sec || 0);
-        throughputData.datasets[2].data.push(rates.splits_per_sec || 0);
-        chart.update();
-    }
-    
-    initChart();
-    
-    // Update on HTMX refresh
-    document.body.addEventListener('htmx:afterSwap', async function(e) {
-        if (e.detail.target && e.detail.target.classList.contains('compact')) {
-            const rates = await fetchMetrics();
-            const time = new Date().toLocaleTimeString();
-            
-            if (throughputData.labels.length >= MAX_POINTS) {
-                throughputData.labels.shift();
-                throughputData.datasets.forEach(ds => ds.data.shift());
-            }
-            
-            throughputData.labels.push(time);
-            throughputData.datasets[0].data.push(rates.input_records_per_sec || 0);
-            throughputData.datasets[1].data.push(rates.output_records_per_sec || 0);
-            throughputData.datasets[2].data.push(rates.splits_per_sec || 0);
-            chart.update();
-        }
-    });
-})();
 </script>
 {% endblock %}

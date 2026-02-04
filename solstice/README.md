@@ -288,11 +288,10 @@ Solstice uses a **pull-based, queue-driven execution model**:
 
 ### Component Details
 
-**StageMaster** coordinates several internal managers:
-- `PartitionManager`: Partition assignment and rebalancing
+**StageMaster** coordinates core managers:
 - `WorkerManager`: Worker lifecycle (spawn, stop, status)
 - `RecoveryManager`: Failure tracking and worker recovery
-- `BackpressureMonitor`: Queue lag monitoring and scaling signals
+- Backpressure/autoscaling use job-level WorkQueue stats
 
 **Queue Backend**:
 - `WorkQueue`: Embedded broker with claim/ack semantics
@@ -327,9 +326,9 @@ from solstice.core.job import Job, JobConfig, WebUIConfig
 job = Job(
     job_id='my_job',
     config=JobConfig(
+        workqueue_db_path="file:///tmp/workqueue",
         webui=WebUIConfig(
             enabled=True,
-            storage_path='s3://my-bucket/solstice-history/',
         ),
     ),
 )

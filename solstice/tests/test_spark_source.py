@@ -616,7 +616,6 @@ class TestSparkSourceMaster:
                 storage_url="memory://",
             ),
             upstream_queue_name=None,
-            state_queue_name=None,
         )
         master = SparkSourceMaster(
             job_id="test-full-pipeline",
@@ -628,22 +627,16 @@ class TestSparkSourceMaster:
         # Start the full pipeline (creates queues, spawns workers)
         await master.start()
 
-        # Verify source queue was created and splits were produced
+        # Verify source queue was created
         source_queue = master.get_source_client()
         assert source_queue is not None
         assert source_queue.health_check()
-
-        # Check splits were produced to source queue
-        status = master.get_status()
-        splits_produced = status.metrics.get("splits_produced", 0)
-        assert splits_produced > 0
-        print(f"Produced {splits_produced} splits to source queue")
 
         # Verify output queue was created
         output_queue = master.get_queue_client()
         assert output_queue is not None
 
-        # Wait for workers to process (with timeout)
+        # Wait for workers to produce output (with timeout)
         import asyncio
 
         max_wait = 30  # seconds
@@ -651,14 +644,15 @@ class TestSparkSourceMaster:
 
         while asyncio.get_event_loop().time() - start_time < max_wait:
             status = master.get_status()
-            if status.is_finished:
+            # Check if output queue has messages (workers processed data)
+            if status.output_queue_size > 0:
                 break
             await asyncio.sleep(0.5)
 
+        # Verify workers produced output
+        final_status = master.get_status()
+        assert final_status.output_queue_size > 0, "Workers should have produced output"
+
         # Cleanup
         await master.stop()
-
-        # Verify processing completed
-        splits_produced = status.metrics.get("splits_produced", 0)
-        assert splits_produced > 0
-        print(f"Pipeline completed: {splits_produced} splits processed")
+        print(f"Pipeline completed: {final_status.output_queue_size} messages in output queue")

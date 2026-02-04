@@ -35,10 +35,12 @@ from solstice.queue.workqueue import (
     WorkQueueQueueClient,
     WorkQueueRecord,
 )
+from solstice.queue.workqueue_storage import WorkQueueStorageReader
 
 __all__ = [
     "Record",
     "WorkQueueBrokerManager",
     "WorkQueueQueueClient",
     "WorkQueueRecord",
+    "WorkQueueStorageReader",
 ]

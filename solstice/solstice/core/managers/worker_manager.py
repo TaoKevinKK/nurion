@@ -62,7 +62,6 @@ class WorkerManager:
         payload_store: "SplitPayloadStore",
         broker_endpoint: Optional[QueueEndpoint],
         output_queue_name: str,
-        state_queue_name: Optional[str] = None,
     ):
         self._job_id = job_id
         self._stage = stage
@@ -71,7 +70,6 @@ class WorkerManager:
         self._payload_store = payload_store
         self._broker_endpoint = broker_endpoint
         self._output_queue_name = output_queue_name
-        self._state_queue_name = state_queue_name
         self._logger = create_ray_logger(f"WorkerMgr-{stage.stage_id}")
 
         # Worker state
@@ -165,7 +163,6 @@ class WorkerManager:
             broker_endpoint=self._broker_endpoint,
             upstream_queue_name=self._upstream_queue_name,
             output_queue_name=self._output_queue_name,
-            state_queue_name=self._state_queue_name,
             batch_size=self._stage.batch_size,
             claim_timeout_secs=self._runtime.claim_timeout_secs,
         )

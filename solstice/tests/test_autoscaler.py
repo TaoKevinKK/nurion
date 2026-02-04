@@ -26,11 +26,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from solstice.runtime.autoscaler import (
-    AutoscaleConfig,
-    SimpleAutoscaler,
-    StageMetrics,
-)
+from solstice.core.models import QueueStats
+from solstice.runtime.autoscaler import AutoscaleConfig, SimpleAutoscaler, StageMetrics
+from solstice.runtime.queue_stats import StageQueueConfig
 from solstice.core.stage_master import StageStatus
 
 
@@ -111,6 +109,16 @@ class MockSourceMaster:
             is_running=self._running,
             is_finished=self._finished,
         )
+
+
+class FakeQueueStatsClient:
+    def __init__(self, stats: dict[str, QueueStats]) -> None:
+        self._stats = stats
+
+    def get_stats(self, queue_name: str | None) -> QueueStats:
+        if not queue_name:
+            return QueueStats()
+        return self._stats.get(queue_name, QueueStats())
 
 
 # ============================================================================
@@ -219,6 +227,23 @@ class TestScalingDecisions:
 
         assert "stage_a" in decisions
         assert decisions["stage_a"] == 3  # 4 - 1
+
+    def test_no_scale_down_with_claimed_inflight(self, autoscaler):
+        """Should not scale down when messages are still claimed."""
+        metrics = {
+            "stage_a": StageMetrics(
+                stage_id="stage_a",
+                worker_count=4,
+                min_workers=1,
+                max_workers=8,
+                input_queue_lag=50,  # Below threshold
+                input_queue_claimed=3,
+            )
+        }
+
+        decisions = autoscaler._compute_decisions(metrics)
+
+        assert "stage_a" not in decisions
 
     def test_no_scale_in_normal_range(self, autoscaler):
         """Should not scale when lag is in normal range."""
@@ -443,12 +468,27 @@ class TestMetricsCollection:
     """Tests for metrics collection."""
 
     async def test_collect_metrics_from_masters(self):
-        autoscaler = SimpleAutoscaler()
-
         master = MockStageMaster(
             stage_id="stage_a",
             worker_count=3,
             input_queue_lag=500,
+        )
+        stage_cfg = StageQueueConfig(
+            stage_id="stage_a",
+            input_queue_name="input_stage_a",
+            output_queue_name="output_stage_a",
+            backpressure_threshold_lag=1000,
+            backpressure_threshold_queue_size=1000,
+        )
+        stats_client = FakeQueueStatsClient(
+            {
+                "input_stage_a": QueueStats(pending_count=500, claimed_count=2),
+                "output_stage_a": QueueStats(pending_count=10),
+            }
+        )
+        autoscaler = SimpleAutoscaler(
+            queue_stats_client=stats_client,
+            stage_queue_configs={"stage_a": stage_cfg},
         )
 
         # Collect metrics - MockStageMaster is not a SourceMaster
@@ -457,12 +497,11 @@ class TestMetricsCollection:
         assert "stage_a" in metrics
         assert metrics["stage_a"].worker_count == 3
         assert metrics["stage_a"].input_queue_lag == 500
+        assert metrics["stage_a"].input_queue_claimed == 2
         assert metrics["stage_a"].is_source is False
 
     async def test_source_stage_marked_correctly(self):
         from solstice.operators.sources.source import SourceMaster
-
-        autoscaler = SimpleAutoscaler()
 
         # Create a mock that passes isinstance check
         source = MagicMock(spec=SourceMaster)
@@ -473,12 +512,19 @@ class TestMetricsCollection:
         source.stage = MagicMock()
         source.stage.min_parallelism = 1
         source.stage.max_parallelism = 1
-        source.get_status.return_value = StageStatus(
+        stage_cfg = StageQueueConfig(
             stage_id="source",
-            worker_count=1,
-            output_queue_size=100,
-            is_running=True,
-            is_finished=False,
+            input_queue_name=None,
+            output_queue_name="output_source",
+            backpressure_threshold_lag=1000,
+            backpressure_threshold_queue_size=1000,
+        )
+        stats_client = FakeQueueStatsClient(
+            {"output_source": QueueStats(pending_count=25)}
+        )
+        autoscaler = SimpleAutoscaler(
+            queue_stats_client=stats_client,
+            stage_queue_configs={"source": stage_cfg},
         )
 
         metrics = await autoscaler._collect_metrics({"source": source})

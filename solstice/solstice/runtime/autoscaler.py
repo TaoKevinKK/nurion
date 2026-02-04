@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, Optional, Set, Union
 
 
+from solstice.runtime.queue_stats import QueueStatsClient, StageQueueConfig
 from solstice.utils.logging import create_ray_logger
 
 if TYPE_CHECKING:
@@ -82,6 +83,7 @@ class StageMetrics:
     min_workers: int
     max_workers: int
     input_queue_lag: int = 0
+    input_queue_claimed: int = 0
     output_queue_size: int = 0
     is_running: bool = True
     is_finished: bool = False
@@ -112,9 +114,16 @@ class SimpleAutoscaler:
         ```
     """
 
-    def __init__(self, config: Optional[AutoscaleConfig] = None):
+    def __init__(
+        self,
+        config: Optional[AutoscaleConfig] = None,
+        queue_stats_client: Optional[QueueStatsClient] = None,
+        stage_queue_configs: Optional[Dict[str, StageQueueConfig]] = None,
+    ):
         self.config = config or AutoscaleConfig()
         self.logger = create_ray_logger("Autoscaler")
+        self._queue_stats_client = queue_stats_client
+        self._stage_queue_configs = stage_queue_configs or {}
 
         # Scaling state (in-memory only)
         self._last_scale_time: Dict[str, float] = {}
@@ -175,38 +184,43 @@ class SimpleAutoscaler:
     ) -> Dict[str, StageMetrics]:
         """Collect metrics from all stages.
 
-        For non-source stages, we need to get the input queue lag.
-        This requires checking the upstream queue's latest offset vs
-        the stage's committed offset.
+        For non-source stages, we use WorkQueue pending/claimed counts
+        from the upstream queue.
         """
         from solstice.operators.sources.source import SourceMaster
+
+        if not self._queue_stats_client:
+            raise RuntimeError("Queue stats client is required for autoscaling")
 
         metrics = {}
 
         for stage_id, master in masters.items():
             is_source = isinstance(master, SourceMaster)
 
-            # Get basic status
-            status = master.get_status()
-
             # Get min/max workers from stage
             min_workers = master.stage.min_parallelism
             max_workers = master.stage.max_parallelism
 
-            # For non-source stages, try to get input queue lag
-            input_lag = 0
-            if not is_source:
-                input_lag = master.get_input_queue_lag()
+            cfg = self._stage_queue_configs.get(stage_id)
+            if not cfg:
+                raise RuntimeError(f"Missing queue config for stage {stage_id}")
+
+            input_stats = self._queue_stats_client.get_stats(cfg.input_queue_name)
+            output_stats = self._queue_stats_client.get_stats(cfg.output_queue_name)
+            input_lag = input_stats.pending_count
+            input_claimed = input_stats.claimed_count
+            output_queue_size = output_stats.pending_count
 
             metrics[stage_id] = StageMetrics(
                 stage_id=stage_id,
-                worker_count=status.worker_count,
+                worker_count=len(master._workers),
                 min_workers=min_workers,
                 max_workers=max_workers,
                 input_queue_lag=input_lag,
-                output_queue_size=status.output_queue_size,
-                is_running=status.is_running,
-                is_finished=status.is_finished,
+                input_queue_claimed=input_claimed,
+                output_queue_size=output_queue_size,
+                is_running=getattr(master, "_running", True),
+                is_finished=getattr(master, "_finished", False),
                 is_source=is_source,
             )
 
@@ -263,12 +277,12 @@ class SimpleAutoscaler:
 
             # Rule 3: Scale down on low lag
             if m.input_queue_lag < self.config.scale_down_lag_threshold:
-                if current > m.min_workers:
+                if current > m.min_workers and m.input_queue_claimed == 0:
                     target = max(current - 1, m.min_workers)
                     decisions[stage_id] = target
                     self.logger.debug(
                         f"Stage {stage_id}: scale down {current} -> {target} "
-                        f"(lag={m.input_queue_lag})"
+                        f"(lag={m.input_queue_lag}, claimed={m.input_queue_claimed})"
                     )
 
         return decisions

@@ -213,10 +213,10 @@ def run_job(
 
 @cli.command(name="history-server")
 @click.option(
-    "--storage-path",
+    "--workqueue-db-path",
     "-s",
     required=True,
-    help="SlateDB storage path (e.g., s3://bucket/solstice-history/ or /tmp/solstice-webui/)",
+    help="WorkQueue storage path (e.g., file:///tmp/workqueue.db)",
 )
 @click.option(
     "--host",
@@ -236,11 +236,11 @@ def run_job(
     is_flag=True,
     help="Enable auto-reload for development",
 )
-def history_server_cmd(storage_path: str, host: str, port: int, reload: bool):
+def history_server_cmd(workqueue_db_path: str, host: str, port: int, reload: bool):
     """Start History Server for viewing completed jobs.
 
     Example:
-        solstice history-server -s s3://my-bucket/solstice-history/ -p 8080
+        solstice history-server -s file:///tmp/workqueue.db -p 8080
     """
     from solstice.webui.history_server import history_server as hs_func
 
@@ -249,8 +249,8 @@ def history_server_cmd(storage_path: str, host: str, port: int, reload: bool):
 
     sys.argv = [
         "history-server",
-        "--storage-path",
-        storage_path,
+        "--workqueue-db-path",
+        workqueue_db_path,
         "--host",
         host,
         "--port",
@@ -260,7 +260,7 @@ def history_server_cmd(storage_path: str, host: str, port: int, reload: bool):
         sys.argv.append("--reload")
 
     assert hs_func.callback is not None
-    hs_func.callback(storage_path, host, port, reload)
+    hs_func.callback(workqueue_db_path, host, port, reload)
 
 
 def main():

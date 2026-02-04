@@ -34,33 +34,6 @@
                 <div class="metric-value">{{ workers|selectattr('status', 'equalto', 'COMPLETED')|list|length }}</div>
                 <div class="metric-label">Completed</div>
             </div>
-            <div class="metric-card">
-                <div class="metric-value">{{ workers|sum(attribute='input_records')|default(0)|format_number }}</div>
-                <div class="metric-label">Total Input</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-value">{{ workers|sum(attribute='output_records')|default(0)|format_number }}</div>
-                <div class="metric-label">Total Output</div>
-            </div>
-        </div>
-    </section>
-    
-    <!-- Throughput Summary (rate calculations) -->
-    <section>
-        <h2>Throughput (last 60s)</h2>
-        <div class="metrics-grid">
-            <div class="metric-card">
-                <div class="metric-value">{{ "%.1f"|format(throughput.total_input_rate|default(0)) }}</div>
-                <div class="metric-label">Input/sec</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-value">{{ "%.1f"|format(throughput.total_output_rate|default(0)) }}</div>
-                <div class="metric-label">Output/sec</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-value">{{ "%.1f"|format(throughput.total_splits_rate|default(0)) }}</div>
-                <div class="metric-label">Splits/sec</div>
-            </div>
         </div>
     </section>
     
@@ -88,10 +61,6 @@
                         <tr>
                             <th style="width: 18%;">Worker ID</th>
                             <th style="width: 8%;">Status</th>
-                            <th class="number" style="width: 10%;">Input/s</th>
-                            <th class="number" style="width: 10%;">Output/s</th>
-                            <th class="number" style="width: 10%;">Input</th>
-                            <th class="number" style="width: 10%;">Output</th>
                             <th class="number" style="width: 10%;">Duration</th>
                             <th style="width: 14%;">Partitions</th>
                             <th style="width: 8%;">Action</th>
@@ -99,7 +68,6 @@
                     </thead>
                     <tbody>
                         {% for worker in stage_workers|sort(attribute='start_time', reverse=true) %}
-                        {% set worker_throughput = throughput.workers|selectattr('worker_id', 'equalto', worker.worker_id)|first if throughput.workers else none %}
                         <tr>
                             <td class="monospace" style="font-size: 0.8rem;">
                                 <a href="{{ base_path }}/jobs/{{ job.job_id }}/workers/{{ worker.worker_id }}">
@@ -109,22 +77,6 @@
                             <td>
                                 <span class="badge badge-{{ worker.status|lower }}">{{ worker.status }}</span>
                             </td>
-                            <td class="number">
-                                {% if worker_throughput %}
-                                {{ "%.1f"|format(worker_throughput.input_records_per_sec|default(0)) }}
-                                {% else %}
-                                -
-                                {% endif %}
-                            </td>
-                            <td class="number">
-                                {% if worker_throughput %}
-                                {{ "%.1f"|format(worker_throughput.output_records_per_sec|default(0)) }}
-                                {% else %}
-                                -
-                                {% endif %}
-                            </td>
-                            <td class="number">{{ worker.input_records|default(0)|format_number }}</td>
-                            <td class="number">{{ worker.output_records|default(0)|format_number }}</td>
                             <td class="number" style="font-size: 0.8rem;">
                                 {% if worker.end_time and worker.start_time %}
                                 {{ (worker.end_time - worker.start_time)|format_duration }}
@@ -154,7 +106,7 @@
         {% endfor %}
         
         {% if not workers %}
-        <p><em>No workers found for this job</em></p>
+        <p><em>No worker events recorded yet</em></p>
         {% endif %}
     </section>
     

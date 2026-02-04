@@ -45,12 +45,10 @@ class StageRuntime:
     Attributes:
         broker_endpoint: WorkQueue broker endpoint
         upstream_queue_name: Upstream queue name (None for source stages)
-        state_queue_name: WebUI state queue name
     """
 
     broker_endpoint: Optional["QueueEndpoint"] = None
     upstream_queue_name: Optional[str] = None
-    state_queue_name: Optional[str] = None
     claim_timeout_secs: float = 60.0
 
 

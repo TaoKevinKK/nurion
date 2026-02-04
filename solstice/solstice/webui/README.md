@@ -10,7 +10,7 @@ A web-based debugging and monitoring interface for Solstice streaming jobs.
 | Unified Read-Only Architecture | ✅ Complete |
 | Push-Based Metrics (WorkQueue) | ✅ Complete |
 | Job/Stage/Worker Pages | ✅ Complete |
-| SlateDB Storage | ✅ Complete |
+| WorkQueue Storage Reader | ✅ Complete |
 | SSE Real-Time Updates | ❌ Pending |
 | Lineage Visualization | ❌ Pending |
 | Chart.js Metrics | ❌ Pending |
@@ -34,8 +34,8 @@ A web-based debugging and monitoring interface for Solstice streaming jobs.
 
 ### Storage Strategy
 
-- **Prometheus**: Real-time metrics (records/s, lag, backpressure)
-- **SlateDB**: Historical data (job archives, exceptions, lineage)
+- **WorkQueue storage (pyO3)**: Job metadata, events, lineage
+- **Prometheus**: Optional real-time metrics (records/s, lag, backpressure)
 
 ## Usage
 
@@ -48,10 +48,9 @@ from solstice.core.job import Job, JobConfig, WebUIConfig
 job = Job(
     job_id="my_etl_job",
     config=JobConfig(
+        workqueue_db_path="file:///tmp/workqueue.db",
         webui=WebUIConfig(
             enabled=True,
-            storage_path="s3://my-bucket/solstice-history/",
-            prometheus_enabled=True,
         ),
     ),
 )
@@ -73,7 +72,7 @@ await runner.run()
 
 ```bash
 # Start History Server
-solstice history-server -s s3://my-bucket/solstice-history/ -p 8080
+solstice history-server -s file:///tmp/workqueue.db -p 8080
 
 # Access at: http://localhost:8080
 ```
@@ -100,11 +99,10 @@ http://localhost:<port>/
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enabled` | bool | False | Enable WebUI |
-| `storage_path` | str | /tmp/solstice-webui/ | SlateDB storage path |
-| `prometheus_enabled` | bool | True | Export Prometheus metrics |
-| `metrics_snapshot_interval_s` | float | 30.0 | Snapshot interval |
-| `archive_on_completion` | bool | True | Archive job when complete |
 | `port` | int | 5000 | Embedded WebUI base port (auto-increment) |
+| `lineage_sample_rate` | float | 0.0 | Split lineage sampling rate |
+
+WorkQueue storage is configured via `JobConfig.workqueue_db_path`.
 
 ### Environment Variables
 
@@ -260,15 +258,14 @@ The UI uses:
 
 ### Metrics Not Appearing
 
-1. Verify `prometheus_enabled=True` in WebUIConfig
-2. Check if Prometheus is scraping Ray metrics endpoint
-3. Verify SlateDB storage path is writable
+1. Check if Prometheus is scraping Ray metrics endpoint (if enabled)
+2. Verify WorkQueue DB path is writable
 
 ### History Server Shows No Jobs
 
-1. Check SlateDB storage path is correct
-2. Verify jobs have `archive_on_completion=True`
-3. Check logs for archiver errors
+1. Check WorkQueue DB path is correct
+2. Verify jobs are writing state via gRPC
+3. Check logs for storage read errors
 
 ## Future Enhancements
 

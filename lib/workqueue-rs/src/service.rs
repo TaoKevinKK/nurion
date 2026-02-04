@@ -175,18 +175,36 @@ impl WorkQueue for WorkQueueService {
             ));
         }
 
+        let has_state_updates = !req.state_namespace.is_empty()
+            && (!req.state_puts.is_empty() || !req.state_deletes.is_empty());
+
         // Nack directly in storage (returns messages to pending at tail)
-        match self
-            .storage
-            .nack_messages(
-                &req.queue,
-                &req.msg_ids,
-                &req.claim_tokens,
-                &req.worker_id,
-                &req.lease_id,
-            )
-            .await
-        {
+        let result = if has_state_updates {
+            self.storage
+                .nack_messages_with_state(
+                    &req.queue,
+                    &req.msg_ids,
+                    &req.claim_tokens,
+                    &req.worker_id,
+                    &req.lease_id,
+                    &req.state_namespace,
+                    &req.state_puts,
+                    &req.state_deletes,
+                )
+                .await
+        } else {
+            self.storage
+                .nack_messages(
+                    &req.queue,
+                    &req.msg_ids,
+                    &req.claim_tokens,
+                    &req.worker_id,
+                    &req.lease_id,
+                )
+                .await
+        };
+
+        match result {
             Ok(()) => Ok(Response::new(NackResponse {
                 nacked_count: req.msg_ids.len() as i32,
             })),

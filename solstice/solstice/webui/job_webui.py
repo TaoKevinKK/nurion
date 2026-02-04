@@ -16,13 +16,11 @@
 
 import os
 from typing import TYPE_CHECKING, Optional
-
-from solstice.webui.storage import JobStorage
 from solstice.utils.logging import create_ray_logger
 
 if TYPE_CHECKING:
     from solstice.runtime.ray_runner import RayJobRunner
-    from solstice.webui.state.manager import JobStateManager
+    from solstice.webui.state.writer import WorkQueueStateWriter
 
 
 class JobWebUI:
@@ -30,30 +28,23 @@ class JobWebUI:
 
     This component stores job configuration at startup.
 
-    Note: Metrics collection, worker tracking, and job archiving are handled
-    by JobStateManager (push-based architecture).
+    Note: Configuration is stored via WorkQueue state writer (gRPC).
     """
 
     def __init__(
         self,
         job_runner: "RayJobRunner",
-        storage: JobStorage,
-        attempt_id: str,
-        state_manager: Optional["JobStateManager"] = None,
+        state_writer: Optional["WorkQueueStateWriter"] = None,
     ):
         """Initialize job WebUI.
 
         Args:
             job_runner: RayJobRunner instance
-            storage: SlateDB storage instance
-            attempt_id: Unique attempt ID for this run
-            state_manager: JobStateManager for reading metrics (push-based)
+            state_writer: WorkQueue state writer for metadata
         """
         self.job_runner = job_runner
-        self.storage = storage
         self.job_id = job_runner.job.job_id
-        self.attempt_id = attempt_id
-        self.state_manager = state_manager
+        self.state_writer = state_writer
 
         self.logger = create_ray_logger(f"JobWebUI-{self.job_id}")
 
@@ -99,8 +90,9 @@ class JobWebUI:
                 },
             }
 
-            self.storage.store_configuration(config_data)
-            self.logger.debug("Configuration stored")
+            if self.state_writer:
+                self.state_writer.write_config(config_data)
+                self.logger.debug("Configuration stored in WorkQueue state")
 
         except Exception as e:
             self.logger.warning(f"Failed to store configuration: {e}")

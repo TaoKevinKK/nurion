@@ -25,14 +25,13 @@ solstice/
 │   │   ├── operator.py      # Operator base class
 │   │   ├── models.py        # Split, SplitPayload
 │   │   └── managers/        # Component managers
-│   │       ├── partition_manager.py
 │   │       ├── worker_manager.py
 │   │       ├── recovery_manager.py
-│   │       └── backpressure_monitor.py
 │   ├── runtime/             # Runtime components
 │   │   ├── ray_runner.py    # RayJobRunner
 │   │   ├── autoscaler.py    # SimpleAutoscaler
-│   │   └── state_push.py    # StatePushManager (WebUI)
+│   │   ├── backpressure.py  # JobBackpressureController
+│   │   └── queue_stats.py   # QueueStatsClient
 │   ├── queue/               # Queue backend
 │   │   ├── backend.py       # Record data structures
 │   │   └── workqueue.py     # WorkQueue broker + client
@@ -216,10 +215,10 @@ StageMaster delegates to specialized managers:
 
 | Manager | Responsibility |
 |---------|----------------|
-| `PartitionManager` | Partition assignment and rebalancing |
 | `WorkerManager` | Worker lifecycle (spawn, stop, status) |
 | `RecoveryManager` | Failure tracking and worker recovery |
-| `BackpressureMonitor` | Queue lag monitoring and scaling signals |
+
+Backpressure/autoscaling use job-level WorkQueue stats (see `runtime/backpressure.py`).
 
 ## Running a Pipeline
 

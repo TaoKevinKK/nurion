@@ -56,6 +56,7 @@ from workqueue_py import BrokerConfig, BrokerError, WorkQueueBroker
 from workqueue_py.client import WorkQueueClient, Message
 
 from solstice.utils.logging import create_ray_logger
+from solstice.queue.workqueue_storage import WorkQueueStorageReader
 
 
 # =============================================================================
@@ -134,6 +135,17 @@ class WorkQueueBrokerManager:
 
     def is_running(self) -> bool:
         return self._running
+
+    def get_storage_reader(self) -> Optional[WorkQueueStorageReader]:
+        """Get a storage reader backed by the broker's live storage."""
+        if not self._broker:
+            return None
+        try:
+            reader = self._broker.get_storage_reader()
+            return WorkQueueStorageReader(reader=reader)
+        except Exception as e:
+            self.logger.warning(f"Failed to get storage reader: {e}")
+            return None
 
 
 class _BrokerEventHandler:
@@ -292,6 +304,9 @@ class WorkQueueQueueClient:
         claim_tokens: Optional[List[str]] = None,
         reason: str = "processing_failed",
         delay_ms: int = 0,
+        state_namespace: Optional[str] = None,
+        state_puts: Optional[Dict[str, bytes]] = None,
+        state_deletes: Optional[List[str]] = None,
     ) -> int:
         self._check()
         return self._client.nack(
@@ -300,6 +315,9 @@ class WorkQueueQueueClient:
             claim_tokens=claim_tokens,
             reason=reason,
             delay_ms=delay_ms,
+            state_namespace=state_namespace,
+            state_puts=state_puts,
+            state_deletes=state_deletes,
         )
 
     def ack_and_forward(

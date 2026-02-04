@@ -70,7 +70,6 @@
                         <th>Started</th>
                         <th>Duration</th>
                         <th>Status</th>
-                        <th>Records</th>
                         <th>Actions</th>
                     </tr>
                 </thead>
@@ -85,7 +84,6 @@
                         <td>
                             <span class="badge badge-{{ job.status|lower }}">{{ job.status }}</span>
                         </td>
-                        <td class="number">{{ (job.total_output_records or job.total_records or 0)|format_number }}</td>
                         <td>
                             <a href="{{ base_path }}/jobs/{{ job.job_id }}/" role="button" class="outline small">View</a>
                         </td>

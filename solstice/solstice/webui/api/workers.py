@@ -15,13 +15,11 @@
 """Workers API - worker status, logs, and debugging.
 
 Architecture:
-- JobRunner writes to JobStorage (SlateDB) via JobStateManager
-- Portal/History Server reads from JobStorage (read-only)
+- JobRunner writes metadata to WorkQueue state (gRPC)
+- WebUI reads directly from WorkQueue storage (pyO3)
 
 Note: Logs and stacktrace endpoints require running workers (Ray actors).
 They use Ray State API to find actors, not cross-process state.
-
-Note: storage is guaranteed to exist (app won't start without it).
 """
 
 import subprocess

@@ -12,33 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Push-based state management for WebUI.
+"""WorkQueue-backed WebUI state utilities."""
 
-This module provides event-driven state management using WorkQueue,
-replacing the pull-based ray.get() polling approach.
-
-Key components:
-- StateMessage: Unified message format for all state updates
-- JobStateManager: Consumes and aggregates state from WorkQueue
-- StateProducer: Helper for producing state messages (used by workers)
-
-Benefits over pull-based approach:
-- No Ray GCS pressure from frequent ray.get() calls
-- Workers are not blocked by metrics collection
-- Predictable latency with time-window aggregation
-- Event sourcing enables state replay for debugging
-"""
-
-from solstice.webui.state.messages import (
-    StateMessage,
-    StateMessageType,
-)
 from solstice.webui.state.manager import JobStateManager
-from solstice.webui.state.producer import StateProducer
+from solstice.webui.state.writer import WorkQueueStateWriter
 
-__all__ = [
-    "StateMessage",
-    "StateMessageType",
-    "JobStateManager",
-    "StateProducer",
-]
+__all__ = ["JobStateManager", "WorkQueueStateWriter"]

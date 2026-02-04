@@ -229,8 +229,6 @@
                         <th style="width: 25%;">Stage ID</th>
                         <th class="number" style="width: 10%;">Workers</th>
                         <th class="number" style="width: 10%;">Queue</th>
-                        <th class="number" style="width: 15%;">Input</th>
-                        <th class="number" style="width: 15%;">Output</th>
                         <th style="width: 10%;">Status</th>
                         <th style="width: 10%;">Action</th>
                     </tr>
@@ -243,8 +241,6 @@
                         </td>
                         <td class="number">{{ stage.worker_count|default(0) }}</td>
                         <td class="number">{{ stage.output_queue_size|default(0)|format_number }}</td>
-                        <td class="number">{{ (stage.input_records|default(stage.final_metrics.input_records if stage.final_metrics else none)|default(0))|format_number }} rows</td>
-                        <td class="number">{{ (stage.output_records|default(stage.final_metrics.output_records if stage.final_metrics else none)|default(0))|format_number }} rows</td>
                         <td>
                             {% set stage_status = stage.status|default('PENDING') %}
                             {% if stage_status == 'RUNNING' %}

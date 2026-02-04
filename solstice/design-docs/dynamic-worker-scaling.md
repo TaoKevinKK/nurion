@@ -1,7 +1,6 @@
 # Dynamic Worker Scaling Design
 
-> NOTE: This document references the former Tansu/Kafka queue model. The current
-> implementation uses the embedded WorkQueue backend. See
+> NOTE: The current implementation uses the embedded WorkQueue backend. See
 > `design-docs/work-queue-redesign.md`.
 
 _Design document for Solstice auto-scaling feature_
@@ -9,13 +8,13 @@ _Created: December 2025_
 
 ---
 
-## Implementation Status (Updated 2026-01-19)
+## Implementation Status (Updated 2026-02-04)
 
 | Component | Status | Notes |
 |-----------|--------|-------|
 | **SimpleAutoscaler** | ✅ Complete | `runtime/autoscaler.py` |
 | **AutoscaleConfig** | ✅ Complete | Dataclass with threshold settings |
-| **Queue Lag Metrics** | ✅ Complete | Via `BackpressureMonitor` |
+| **Queue Lag Metrics** | ✅ Complete | WorkQueue pending/claimed via job-level stats client |
 | **Worker Scale Up/Down** | ✅ Complete | Via `WorkerManager` |
 | **Cooldown Period** | ✅ Complete | Prevents thrashing |
 | **Manual Override API** | ✅ Complete | `set_stage_workers()`, `freeze_stage()` |
@@ -23,10 +22,12 @@ _Created: December 2025_
 | **Bottleneck Prioritization** | ❌ Not Implemented | Future work |
 
 **Current Implementation:**
-- Threshold-based scaling using queue lag
+- Threshold-based scaling using WorkQueue pending/claimed
+- Scale down only when pending is low and claimed == 0
 - Configurable check interval (default 15s)
 - Cooldown between scaling decisions
 - Manual intervention via runner API
+- Backpressure is evaluated by a job-level controller using WorkQueue stats
 
 ---
 
@@ -89,9 +90,9 @@ Solstice is an **offline/batch processing** framework, not a real-time streaming
 │         │                 │                 │                            │
 │         └─────────────────┴─────────────────┘                            │
 │                           │                                              │
-│                    Tansu Queues (S3-backed)                              │
-│                    • Data flow between stages                            │
-│                    • Offset persistence (exactly-once)                   │
+│                 WorkQueue (SlateDB-backed)                               │
+│                 • Data flow between stages                               │
+│                 • Pending/claimed counters                               │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -103,7 +104,7 @@ Solstice is an **offline/batch processing** framework, not a real-time streaming
 
 3. **Slow-paced decisions**: Scaling decisions are made every 15-30 seconds, not continuously. This is sufficient for batch workloads and reduces system overhead.
 
-4. **Direct method calls**: Since `StageMaster` instances are Python objects (not Ray actors), metrics collection is synchronous and fast.
+4. **Direct control path**: `StageMaster` is in-process for scaling actions; metrics are fetched from WorkQueue.
 
 ## 4. Detailed Design
 
@@ -120,7 +121,6 @@ class AutoscaleConfig:
     # Scaling thresholds
     scale_up_lag_threshold: int = 1000    # Scale up if queue lag > threshold
     scale_down_lag_threshold: int = 100   # Scale down if lag < threshold
-    scale_down_utilization: float = 0.3   # Scale down if utilization < 30%
     
     # Damping
     cooldown_s: float = 60.0              # Cooldown after scaling
@@ -133,25 +133,27 @@ class AutoscaleConfig:
 
 ### 4.2 Metrics Collection
 
-Metrics are collected directly from `StageMaster` instances via synchronous method calls:
+Metrics are collected via a job-level WorkQueue stats client; StageMaster is used
+only for worker counts and control actions.
 
 ```python
 @dataclass
 class StageMetrics:
     stage_id: str
     worker_count: int
-    input_queue_lag: int      # Messages pending in input queue
+    min_workers: int
+    max_workers: int
+    input_queue_lag: int      # WorkQueue pending_count
+    input_queue_claimed: int  # WorkQueue claimed_count (in-flight)
     output_queue_size: int    # Messages in output queue
+    is_running: bool
     is_finished: bool
-    config: StageConfig       # min_workers, max_workers, etc.
+    is_source: bool
 ```
 
-**Why not Ray RPC or message queues for metrics?**
-
-- `StageMaster` is a regular Python object in the same process as `RayJobRunner`
-- Direct method calls are fast and simple
-- No serialization overhead or network latency
-- No additional dependencies
+Queue stats are sourced from WorkQueue (`pending_count`, `claimed_count`, `total_pushed`, `total_acked`)
+through a single job-level client. Worker/master/operator progress counters are not used
+for autoscaling decisions.
 
 ### 4.3 Scaling Algorithm
 
@@ -165,7 +167,7 @@ def compute_desired_workers(metrics: StageMetrics) -> int:
     Rules:
     1. Manual override has highest priority
     2. Scale up if input queue lag > threshold
-    3. Scale down if lag is small and workers > min
+    3. Scale down if pending is low and claimed == 0
     4. Otherwise maintain current count
     """
     config = metrics.config
@@ -179,8 +181,8 @@ def compute_desired_workers(metrics: StageMetrics) -> int:
     if metrics.input_queue_lag > scale_up_lag_threshold:
         return min(current + max_scale_step, config.max_workers)
     
-    # Rule 3: Scale down on low lag
-    if metrics.input_queue_lag < scale_down_lag_threshold:
+    # Rule 3: Scale down only when mostly idle (low pending + no in-flight)
+    if metrics.input_queue_lag < scale_down_lag_threshold and metrics.input_queue_claimed == 0:
         if current > config.min_workers:
             return max(current - 1, config.min_workers)
     
@@ -229,7 +231,7 @@ When a worker fails (Ray actor dies):
 1. `StageMaster` detects the failure via `ray.wait()` on worker tasks
 2. Failed worker is removed from the worker pool
 3. If `worker_count < min_workers`, a new worker is spawned immediately
-4. Unprocessed messages are re-consumed from the queue (offset not committed)
+4. Unprocessed messages are returned to pending and re-consumed by other workers
 
 ```python
 # In StageMaster.run()
@@ -250,7 +252,8 @@ for worker_id, task in list(self._worker_tasks.items()):
 
 ### 5.2 StageMaster Failure
 
-If a `StageMaster` fails, the entire stage is restarted by `RayJobRunner`. The stage resumes from the last committed offset in Tansu.
+If a `StageMaster` fails, the entire stage is restarted by `RayJobRunner`. The stage resumes
+from WorkQueue storage state; pending/claimed counts determine remaining work.
 
 ### 5.3 Coordinator Failure
 
@@ -264,7 +267,7 @@ If `RayJobRunner` (and thus `SimpleAutoscaler`) fails:
 
 - Batch jobs are expected to run for minutes/hours
 - Re-running scaling decisions is cheap
-- Critical data (offsets) is persisted in Tansu
+- Critical queue state is persisted in WorkQueue storage
 
 ## 6. Resource Management
 
@@ -430,9 +433,9 @@ The simple design should be revisited if Solstice evolves to support:
 ## 11. References
 
 - [Checkpoint and Recovery Design](checkpoint-and-recovery.md)
-- [Architecture Overview](architecture.md)
-- [Tansu Queue Backend](../solstice/queue/tansu.py)
+- [Architecture Overview](deprecated-design/architecture.md)
+- [WorkQueue Redesign](work-queue-redesign.md)
 
 ---
 
-_Last updated: December 2025_
+_Last updated: February 2026_

@@ -2,7 +2,7 @@
 
 Track implementation status of WebUI features against `design-docs/webui.md`.
 
-> **Last Updated**: 2025-01-07
+> **Last Updated**: 2026-02-04
 
 ---
 
@@ -13,9 +13,9 @@ Major architectural simplification: Portal and History Server use the same read-
 > **Status**: Complete (2025-01-07)
 
 ### Key Design Decisions ✅
-- [x] **Portal is read-only** - Only reads from JobStorage (SlateDB)
-- [x] **History Server is read-only** - Same code as Portal
-- [x] **JobRunner is the only writer** - StateManager writes to SlateDB
+- [x] **Portal is read-only** - Reads from WorkQueue storage (pyO3)
+- [x] **History Server is read-only** - Same code path as Portal
+- [x] **JobRunner is the only writer** - gRPC `state_put` / `state_puts`
 - [x] **No cross-process state sharing** - Registry pattern removed
 - [x] **Unified code path** - Running and completed jobs use same logic
 
@@ -23,14 +23,13 @@ Major architectural simplification: Portal and History Server use the same read-
 - [x] **Removed registry.py** - Cross-process state doesn't work
 - [x] **Updated API handlers** - Read from `request.app.state.storage` only
   - `jobs.py`, `stages.py`, `workers.py`
-- [x] **Updated state_push.py** - Removed registry calls
-- [x] **Updated design-docs/webui.md** - Documented unified architecture
+- [x] **WorkQueue-first WebUI** - Read from storage, write via gRPC
+- [x] **Updated design-docs/webui.md** - Documented WorkQueue architecture
 
-### Push-Based Metrics ✅
-- [x] **StateMessage definitions** - `webui/state/messages.py`
-- [x] **JobStateManager** - Consumes Tansu, writes to SlateDB
-- [x] **StateProducer** - Fire-and-forget produce
-- [x] **StatePushManager** - Encapsulates state infrastructure in runner
+### Event Metadata ✅
+- [x] **Ack/Nack/Timeout events** - Stored in WorkQueue state
+- [x] **JobStateManager** - Storage reader (pyO3)
+- [x] **WorkQueueStateWriter** - gRPC writer for job/stage metadata
 
 ### Producer Integration ✅
 - [x] **Worker metrics push** - Modified StageWorker
@@ -44,15 +43,15 @@ Major architectural simplification: Portal and History Server use the same read-
 ### Core Architecture
 
 - [x] **Portal Service** - Ray Serve deployment with `/solstice` route prefix (read-only)
-- [x] **StatePushManager** - Encapsulates state infrastructure in JobRunner
+- [x] **WorkQueueStateWriter** - gRPC state writes from JobRunner/StageMaster
 - [x] **Unified Architecture** - Portal and History Server use same read-only code
 - [x] **No cross-process state** - Removed broken registry pattern
 
 ### Storage
 
-- [x] **JobStorage (Writer)** - Per-job write protocol
-- [x] **PortalStorage (Reader)** - Cross-job read protocol
-- [x] **SlateDB Storage** - Basic implementation
+- [x] **WorkQueueStateWriter** - gRPC state writes
+- [x] **JobStateManager (Reader)** - Cross-job read protocol
+- [x] **WorkQueue storage (pyO3)** - Basic implementation
 - [x] **Prometheus Exporter** - Real-time metrics export
 
 ### Collectors
@@ -165,11 +164,11 @@ Differences from original `design-docs/webui.md`:
 
 **Original Design**:
 - Portal queries running jobs via JobRegistry/StateManager
-- History Server reads from SlateDB
+- History Server reads from WorkQueue storage
 - Different code paths for running vs completed
 
 **Current Implementation**:
-- Portal reads from JobStorage (SlateDB) only
+- Portal reads from WorkQueue storage only
 - History Server uses same code
 - Unified code path for all jobs
 - No cross-process state sharing

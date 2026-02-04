@@ -133,7 +133,6 @@ def stage_runtime():
             storage_url="memory://",
         ),
         upstream_queue_name=None,
-        state_queue_name=None,
     )
 
     yield runtime

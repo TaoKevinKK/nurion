@@ -99,9 +99,8 @@ def main(job_id: str, wait_time: int):
     input_path = os.path.join(job_dir, "input_videos.lance")
     output_path = os.path.join(job_dir, "output_slices.lance")
 
-    # SHARED WebUI storage path (same across all runs to show completed jobs)
-    webui_storage = "/tmp/solstice-webui-storage"
-    os.makedirs(webui_storage, exist_ok=True)
+    # Shared WorkQueue storage path (same across runs to show completed jobs)
+    workqueue_db_path = "file:///tmp/solstice-workqueue"
 
     # Create input data
     create_test_lance_table(input_path)
@@ -114,7 +113,7 @@ def main(job_id: str, wait_time: int):
         "filter_modulo": 4,
         "scene_threshold": 0.4,
         "split_size": 2,
-        "workqueue_db_path": "memory://",
+        "workqueue_db_path": workqueue_db_path,
         "scene_parallelism": (1, 2),  # Lower parallelism
         "slice_parallelism": (1, 2),
         "filter_parallelism": (1, 2),
@@ -129,7 +128,6 @@ def main(job_id: str, wait_time: int):
     # Enable WebUI
     job.config.webui = WebUIConfig(
         enabled=True,
-        storage_path=webui_storage,
         port=5000,
         lineage_sample_rate=1.0,  # Full lineage tracking
     )
@@ -138,7 +136,7 @@ def main(job_id: str, wait_time: int):
     logger.info(f"Starting job {job_id}")
     logger.info(f"Input:  {input_path}")
     logger.info(f"Output: {output_path}")
-    logger.info(f"WebUI Storage: {webui_storage} (shared for completed jobs)")
+    logger.info(f"WorkQueue DB: {workqueue_db_path}")
     logger.info("=" * 80)
 
     runner = job.create_ray_runner()

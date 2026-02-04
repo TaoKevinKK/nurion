@@ -2,7 +2,7 @@
 
 > NOTE: This document describes a legacy Tansu binding. The current
 > implementation uses the embedded WorkQueue backend. See
-> `design-docs/work-queue-redesign.md`.
+> `../work-queue-redesign.md`.
 
 ---
 
@@ -41,13 +41,13 @@ The queue layer follows the Interface Segregation Principle, providing small, fo
 │  - produce_batch│  - commit_offset│  - delete_topic()       │
 │                 │  - get_latest   │  - health_check()       │
 └─────────────────┴─────────────────┴─────────────────────────┘
-          │                │                    │
-          └────────────────┼────────────────────┘
-                           │
-                  ┌────────▼────────┐
-                  │   QueueClient   │  Combined interface
-                  │   (all above)   │
-                  └─────────────────┘
+         │                │                    │
+         └────────────────┼────────────────────┘
+                          │
+                 ┌────────▼────────┐
+                 │   QueueClient   │  Combined interface
+                 │   (all above)   │
+                 └─────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
 │                    QueueBroker                              │
@@ -77,9 +77,9 @@ The implementation separates broker management from client operations:
 │  │   - Provides broker_url │  │   - offset tracking         ││
 │  └─────────────────────────┘  └─────────────────────────────┘│
 └──────────────────────────────────────────────────────────────┘
-                                       │ broker_url
-                    ┌──────────────────┘
-                    ▼
+                                      │ broker_url
+                   ┌──────────────────┘
+                   ▼
 ┌──────────────────────────────────────────────────────────────┐
 │                     StageWorker Node                         │
 │  ┌─────────────────────────────────────────────────────────┐ │
@@ -103,28 +103,28 @@ The implementation separates broker management from client operations:
 │  ├── StageMaster: TansuBrokerManager + TansuQueueClient     │
 │  └── StageWorker: TansuQueueClient (connects to master)     │
 └───────────────────────────────┬──────────────────────────────┘
-                                │
+                               │
 ┌───────────────────────────────▼──────────────────────────────┐
 │  Queue Abstraction Layer (solstice.queue)                    │
 │  ├── TansuBrokerManager - Broker lifecycle (QueueBroker)    │
 │  ├── TansuQueueClient - Kafka operations (QueueClient)      │
 │  └── MemoryBackend - In-memory testing (QueueClient)        │
 └───────────────────────────────┬──────────────────────────────┘
-                                │
+                               │
 ┌───────────────────────────────▼──────────────────────────────┐
 │  Python Binding Layer (tansu_py)                             │
 │  ├── TansuBroker - Embedded broker wrapper                  │
 │  ├── BrokerConfig - Configuration dataclass                 │
 │  └── BrokerEventHandler - Lifecycle callbacks               │
 └───────────────────────────────┬──────────────────────────────┘
-                                │ PyO3 FFI
+                               │ PyO3 FFI
 ┌───────────────────────────────▼──────────────────────────────┐
 │  Rust Layer (tansu-py/src)                                   │
 │  ├── Tokio runtime management                               │
 │  ├── Thread lifecycle (non-blocking start)                  │
 │  └── GIL-safe callback invocation                           │
 └───────────────────────────────┬──────────────────────────────┘
-                                │
+                               │
 ┌───────────────────────────────▼──────────────────────────────┐
 │  Tansu Broker Core (tansu-io/tansu v0.5.9)                  │
 │  ├── Kafka protocol implementation                          │

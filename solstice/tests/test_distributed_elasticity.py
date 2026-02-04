@@ -380,7 +380,7 @@ class TestElasticScaling:
         Tests that failures in one stage don't corrupt data flow to others.
         Each stage operates independently with its own workers and queue.
         """
-        NUM_RECORDS = 1500
+        NUM_RECORDS = 5000  # More records to give time for worker kills
         FILTER_MODULO = 3
         FILTER_REMAINDER = 0
         EXPLODE_FACTOR = 2

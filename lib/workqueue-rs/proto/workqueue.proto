@@ -118,6 +118,11 @@ message NackRequest {
   NackReason reason = 5;
   int32 delay_ms = 6;               // Delay before message can be reclaimed
   repeated string claim_tokens = 7; // Claim tokens (1:1 with msg_ids)
+
+  // Optional: atomic state updates with nack
+  string state_namespace = 8;
+  map<string, bytes> state_puts = 9;
+  repeated string state_deletes = 10;
 }
 
 enum NackReason {

@@ -17,15 +17,12 @@
 These managers handle specific concerns within a StageMaster:
 - WorkerManager: Worker lifecycle (spawn, stop, status)
 - RecoveryManager: Failure tracking and worker recovery
-- BackpressureMonitor: Backpressure detection and scaling
 """
 
 from solstice.core.managers.worker_manager import WorkerManager
 from solstice.core.managers.recovery_manager import RecoveryManager
-from solstice.core.managers.backpressure_monitor import BackpressureMonitor
 
 __all__ = [
     "WorkerManager",
     "RecoveryManager",
-    "BackpressureMonitor",
 ]

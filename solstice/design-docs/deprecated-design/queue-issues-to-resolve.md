@@ -8,7 +8,7 @@ _Analysis Date: December 10, 2025_
 
 **This document is now historical.** The Tansu/Kafka partition-based model has been replaced with WorkQueue, a single-queue multi-consumer model.
 
-See: [`work-queue-redesign.md`](./work-queue-redesign.md) for the current design.
+See: [`work-queue-redesign.md`](../work-queue-redesign.md) for the current design.
 
 ### Why WorkQueue?
 
