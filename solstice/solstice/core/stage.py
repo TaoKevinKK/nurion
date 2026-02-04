@@ -51,6 +51,7 @@ class StageRuntime:
     broker_endpoint: Optional["QueueEndpoint"] = None
     upstream_queue_name: Optional[str] = None
     state_queue_name: Optional[str] = None
+    claim_timeout_secs: float = 60.0
 
 
 # =============================================================================

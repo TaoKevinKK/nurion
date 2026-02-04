@@ -264,7 +264,7 @@ def history_server_cmd(storage_path: str, host: str, port: int, reload: bool):
 
 
 def main():
-    """Main entry point (backwards compatibility)."""
+    """Main entry point (compatibility wrapper)."""
     cli()
 
 

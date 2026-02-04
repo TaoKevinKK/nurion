@@ -74,6 +74,16 @@ class WorkerRuntime:
 
     # Processing config
     batch_size: int = 100
+    claim_timeout_secs: float = 60.0
+
+
+class PayloadMissingError(RuntimeError):
+    """Raised when required payload is missing for a claimed message."""
+
+    def __init__(self, msg_id: str, payload_key: str) -> None:
+        super().__init__(f"Payload not found for key: {payload_key}")
+        self.msg_id = msg_id
+        self.payload_key = payload_key
 
 
 @ray.remote
@@ -99,6 +109,7 @@ class StageWorker:
 
         # Processing config
         self._batch_size = runtime.batch_size
+        self._claim_timeout_secs = runtime.claim_timeout_secs
 
         # Store references
         self.stage = stage
@@ -117,7 +128,6 @@ class StageWorker:
 
         # Worker-level state
         self._running = False
-        self._upstream_finished = False
         self._safe_to_exit = False  # Set by master when queue is confirmed drained
 
         # Buffer for split metrics (batch produce)
@@ -139,7 +149,13 @@ class StageWorker:
         if not self.broker_endpoint:
             raise RuntimeError("broker_endpoint is required")
         broker_url = f"{self.broker_endpoint.host}:{self.broker_endpoint.port}"
-        client = WorkQueueQueueClient(broker_url, worker_id=self.worker_id)
+        from solstice.queue.workqueue import _compute_heartbeat_interval
+
+        client = WorkQueueQueueClient(
+            broker_url,
+            worker_id=self.worker_id,
+            heartbeat_interval_secs=_compute_heartbeat_interval(self._claim_timeout_secs),
+        )
         client.start()
         return client
 
@@ -223,7 +239,7 @@ class StageWorker:
 
                 if not records:
                     # Queue returned empty, check if we should exit
-                    if self._upstream_finished and self._is_queue_drained():
+                    if self._should_exit():
                         self.logger.info(
                             f"Worker {self.worker_id} done: upstream finished and queue drained"
                         )
@@ -233,12 +249,32 @@ class StageWorker:
 
                 # Process each claimed message
                 for record in records:
+                    if not record.claim_token:
+                        raise RuntimeError(
+                            f"Missing claim_token for message {record.msg_id}"
+                        )
+
                     message = QueueMessage.from_bytes(record.value)
                     split_id = make_split_id(self.job_id, self.stage_id, record.msg_id)
 
-                    check_fault(FAULT_BEFORE_PROCESS)
-                    output_bytes = await self._process_message(message, record, split_id)
-                    check_fault(FAULT_AFTER_PROCESS)
+                    try:
+                        check_fault(FAULT_BEFORE_PROCESS)
+                        output_bytes = await self._process_message(message, record, split_id)
+                        check_fault(FAULT_AFTER_PROCESS)
+                    except PayloadMissingError as e:
+                        if self.upstream_queue_name:
+                            self.logger.error(
+                                f"Payload missing for msg_id={e.msg_id}, "
+                                f"nacking for retry: {e.payload_key}"
+                            )
+                            self.queue_client.nack(
+                                self.upstream_queue_name,
+                                [record.msg_id],
+                                claim_tokens=[record.claim_token],
+                                reason="payload_missing",
+                            )
+                            continue
+                        raise
 
                     check_fault(FAULT_BEFORE_MARK_PROCESSED)
                     self._operator.processed_count += 1
@@ -250,17 +286,38 @@ class StageWorker:
                         self.queue_client.ack_and_forward(
                             upstream_queue=self.upstream_queue_name,
                             upstream_msg_ids=[record.msg_id],
+                            upstream_claim_tokens=[record.claim_token],
                             downstream_queue=self.output_queue_name,
                             downstream_payloads=[output_bytes],
                         )
                     else:
                         # No output, just ack
-                        self.queue_client.ack(self.upstream_queue_name, [record.msg_id])
+                        self.queue_client.ack(
+                            self.upstream_queue_name,
+                            [record.msg_id],
+                            claim_tokens=[record.claim_token],
+                        )
 
             except asyncio.CancelledError:
                 self.logger.info(f"Worker {self.worker_id} claim loop cancelled")
                 raise
             except Exception as e:
+                try:
+                    import grpc
+                except Exception:
+                    grpc = None  # type: ignore[assignment]
+
+                is_broker_error = False
+                if grpc is not None and isinstance(e, grpc.RpcError):
+                    is_broker_error = True
+                elif isinstance(e, RuntimeError) and "Client not started" in str(e):
+                    is_broker_error = True
+
+                if is_broker_error:
+                    self.logger.error(
+                        f"Worker {self.worker_id} broker error, stopping: {e}"
+                    )
+                    raise RuntimeError("broker_unavailable") from e
                 if self._operator:
                     self._operator.error_count += 1
                 self.logger.error(f"Error in worker {self.worker_id}: {e}")
@@ -270,14 +327,15 @@ class StageWorker:
             f"Worker {self.worker_id} finished: processed={self._operator.processed_count if self._operator else 0}"
         )
 
-    def _is_queue_drained(self) -> bool:
+    def _should_exit(self) -> bool:
         """Check if worker should exit.
 
-        Returns True when master has confirmed the queue is fully drained
-        (finished flag set AND pending==0 AND claimed==0).
+        Returns True when master has confirmed it's safe to exit, meaning:
+        1. Upstream has finished (queue marked as finished)
+        2. Queue is drained (pending==0 && claimed==0)
 
         The master handles the RPC check and notifies workers via
-        notify_safe_to_exit() when it's safe to exit.
+        notify_safe_to_exit() when these conditions are met.
         """
         return self._safe_to_exit
 
@@ -311,7 +369,7 @@ class StageWorker:
         else:
             payload = self.payload_store.get(message.payload_key)
             if payload is None:
-                raise RuntimeError(f"Payload not found for key: {message.payload_key}")
+                raise PayloadMissingError(record.msg_id, message.payload_key)
 
             split = Split(
                 split_id=message.split_id,
@@ -378,11 +436,6 @@ class StageWorker:
 
     # === Status and Control ===
 
-    def notify_upstream_finished(self) -> None:
-        """Called by master when upstream stage(s) have finished."""
-        self._upstream_finished = True
-        self.logger.info(f"Worker {self.worker_id} notified: upstream finished")
-
     def notify_safe_to_exit(self) -> None:
         """Called by master when queue is confirmed drained and safe to exit.
 
@@ -404,7 +457,7 @@ class StageWorker:
             "stage_id": self.stage_id,
             "pid": os.getpid(),
             "running": self._running,
-            "upstream_finished": self._upstream_finished,
+            "safe_to_exit": self._safe_to_exit,
             "processed_count": op.processed_count if op else 0,
             "error_count": op.error_count if op else 0,
             "input_records": op.total_input_records if op else 0,

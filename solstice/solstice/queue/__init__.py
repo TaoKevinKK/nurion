@@ -19,7 +19,11 @@ Example:
     client.create_queue("my-queue")
     client.push("my-queue", b"message data")
     messages = client.claim("my-queue", batch_size=10)
-    client.ack("my-queue", [m.msg_id for m in messages])
+    client.ack(
+        "my-queue",
+        [m.msg_id for m in messages],
+        claim_tokens=[m.claim_token for m in messages],
+    )
 
     client.stop()
     broker.stop()

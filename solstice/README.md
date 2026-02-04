@@ -24,7 +24,7 @@ Solstice focuses on **simple, elastic, and observable high-throughput pipelines*
   - The runtime uses queue lag metrics to detect bottlenecks and adapt throughput.
 
 - **Minimal dependencies**:  
-  - Runtime only requires **Ray** and optionally **Tansu** (embedded message broker).  
+  - Runtime only requires **Ray**; WorkQueue broker is embedded (no external service).  
   - No heavy external services are required to start a pipeline.
 
 - **Streaming-style execution model**:  
@@ -32,8 +32,8 @@ Solstice focuses on **simple, elastic, and observable high-throughput pipelines*
   - This avoids classic batch-style stage barriers and long-tail stragglers.
 
 - **Queue-based data flow**:  
-  - Stage-to-stage communication uses message queues (Tansu or in-memory).
-  - Offsets enable recovery and exactly-once semantics (when fully implemented).
+  - Stage-to-stage communication uses WorkQueue (embedded broker; `memory://` or `file://` storage).
+  - Message IDs enable recovery and exactly-once semantics (when fully implemented).
 
 ## How Solstice compares
 
@@ -50,7 +50,7 @@ Solstice focuses on **simple, elastic, and observable high-throughput pipelines*
 - Ray Data is primarily built around **in-memory object store shuffle**:
   - Great for smaller tabular workloads, but costly for **huge multimodal binaries** (e.g. video frames, model inputs).  
 - Solstice:
-  - Uses **message queues** (Tansu) for stage-to-stage coordination with offset-based tracking.  
+  - Uses **WorkQueue** (embedded broker) for stage-to-stage coordination with message ID tracking.  
   - Offers a **transparent, explicit runtime model** (stages, splits, queues, backpressure) instead of opaque auto-tuning knobs.  
   - Works better when your data is large, binary, and long-lived.
 
@@ -85,7 +85,7 @@ Instead, it is focused on:
 
 ### Shared Libraries (in `/lib`)
 
-- **lib/tansu-py/**: PyO3 bindings for embedded Tansu message broker
+- **lib/workqueue-rs/**: Embedded WorkQueue broker + Python client
 - **lib/raydp/**: Run Spark on Ray with distributed execution
 - **lib/raydp/java/**: Scala/Java components for Spark integration
 
@@ -112,13 +112,11 @@ from solstice.operators.sources import LanceTableSourceConfig
 from solstice.operators.map import MapOperatorConfig
 from solstice.operators.filter import FilterOperatorConfig
 from solstice.operators.sinks import FileSinkConfig
-from solstice.queue import QueueType
-
 # Create a job with configuration
 job = Job(
     job_id='my_pipeline',
     config=JobConfig(
-        queue_type=QueueType.MEMORY,  # Use TANSU for production
+        workqueue_db_path="memory://",  # Use file:// for local persistence
     ),
 )
 
@@ -163,7 +161,7 @@ asyncio.run(main())
 ✅ **Elastic Scaling**: Auto-scale workers based on load  
 ✅ **Backpressure**: Automatic rate adaptation via queue lag detection  
 ✅ **DAG Pipelines**: Complex multi-stage workflows  
-✅ **Queue-Based Flow**: Tansu or in-memory queues for stage coordination  
+✅ **Queue-Based Flow**: WorkQueue (embedded broker) for stage coordination  
 ✅ **Zero Config Files**: All configuration in Python code  
 ✅ **Multimodal Operators**: Video processing, LLM inference, deduplication
 
@@ -257,7 +255,7 @@ Solstice uses a **pull-based, queue-driven execution model**:
 - **RayJobRunner**: Orchestrates the job lifecycle, manages stage masters
 - **StageMaster**: Manages workers for a stage, owns the output queue
 - **StageWorker**: Stateless Ray actor that pulls from upstream queue, processes data, writes to output queue
-- **Queue Backend**: Tansu (production) or Memory (testing) for stage-to-stage communication
+- **Queue Backend**: WorkQueue (embedded broker; `memory://` or `file://` storage)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -296,32 +294,26 @@ Solstice uses a **pull-based, queue-driven execution model**:
 - `RecoveryManager`: Failure tracking and worker recovery
 - `BackpressureMonitor`: Queue lag monitoring and scaling signals
 
-**Queue Backends**:
-- `TansuBackend`: Production queue using embedded Tansu broker (Kafka-compatible)
-- `MemoryBackend`: In-process queue for testing
+**Queue Backend**:
+- `WorkQueue`: Embedded broker with claim/ack semantics
 
-## Queue Types
+## WorkQueue Storage Options
 
-### Memory Queue (Testing)
+### In-memory (testing)
 
 ```python
-from solstice.queue import QueueType
-
 job = Job(
     job_id='test_job',
-    config=JobConfig(queue_type=QueueType.MEMORY),
+    config=JobConfig(workqueue_db_path="memory://"),
 )
 ```
 
-### Tansu Queue (Production)
+### File-backed (local persistence)
 
 ```python
 job = Job(
     job_id='prod_job',
-    config=JobConfig(
-        queue_type=QueueType.TANSU,
-        tansu_storage_url='memory://',  # or 's3://bucket/'
-    ),
+    config=JobConfig(workqueue_db_path="file:///tmp/workqueue"),
 )
 ```
 
@@ -369,7 +361,7 @@ See `workflows/` and `examples/` directories:
 cd solstice
 uv run pytest tests/ -v --tb=short -m "not integration"
 
-# Run integration tests (requires Tansu, Java 11)
+# Run integration tests (requires Java 11; Aether for Iceberg; RayDP JARs for Spark)
 uv run pytest tests/ -v --tb=short -m "integration"
 
 # Lint and format

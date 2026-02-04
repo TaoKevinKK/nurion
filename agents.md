@@ -15,7 +15,7 @@ This document provides project context and development guidelines for AI coding 
 
 ## Tech Stack
 
-- **Languages**: Python 3.13+, Scala (Spark integration)
+- **Languages**: Python 3.12+ (Aether 3.13, Solstice 3.12), Scala (Spark integration)
 - **Runtime**: Ray (distributed computing), Apache Spark
 - **API Framework**: FastAPI (Aether)
 - **Package Manager**: uv
@@ -38,7 +38,7 @@ nurion/
 │   └── tests/
 │
 ├── lib/                     # Shared libraries
-│   ├── tansu-py/            # PyO3 bindings for Tansu message broker
+│   ├── workqueue-rs/         # WorkQueue broker + Python client
 │   └── raydp/               # Spark on Ray integration
 │       ├── raydp/           # Python package
 │       └── java/            # Spark Java/Scala components
@@ -51,7 +51,7 @@ nurion/
 │   │   │   ├── sinks/       # Data sinks (Lance, File, Print)
 │   │   │   ├── map.py       # Transform operators
 │   │   │   └── filter.py    # Filter operators
-│   │   ├── queue/           # Queue backends (Tansu, Memory)
+│   │   ├── queue/           # Queue backend (WorkQueue)
 │   │   └── runtime/         # Ray runtime and autoscaling
 │   ├── workflows/           # Example workflows
 │   ├── tests/
@@ -97,13 +97,13 @@ nurion/
 4. **StageWorker**: Stateless Ray Actor executing Operator logic
 5. **Operator**: Data processing logic (configured via `OperatorConfig` subclasses)
 6. **Split/SplitPayload**: Metadata and data for a unit of work
-7. **Queue Backend**: Tansu (production) or Memory (testing) for stage communication
+7. **Queue Backend**: WorkQueue (embedded broker; `memory://` for tests, `file://` for local persistence)
 
 **Data Flow Model**: Pull-based, queue-driven
 - Workers pull messages from upstream stage's output queue
 - Process data and write to own stage's output queue
 - Natural backpressure via queue lag
-- Offset-based consumption tracking
+- Message ID-based consumption tracking
 
 ## Development Guidelines
 
@@ -150,7 +150,7 @@ cd aether && uv run pytest tests/ -v
 # Solstice unit tests (no external dependencies)
 cd solstice && uv run pytest tests/ -v --tb=short -m "not integration"
 
-# Solstice integration tests (requires Java 11, Tansu, Aether services)
+# Solstice integration tests (requires Java 11, Aether services, RayDP JARs)
 cd solstice && uv run pytest tests/ -v --tb=short -m "integration"
 ```
 
@@ -158,9 +158,10 @@ cd solstice && uv run pytest tests/ -v --tb=short -m "integration"
 
 For Solstice integration tests, you need:
 1. **Java 11**: For Spark components
-2. **Tansu**: Message broker (`curl -fsSL https://pub-8bc1f1d3d1984bdfb056d0bc0bf97c3d.r2.dev/tansu/tansu -o /usr/local/bin/tansu && chmod +x /usr/local/bin/tansu`)
-3. **Aether services**: `cd aether && docker compose up -d`
-4. **RayDP JARs**: `cd lib/raydp/java && mvn clean package -DskipTests -q`
+2. **Aether services**: `cd aether && docker compose up -d` (Iceberg REST catalog)
+3. **RayDP JARs**: `cd lib/raydp/java && mvn clean package -DskipTests -q`
+
+WorkQueue is embedded; no external broker is required.
 
 ## Agent Working Tips
 
@@ -200,10 +201,10 @@ For Solstice integration tests, you need:
 2. **Don't create unused APIs**: Only implement endpoints that have actual callers
    - Example: Don't add batch endpoints if the caller only sends single requests
    - Example: Don't add "nice-to-have" endpoints without confirmed use cases
-3. **Don't worry about backward compatibility (pre-1.0)**: Before version 1.0, breaking changes are acceptable
+3. **Don't worry about compatibility with earlier versions (pre-1.0)**: Before version 1.0, breaking changes are acceptable
    - Focus on getting the design right, not maintaining compatibility
    - Document breaking changes in commit messages
-   - After 1.0, maintain backward compatibility
+   - After 1.0, maintain compatibility with earlier versions
 4. **Don't skip types**: Add appropriate type annotations
 5. **Don't hardcode config**: Use config classes and environment variables
 6. **Don't use uncertain fallback patterns**: Logic should be consistent, not "try A, if not found try B"
@@ -374,15 +375,14 @@ For Solstice integration tests, you need:
 | Solstice entry point | `solstice/solstice/main.py` |
 | Job definition | `solstice/solstice/core/job.py` |
 | Stage definition | `solstice/solstice/core/stage.py` |
-| Stage configuration | `solstice/solstice/core/stage_config.py` |
 | Operator base class | `solstice/solstice/core/operator.py` |
 | Stage Master | `solstice/solstice/core/stage_master.py` |
 | Stage Worker | `solstice/solstice/core/stage_worker.py` |
 | Component Managers | `solstice/solstice/core/managers/` |
 | Ray Runner | `solstice/solstice/runtime/ray_runner.py` |
 | Autoscaler | `solstice/solstice/runtime/autoscaler.py` |
-| Queue protocols | `solstice/solstice/queue/protocols.py` |
-| Queue backends | `solstice/solstice/queue/` |
+| Queue data structures | `solstice/solstice/queue/backend.py` |
+| WorkQueue backend | `solstice/solstice/queue/workqueue.py` |
 | Built-in Sources | `solstice/solstice/operators/sources/` |
 | Built-in Sinks | `solstice/solstice/operators/sinks/` |
 | Transform operators | `solstice/solstice/operators/map.py`, `filter.py` |
@@ -407,12 +407,11 @@ from solstice.core.stage import Stage
 from solstice.operators.sources import LanceTableSourceConfig
 from solstice.operators.map import MapOperatorConfig
 from solstice.operators.sinks import FileSinkConfig
-from solstice.queue import QueueType
 
 # Create job with configuration
 job = Job(
     job_id='my_pipeline',
-    config=JobConfig(queue_type=QueueType.MEMORY),
+    config=JobConfig(workqueue_db_path="memory://"),
 )
 
 # Add source stage
@@ -591,7 +590,7 @@ solstice history-server -s s3://bucket/solstice-history/ -p 8080
 - **WebUI TODO**: `solstice/todo/webui.md`
 - **WebUI Guide**: `solstice/webui/README.md`
 - **README Files**: Root directory and each subproject's README.md
-- **Examples**: `solstice/workflows/`, `solstice/examples/webui_demo.py`
+- **Examples**: `solstice/workflows/`, `solstice/examples/`
 
 ---
 

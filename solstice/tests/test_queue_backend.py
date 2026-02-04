@@ -26,9 +26,10 @@ Test categories:
 4. Edge cases: empty queues, concurrent access
 """
 
+import grpc
 import pytest
 
-from solstice.queue import WorkQueueBrokerManager, WorkQueueQueueClient
+from solstice.queue import WorkQueueQueueClient
 
 
 # ============================================================================
@@ -85,14 +86,58 @@ class TestWorkQueueQueueClient:
         assert len(records) == 1
         assert records[0].value == b"hello workqueue"
         assert records[0].msg_id == msg_id
+        assert records[0].claim_token
 
         # Ack
-        acked = client.ack(queue, [msg_id])
+        acked = client.ack(
+            queue,
+            [records[0].msg_id],
+            claim_tokens=[records[0].claim_token],
+        )
         assert acked == 1
 
         # Claim again should be empty
         records = client.claim(queue, batch_size=1, timeout_ms=100)
         assert len(records) == 0
+
+    def test_ack_requires_claim_token(self, workqueue_broker_and_client):
+        """Ack should require claim_token."""
+        broker, client = workqueue_broker_and_client
+        queue = "test-queue"
+        client.create_queue(queue)
+
+        client.push(queue, b"hello workqueue")
+        records = client.claim(queue, batch_size=1, timeout_ms=1000)
+        assert len(records) == 1
+
+        with pytest.raises(ValueError):
+            client.ack(queue, [records[0].msg_id])
+
+    def test_ack_rejects_wrong_claim_token(self, workqueue_broker_and_client):
+        """Ack should reject invalid claim_token."""
+        broker, client = workqueue_broker_and_client
+        queue = "test-queue"
+        client.create_queue(queue)
+
+        client.push(queue, b"hello workqueue")
+        records = client.claim(queue, batch_size=1, timeout_ms=1000)
+        assert len(records) == 1
+
+        with pytest.raises(grpc.RpcError):
+            client.ack(queue, [records[0].msg_id], claim_tokens=["bad-token"])
+
+    def test_ack_rejects_token_length_mismatch(self, workqueue_broker_and_client):
+        """Ack should reject claim_token length mismatch."""
+        broker, client = workqueue_broker_and_client
+        queue = "test-queue"
+        client.create_queue(queue)
+
+        client.push(queue, b"hello workqueue")
+        records = client.claim(queue, batch_size=1, timeout_ms=1000)
+        assert len(records) == 1
+
+        with pytest.raises(ValueError):
+            client.ack(queue, [records[0].msg_id], claim_tokens=["a", "b"])
 
     def test_push_batch(self, workqueue_broker_and_client):
         """Test batch push."""
@@ -119,15 +164,81 @@ class TestWorkQueueQueueClient:
         msg_id = client.push(queue, b"test message")
         records = client.claim(queue, batch_size=1, timeout_ms=1000)
         assert len(records) == 1
+        assert records[0].claim_token
 
         # Nack
-        nacked = client.nack(queue, [msg_id])
+        nacked = client.nack(
+            queue,
+            [records[0].msg_id],
+            claim_tokens=[records[0].claim_token],
+        )
         assert nacked == 1
 
         # Should be able to claim again
         records = client.claim(queue, batch_size=1, timeout_ms=1000)
         assert len(records) == 1
         assert records[0].msg_id == msg_id
+
+    def test_nack_rejects_wrong_claim_token(self, workqueue_broker_and_client):
+        """Nack should reject invalid claim_token."""
+        broker, client = workqueue_broker_and_client
+        queue = "test-queue"
+        client.create_queue(queue)
+
+        client.push(queue, b"test message")
+        records = client.claim(queue, batch_size=1, timeout_ms=1000)
+        assert len(records) == 1
+
+        with pytest.raises(grpc.RpcError):
+            client.nack(queue, [records[0].msg_id], claim_tokens=["bad-token"])
+
+    def test_nack_rejects_token_length_mismatch(self, workqueue_broker_and_client):
+        """Nack should reject claim_token length mismatch."""
+        broker, client = workqueue_broker_and_client
+        queue = "test-queue"
+        client.create_queue(queue)
+
+        client.push(queue, b"test message")
+        records = client.claim(queue, batch_size=1, timeout_ms=1000)
+        assert len(records) == 1
+
+        with pytest.raises(ValueError):
+            client.nack(queue, [records[0].msg_id], claim_tokens=["a", "b"])
+
+    def test_claim_token_changes_after_nack(self, workqueue_broker_and_client):
+        """Reclaim should issue a new claim_token."""
+        broker, client = workqueue_broker_and_client
+        queue = "test-queue"
+        client.create_queue(queue)
+
+        client.push(queue, b"test message")
+        records = client.claim(queue, batch_size=1, timeout_ms=1000)
+        assert len(records) == 1
+        token1 = records[0].claim_token
+
+        client.nack(queue, [records[0].msg_id], claim_tokens=[token1])
+        records2 = client.claim(queue, batch_size=1, timeout_ms=1000)
+        assert len(records2) == 1
+        assert records2[0].claim_token != token1
+
+    def test_ack_rejects_stale_token_after_reclaim(self, workqueue_broker_and_client):
+        """Ack with stale claim_token should be rejected after re-claim."""
+        broker, client = workqueue_broker_and_client
+        queue = "test-queue"
+        client.create_queue(queue)
+
+        client.push(queue, b"test message")
+        records = client.claim(queue, batch_size=1, timeout_ms=1000)
+        assert len(records) == 1
+        token1 = records[0].claim_token
+        msg_id = records[0].msg_id
+
+        client.nack(queue, [msg_id], claim_tokens=[token1])
+        records2 = client.claim(queue, batch_size=1, timeout_ms=1000)
+        assert len(records2) == 1
+
+        with pytest.raises(grpc.RpcError):
+            client.ack(queue, [msg_id], claim_tokens=[token1])
 
     def test_get_stats(self, workqueue_broker_and_client):
         """Test getting queue statistics."""
@@ -146,6 +257,7 @@ class TestWorkQueueQueueClient:
 
         # Claim some
         records = client.claim(queue, batch_size=2, timeout_ms=1000)
+        assert len(records) == 2
 
         stats = client.get_stats(queue)
         assert stats["pending_count"] == 3
@@ -170,11 +282,13 @@ class TestWorkQueueAckAndForward:
         # Claim from upstream
         records = client.claim(upstream, batch_size=1, timeout_ms=1000)
         assert len(records) == 1
+        assert records[0].claim_token
 
         # Ack and forward
         new_ids = client.ack_and_forward(
             upstream_queue=upstream,
-            upstream_msg_ids=[msg_id],
+            upstream_msg_ids=[records[0].msg_id],
+            upstream_claim_tokens=[records[0].claim_token],
             downstream_queue=downstream,
             downstream_payloads=[b"output data"],
         )
@@ -188,6 +302,50 @@ class TestWorkQueueAckAndForward:
         downstream_records = client.claim(downstream, batch_size=1, timeout_ms=1000)
         assert len(downstream_records) == 1
         assert downstream_records[0].value == b"output data"
+
+    def test_ack_and_forward_requires_claim_token(self, workqueue_broker_and_client):
+        """Ack and forward should require claim_token."""
+        broker, client = workqueue_broker_and_client
+        upstream = "upstream-queue"
+        downstream = "downstream-queue"
+        client.create_queue(upstream)
+        client.create_queue(downstream)
+
+        client.push(upstream, b"input data")
+        records = client.claim(upstream, batch_size=1, timeout_ms=1000)
+        assert len(records) == 1
+
+        with pytest.raises(ValueError):
+            client.ack_and_forward(
+                upstream_queue=upstream,
+                upstream_msg_ids=[records[0].msg_id],
+                upstream_claim_tokens=[],
+                downstream_queue=downstream,
+                downstream_payloads=[b"output data"],
+            )
+
+    def test_ack_and_forward_rejects_token_length_mismatch(
+        self, workqueue_broker_and_client
+    ):
+        """Ack and forward should reject claim_token length mismatch."""
+        broker, client = workqueue_broker_and_client
+        upstream = "upstream-queue"
+        downstream = "downstream-queue"
+        client.create_queue(upstream)
+        client.create_queue(downstream)
+
+        client.push(upstream, b"input data")
+        records = client.claim(upstream, batch_size=1, timeout_ms=1000)
+        assert len(records) == 1
+
+        with pytest.raises(ValueError):
+            client.ack_and_forward(
+                upstream_queue=upstream,
+                upstream_msg_ids=[records[0].msg_id],
+                upstream_claim_tokens=["a", "b"],
+                downstream_queue=downstream,
+                downstream_payloads=[b"output data"],
+            )
 
 
 @pytest.mark.slow
@@ -208,9 +366,11 @@ class TestWorkQueueMultiClient:
 
             # Client 1 pushes
             id1 = client1.push(queue, b"from client1")
+            assert id1
 
             # Client 2 pushes
             id2 = client2.push(queue, b"from client2")
+            assert id2
 
             # Both clients can claim messages
             records1 = client1.claim(queue, batch_size=1, timeout_ms=1000)

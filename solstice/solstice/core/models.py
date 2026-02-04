@@ -491,7 +491,7 @@ class QueueMessage:
     @classmethod
     def from_bytes(cls, data: bytes) -> "QueueMessage":
         d = json.loads(data.decode())
-        # Handle backward compatibility - old messages without message_type
+        # Handle legacy messages without message_type
         if "message_type" not in d:
             d["message_type"] = MessageType.DATA
         return cls(**d)

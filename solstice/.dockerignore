@@ -42,7 +42,7 @@ todo/
 *.parquet
 
 # Build artifacts (will be rebuilt)
-# Note: tansu-py and raydp are now in lib/ directory
+# Note: workqueue-rs and raydp are now in lib/ directory
 
 # Temporary files
 *.log

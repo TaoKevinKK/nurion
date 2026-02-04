@@ -110,7 +110,15 @@ class BackpressureMonitor:
 
         if self._metrics_client is None:
             broker_url = f"{endpoint.host}:{endpoint.port}"
-            self._metrics_client = WorkQueueQueueClient(broker_url, worker_id="metrics")
+            from solstice.queue.workqueue import _compute_heartbeat_interval
+
+            self._metrics_client = WorkQueueQueueClient(
+                broker_url,
+                worker_id="metrics",
+                heartbeat_interval_secs=_compute_heartbeat_interval(
+                    self._runtime.claim_timeout_secs
+                ),
+            )
             self._metrics_client.start()
 
         return self._metrics_client

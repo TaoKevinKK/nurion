@@ -119,16 +119,23 @@ class JobStateManager:
                     # Process all records into a single batch
                     batch = WriteBatch()
                     msg_ids = []
+                    claim_tokens = []
                     for record in records:
+                        if record.claim_token is None:
+                            raise RuntimeError(
+                                f"Missing claim_token for state message {record.msg_id}"
+                            )
                         try:
                             message = StateMessage.from_bytes(record.data)
                             self._add_to_batch(batch, message)
                             message_count += 1
                             msg_ids.append(record.msg_id)
+                            claim_tokens.append(record.claim_token)
                         except Exception as e:
                             self.logger.warning(f"Failed to parse message: {e}")
                             # Still ack the message to avoid reprocessing
                             msg_ids.append(record.msg_id)
+                            claim_tokens.append(record.claim_token)
 
                     # Write batch async (non-blocking, don't wait for durable)
                     await self.storage.db.write_with_options_async(batch, await_durable=False)
@@ -136,7 +143,11 @@ class JobStateManager:
                     # Ack all processed messages
                     if msg_ids:
                         try:
-                            self.queue_client.ack(self.state_queue_name, msg_ids)
+                            self.queue_client.ack(
+                                self.state_queue_name,
+                                msg_ids,
+                                claim_tokens=claim_tokens,
+                            )
                         except Exception as e:
                             self.logger.warning(f"Failed to ack messages: {e}")
 

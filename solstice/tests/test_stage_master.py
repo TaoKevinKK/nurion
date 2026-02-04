@@ -21,7 +21,6 @@ Tests the new queue-based architecture with:
 """
 
 import pytest
-import pytest_asyncio
 from dataclasses import dataclass
 from typing import List
 from unittest.mock import MagicMock
@@ -278,5 +277,3 @@ class TestStageMaster:
         assert isinstance(queue, WorkQueueQueueClient)
 
         await master.stop()
-
-

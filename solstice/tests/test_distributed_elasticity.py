@@ -133,7 +133,9 @@ class TestElasticScaling:
                         pass
                     await asyncio.sleep(0.1)
 
-            logger.info(f"Scaled up from {initial_count} to {initial_count + workers_added} workers")
+            logger.info(
+                f"Scaled up from {initial_count} to {initial_count + workers_added} workers"
+            )
 
             await asyncio.wait_for(run_task, timeout=60)
         finally:

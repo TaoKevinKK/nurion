@@ -154,8 +154,8 @@ class RecoveryManager:
 
                 spawned += 1
 
-                # Notify of upstream completion if applicable
-                await self._worker_manager.notify_worker_upstream_finished(worker_id)
+                # Notify if safe to exit (queue already drained)
+                await self._worker_manager.notify_worker_safe_to_exit(worker_id)
 
             except Exception as e:
                 self._logger.warning(f"Failed to spawn replacement worker: {e}")

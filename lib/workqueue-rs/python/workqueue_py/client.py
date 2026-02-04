@@ -50,6 +50,7 @@ class Message:
     payload: bytes
     created_at: float
     metadata: Dict[str, str] = field(default_factory=dict)
+    claim_token: Optional[str] = None
 
     @classmethod
     def from_proto(cls, proto: Any) -> "Message":
@@ -111,6 +112,7 @@ class WorkQueueClient:
         self._channel: Optional[grpc.Channel] = None
         self._stub: Optional[Any] = None
         self._lease_id: str = ""
+        self._channel_lock = threading.Lock()
 
         # Heartbeat management
         self._heartbeat_thread: Optional[threading.Thread] = None
@@ -130,8 +132,9 @@ class WorkQueueClient:
                 "--grpc_python_out=python/workqueue_py proto/workqueue.proto"
             )
 
-        self._channel = grpc.insecure_channel(self.server_address)
-        self._stub = pb2_grpc.WorkQueueStub(self._channel)
+        with self._channel_lock:
+            self._channel = grpc.insecure_channel(self.server_address)
+            self._stub = pb2_grpc.WorkQueueStub(self._channel)
 
         # Start heartbeat stream
         self._heartbeat_running = True
@@ -152,9 +155,11 @@ class WorkQueueClient:
                 return
             time.sleep(0.1)
 
-        raise RuntimeError(
-            f"Failed to acquire lease from server within {self.connect_timeout}s"
+        logger.warning(
+            f"Failed to acquire lease within {self.connect_timeout}s; "
+            "continuing without lease and retrying via heartbeat"
         )
+        return
 
     def stop(self) -> None:
         """Stop heartbeat and close connection."""
@@ -164,13 +169,24 @@ class WorkQueueClient:
             self._heartbeat_thread.join(timeout=2.0)
             self._heartbeat_thread = None
 
-        if self._channel:
-            self._channel.close()
-            self._channel = None
+        with self._channel_lock:
+            if self._channel:
+                self._channel.close()
+                self._channel = None
 
         self._stub = None
         self._lease_id = ""
         logger.info(f"Disconnected from {self.server_address}")
+
+    def _reset_channel(self) -> None:
+        """Recreate the gRPC channel/stub after disconnects."""
+        with self._channel_lock:
+            if self._channel:
+                self._channel.close()
+            self._channel = grpc.insecure_channel(self.server_address)
+            self._stub = pb2_grpc.WorkQueueStub(self._channel)
+        with self._heartbeat_lock:
+            self._lease_id = ""
 
     def _heartbeat_loop(self) -> None:
         """Background thread for heartbeat streaming."""
@@ -200,6 +216,10 @@ class WorkQueueClient:
             except grpc.RpcError as e:
                 if self._heartbeat_running:
                     reconnect_attempts += 1
+                    try:
+                        self._reset_channel()
+                    except Exception as reset_error:
+                        logger.debug(f"Heartbeat channel reset error: {reset_error}")
                     # Only log first attempt as warning, rest as debug to reduce noise
                     if reconnect_attempts == 1:
                         logger.warning(f"Heartbeat disconnected, reconnecting...")
@@ -252,12 +272,22 @@ class WorkQueueClient:
         )
 
         response = self._stub.Claim(request)
-        return [Message.from_proto(m) for m in response.messages]
+        messages = [Message.from_proto(m) for m in response.messages]
+        if messages:
+            if len(response.claim_tokens) != len(messages):
+                raise RuntimeError(
+                    "Claim response missing claim_tokens or length mismatch "
+                    f"(messages={len(messages)}, claim_tokens={len(response.claim_tokens)})"
+                )
+            for msg, token in zip(messages, response.claim_tokens):
+                msg.claim_token = token
+        return messages
 
     def ack(
         self,
         queue: str,
         msg_ids: List[str],
+        claim_tokens: Optional[List[str]] = None,
         state_namespace: Optional[str] = None,
         state_puts: Optional[Dict[str, bytes]] = None,
         state_deletes: Optional[List[str]] = None,
@@ -267,6 +297,7 @@ class WorkQueueClient:
         Args:
             queue: Queue name
             msg_ids: List of message IDs to acknowledge
+            claim_tokens: List of claim tokens (1:1 with msg_ids)
             state_namespace: Optional namespace for state updates (e.g., "{job_id}/{stage_id}")
             state_puts: Optional dict of state key -> value to set
             state_deletes: Optional list of state keys to delete
@@ -279,6 +310,13 @@ class WorkQueueClient:
         """
         self._check_connected()
 
+        if msg_ids:
+            if not claim_tokens or len(claim_tokens) != len(msg_ids):
+                raise ValueError(
+                    "claim_tokens is required and must match msg_ids length "
+                    f"(msg_ids={len(msg_ids)}, claim_tokens={len(claim_tokens) if claim_tokens else 0})"
+                )
+
         request = pb2.AckRequest(
             queue=queue,
             msg_ids=msg_ids,
@@ -287,6 +325,7 @@ class WorkQueueClient:
             state_namespace=state_namespace or "",
             state_puts=state_puts or {},
             state_deletes=state_deletes or [],
+            claim_tokens=claim_tokens or [],
         )
 
         response = self._stub.Ack(request)
@@ -298,6 +337,7 @@ class WorkQueueClient:
         self,
         queue: str,
         msg_ids: List[str],
+        claim_tokens: Optional[List[str]] = None,
         reason: str = "processing_failed",
         delay_ms: int = 0,
     ) -> int:
@@ -306,6 +346,7 @@ class WorkQueueClient:
         Args:
             queue: Queue name
             msg_ids: List of message IDs to return
+            claim_tokens: List of claim tokens (1:1 with msg_ids)
             reason: Reason for nack ("processing_failed", "payload_missing", "skip")
             delay_ms: Delay before message can be reclaimed
 
@@ -316,6 +357,13 @@ class WorkQueueClient:
             grpc.RpcError: If the request fails
         """
         self._check_connected()
+
+        if msg_ids:
+            if not claim_tokens or len(claim_tokens) != len(msg_ids):
+                raise ValueError(
+                    "claim_tokens is required and must match msg_ids length "
+                    f"(msg_ids={len(msg_ids)}, claim_tokens={len(claim_tokens) if claim_tokens else 0})"
+                )
 
         reason_enum = {
             "processing_failed": pb2.NACK_REASON_PROCESSING_FAILED,
@@ -330,6 +378,7 @@ class WorkQueueClient:
             lease_id=self.lease_id,
             reason=reason_enum,
             delay_ms=delay_ms,
+            claim_tokens=claim_tokens or [],
         )
 
         response = self._stub.Nack(request)
@@ -339,6 +388,7 @@ class WorkQueueClient:
         self,
         upstream_queue: str,
         upstream_msg_ids: List[str],
+        upstream_claim_tokens: Optional[List[str]],
         downstream_queue: str,
         downstream_payloads: List[bytes],
         state_namespace: Optional[str] = None,
@@ -352,6 +402,7 @@ class WorkQueueClient:
         Args:
             upstream_queue: Queue to ack from
             upstream_msg_ids: Message IDs to acknowledge
+            upstream_claim_tokens: Claim tokens (1:1 with upstream_msg_ids)
             downstream_queue: Queue to push to
             downstream_payloads: Payloads for new downstream messages
             state_namespace: Optional namespace for state updates
@@ -367,6 +418,17 @@ class WorkQueueClient:
         """
         self._check_connected()
 
+        if upstream_msg_ids:
+            if (
+                not upstream_claim_tokens
+                or len(upstream_claim_tokens) != len(upstream_msg_ids)
+            ):
+                raise ValueError(
+                    "upstream_claim_tokens is required and must match upstream_msg_ids length "
+                    f"(upstream_msg_ids={len(upstream_msg_ids)}, "
+                    f"upstream_claim_tokens={len(upstream_claim_tokens) if upstream_claim_tokens else 0})"
+                )
+
         request = pb2.AckAndForwardRequest(
             upstream_queue=upstream_queue,
             upstream_msg_ids=upstream_msg_ids,
@@ -377,6 +439,7 @@ class WorkQueueClient:
             state_namespace=state_namespace or "",
             state_puts=state_puts or {},
             state_deletes=state_deletes or [],
+            upstream_claim_tokens=upstream_claim_tokens or [],
         )
 
         response = self._stub.AckAndForward(request)

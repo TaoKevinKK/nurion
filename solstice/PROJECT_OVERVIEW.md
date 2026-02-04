@@ -8,9 +8,9 @@ Solstice is a Ray-based **high-throughput batch processing framework** whose int
 
 - **Streaming-Style Execution**: Pull-based data flow, no stage barriers
 - **Elastic Workers**: Dynamic worker scaling based on queue lag
-- **Queue-Based Communication**: Tansu (Kafka-compatible) or in-memory queues
-- **Fault-Tolerant Design**: Offset-based recovery (scaffolding implemented)
-- **Minimal Dependencies**: Only Ray and optional Tansu broker
+- **Queue-Based Communication**: WorkQueue (embedded broker; `memory://` or `file://` storage)
+- **Fault-Tolerant Design**: Message ID-based recovery (scaffolding implemented)
+- **Minimal Dependencies**: Ray plus embedded WorkQueue broker
 
 ## Directory Structure
 
@@ -22,7 +22,6 @@ solstice/
 │   │   ├── stage.py         # Stage definition
 │   │   ├── stage_master.py  # StageMaster orchestration
 │   │   ├── stage_worker.py  # StageWorker execution
-│   │   ├── stage_config.py  # Configuration classes
 │   │   ├── operator.py      # Operator base class
 │   │   ├── models.py        # Split, SplitPayload
 │   │   └── managers/        # Component managers
@@ -34,10 +33,9 @@ solstice/
 │   │   ├── ray_runner.py    # RayJobRunner
 │   │   ├── autoscaler.py    # SimpleAutoscaler
 │   │   └── state_push.py    # StatePushManager (WebUI)
-│   ├── queue/               # Queue backends
-│   │   ├── protocols.py     # QueueProducer, QueueConsumer, etc.
-│   │   ├── memory.py        # MemoryBackend
-│   │   └── tansu.py         # TansuBrokerManager, TansuQueueClient
+│   ├── queue/               # Queue backend
+│   │   ├── backend.py       # Record data structures
+│   │   └── workqueue.py     # WorkQueue broker + client
 │   ├── operators/           # Built-in operators
 │   │   ├── sources/         # Source operators
 │   │   ├── sinks/           # Sink operators
@@ -63,7 +61,7 @@ solstice/
 
 # Shared libraries (in nurion/lib/)
 lib/
-├── tansu-py/                # Tansu PyO3 bindings
+├── workqueue-rs/            # WorkQueue broker + Python client
 └── raydp/                   # Spark on Ray integration
     ├── raydp/               # Python package
     └── java/                # Scala/Java Spark components
@@ -77,13 +75,10 @@ A complete processing pipeline with a DAG of stages.
 
 ```python
 from solstice.core.job import Job, JobConfig
-from solstice.queue import QueueType
-
 job = Job(
     job_id='my_pipeline',
     config=JobConfig(
-        queue_type=QueueType.TANSU,
-        tansu_storage_url='memory://',
+        workqueue_db_path="file:///tmp/workqueue",
     ),
 )
 ```
@@ -145,8 +140,7 @@ MyOperatorConfig.operator_class = MyOperator
 ### 4. Queue Backend
 
 Where messages flow between stages:
-- `TansuBackend`: Kafka-compatible broker (production)
-- `MemoryBackend`: In-process queue (testing)
+- `WorkQueue`: Embedded broker with claim/ack semantics
 
 ## Built-in Operators
 
@@ -209,7 +203,7 @@ Use for:
 │ (StageMaster, StageWorker)              │
 ├─────────────────────────────────────────┤
 │ Layer 1: Queue                          │
-│ (TansuBackend, MemoryBackend)           │
+│ (WorkQueue embedded broker)             │
 ├─────────────────────────────────────────┤
 │ Layer 0: Ray                            │
 │ (Actors, Object Store)                  │
@@ -236,12 +230,10 @@ from solstice.core.stage import Stage
 from solstice.operators.sources import LanceTableSourceConfig
 from solstice.operators.map import MapOperatorConfig
 from solstice.operators.sinks import FileSinkConfig
-from solstice.queue import QueueType
-
 # 1. Create job
 job = Job(
     job_id='my_job',
-    config=JobConfig(queue_type=QueueType.MEMORY),
+    config=JobConfig(workqueue_db_path="memory://"),
 )
 
 # 2. Add stages
@@ -280,7 +272,7 @@ asyncio.run(main())
 | No External Deps | ✅ (Ray only) | ❌ (Kafka, ZK) | ❌ (HDFS) |
 | Lance Integration | ✅ | ❌ | ❌ |
 | Python-First | ✅ | ❌ | ✅ |
-| Queue Backend | Tansu/Memory | Kafka | HDFS/Kafka |
+| Queue Backend | WorkQueue (embedded) | Kafka | HDFS/Kafka |
 
 ## Current Implementation Status
 
@@ -292,7 +284,7 @@ asyncio.run(main())
 | WebUI monitoring | ✅ Complete |
 | Multi-partition queues | ✅ Complete |
 | Partition assignment | ✅ Complete |
-| Offset-based recovery | 🚧 Scaffolding only |
+| Message ID-based recovery | 🚧 Scaffolding only |
 
 ## Documentation
 

@@ -1,5 +1,9 @@
 # Spark Source V2: Direct Queue Integration
 
+> NOTE: This document references the former Tansu/Kafka queue model. The current
+> implementation uses the embedded WorkQueue backend. See
+> `design-docs/work-queue-redesign.md`.
+
 _Design document for optimized Spark-to-Solstice data pipeline_
 _Created: December 2025_
 

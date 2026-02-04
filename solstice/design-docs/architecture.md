@@ -1,5 +1,9 @@
 # Solstice Runtime Architecture
 
+> NOTE: This document references the former Tansu/Kafka queue model. The current
+> implementation uses the embedded WorkQueue backend. See
+> `design-docs/work-queue-redesign.md`.
+
 ## Overview
 
 Solstice implements a **high-throughput dataflow engine** on top of Ray actors. Conceptually it is a **batch processing engine** (jobs are finite DAGs over finite inputs), but its internal execution model is **streaming-style and pull-based**. It is designed to run long-lived, multimodal pipelines (video, images, embeddings, text, binary blobs) with:

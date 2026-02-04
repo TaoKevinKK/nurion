@@ -72,7 +72,7 @@ if TYPE_CHECKING:
     from solstice.core.stage import Stage, StageRuntime
     from solstice.webui.state.producer import StateProducer
 
-# Re-export for backward compatibility
+# Re-export for compatibility
 __all__ = [
     "StageMaster",
     "StageWorker",
@@ -131,7 +131,7 @@ class StageMaster:
         self._start_time: Optional[float] = None
         self._upstream_finished = False
 
-        # Downstream stage refs for backpressure (backward compatibility)
+        # Downstream stage refs for backpressure (compatibility)
         self._downstream_stage_refs: Dict[str, "StageMaster"] = {}
 
         # State producer for WebUI metrics
@@ -148,7 +148,13 @@ class StageMaster:
         assert self.broker_endpoint is not None, "broker_endpoint is required"
 
         broker_url = f"{self.broker_endpoint.host}:{self.broker_endpoint.port}"
-        queue = WorkQueueQueueClient(broker_url, worker_id=f"master-{self.stage_id}")
+        from solstice.queue.workqueue import _compute_heartbeat_interval
+
+        queue = WorkQueueQueueClient(
+            broker_url,
+            worker_id=f"master-{self.stage_id}",
+            heartbeat_interval_secs=_compute_heartbeat_interval(self.runtime.claim_timeout_secs),
+        )
         queue.start()
         self.logger.info(f"Connected to broker at {broker_url}")
 
@@ -326,7 +332,9 @@ class StageMaster:
             if self._queue_client:
                 try:
                     self._queue_client.mark_queue_finished(self._output_queue_name)
-                    self.logger.debug(f"Marked output queue {self._output_queue_name} as finished")
+                    self.logger.debug(
+                        f"Marked output queue {self._output_queue_name} as finished"
+                    )
                 except Exception as e:
                     self.logger.warning(f"Failed to mark output queue as finished: {e}")
 
@@ -376,7 +384,15 @@ class StageMaster:
             from solstice.webui.state.producer import StateProducer
 
             broker_url = f"{self.broker_endpoint.host}:{self.broker_endpoint.port}"
-            state_queue = WorkQueueQueueClient(broker_url, worker_id=f"state-{self.stage_id}")
+            from solstice.queue.workqueue import _compute_heartbeat_interval
+
+            state_queue = WorkQueueQueueClient(
+                broker_url,
+                worker_id=f"state-{self.stage_id}",
+                heartbeat_interval_secs=_compute_heartbeat_interval(
+                    self.runtime.claim_timeout_secs
+                ),
+            )
             state_queue.start()
 
             self._state_producer = StateProducer(
@@ -444,9 +460,6 @@ class StageMaster:
         self._upstream_finished = True
         self.logger.info(f"Stage {self.stage_id} notified: upstream finished")
 
-        if self._worker_manager:
-            await self._worker_manager.notify_upstream_finished()
-
         # Start background task to poll for queue completion
         if self.upstream_queue_name and self._queue_client:
             asyncio.create_task(
@@ -467,16 +480,30 @@ class StageMaster:
             return
 
         poll_interval = 0.1  # 100ms
+        max_consecutive_errors = 10
+        consecutive_errors = 0
+
         while self._running:
             try:
                 result = self._queue_client.is_queue_finished(self.upstream_queue_name)
+                consecutive_errors = 0  # Reset on success
                 if result.get("safe_to_exit", False):
                     self.logger.debug(
                         f"Stage {self.stage_id} upstream queue drained, notifying workers"
                     )
-                    await self._worker_manager.notify_safe_to_exit()
+                    if self._worker_manager:
+                        await self._worker_manager.notify_safe_to_exit()
                     return
             except Exception as e:
+                consecutive_errors += 1
+                if consecutive_errors >= max_consecutive_errors:
+                    self.logger.error(
+                        f"Stage {self.stage_id} failed to poll queue completion "
+                        f"after {max_consecutive_errors} consecutive errors: {e}"
+                    )
+                    raise RuntimeError(
+                        f"Failed to poll upstream queue completion: {e}"
+                    ) from e
                 self.logger.debug(f"Error polling queue completion: {e}")
 
             await asyncio.sleep(poll_interval)
@@ -543,12 +570,12 @@ class StageMaster:
             self._queue_client = None
 
     # =========================================================================
-    # Backward Compatibility
+    # Compatibility helpers
     # =========================================================================
 
     @property
     def _workers(self) -> Dict[str, Any]:
-        """Access workers dict (backward compatibility for tests)."""
+        """Access workers dict (compatibility for tests)."""
         if self._worker_manager:
             return self._worker_manager.workers
         return {}

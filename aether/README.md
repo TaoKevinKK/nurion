@@ -30,7 +30,7 @@ The name *Aether* nods to the classical concept of a medium connecting realms—
 5. (Optional) Run the API locally:
 
    ```bash
-   uv run uvicorn aether.app:app --reload
+   uv run uvicorn aether.app:create_app --factory --reload
    ```
 
 ## CI/CD

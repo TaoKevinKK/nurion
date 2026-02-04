@@ -71,12 +71,10 @@ class TestQueueFaultRecovery:
     @pytest.mark.asyncio
     @pytest.mark.timeout(120)
     async def test_workqueue_broker_restart(self, ray_cluster, workqueue_storage_path):
-        """WorkQueue broker restart: auto-reconnect, no data loss with file storage.
+        """WorkQueue broker restart: job should exit on broker loss.
 
-        This test verifies that after broker restart with SlateDB persistence:
-        1. Queue data persists across broker restarts
-        2. Pipeline can reconnect and continue processing
-        3. All data is eventually processed without loss
+        This test verifies that when the broker goes down:
+        1. The job exits instead of hanging
 
         Uses file storage backend to ensure data durability.
         """
@@ -125,57 +123,42 @@ class TestQueueFaultRecovery:
             # Restart the broker by creating a new instance
             # Note: We create a new broker instance instead of restarting the same one
             # because the underlying Rust/Tokio runtime may have residual state
-            try:
-                from solstice.queue import WorkQueueBrokerManager
+            from solstice.queue import WorkQueueBrokerManager
 
-                old_broker = runner._shared_broker
-                old_url = old_broker.get_broker_url()
-                old_host, old_port_str = old_url.rsplit(":", 1)
-                old_port = int(old_port_str)
-                old_db_path = old_broker._db_path
+            old_broker = runner._shared_broker
+            old_url = old_broker.get_broker_url()
+            old_host, old_port_str = old_url.rsplit(":", 1)
+            old_port = int(old_port_str)
+            old_db_path = old_broker.db_path
+            old_claim_timeout = old_broker.claim_timeout_secs
+            old_recovery_interval = old_broker.recovery_interval_secs
 
-                # Stop the old broker and wait for clean shutdown
-                old_broker.stop()
-                await asyncio.sleep(1.0)  # Wait for port to be released
+            # Stop the old broker and wait for clean shutdown
+            old_broker.stop()
+            await asyncio.sleep(1.0)  # Wait for port to be released
 
-                # Create and start a new broker instance on the same port
-                # Using the same db_path ensures data persistence
-                new_broker = WorkQueueBrokerManager(
-                    db_path=old_db_path,
-                    port=old_port,
-                )
-                new_broker.start()
-                await asyncio.sleep(0.5)  # Wait for broker to be ready
+            # Create and start a new broker instance on the same port
+            # Using the same db_path ensures data persistence
+            new_broker = WorkQueueBrokerManager(
+                db_path=old_db_path,
+                port=old_port,
+                claim_timeout_secs=old_claim_timeout,
+                recovery_interval_secs=old_recovery_interval,
+            )
+            new_broker.start()
+            await asyncio.sleep(0.5)  # Wait for broker to be ready
 
-                # Replace the runner's broker reference
-                runner._shared_broker = new_broker
-                broker_restarted = True
-            except Exception as e:
-                pytest.skip(f"Could not restart broker: {e}")
+            # Replace the runner's broker reference
+            runner._shared_broker = new_broker
+            broker_restarted = True
 
-            # Wait for pipeline to complete
-            # With file storage, pipeline should complete successfully after restart
-            await asyncio.wait_for(run_task, timeout=60)
+            # Wait for pipeline to fail (broker down => job exits)
+            with pytest.raises(RuntimeError):
+                await asyncio.wait_for(run_task, timeout=60)
         finally:
             await runner.stop()
 
-        if broker_restarted:
-            sink_data = get_sink_records(self.collector_name)
-
-            # With file storage, all data should be processed
-            # Allow some tolerance for at-least-once semantics (may have duplicates)
-            assert len(sink_data) >= expected_count, (
-                f"Data loss detected: expected at least {expected_count}, got {len(sink_data)}"
-            )
-
-            # Verify all records match the filter pattern
-            for record in sink_data:
-                assert record["id"] % FILTER_MODULO == FILTER_REMAINDER, (
-                    f"Record {record['id']} doesn't match filter pattern"
-                )
-
-            # Verify data integrity with checksums
-            assert validator.verify_checksums(source_data, sink_data)
+        assert broker_restarted
 
     @pytest.mark.asyncio
     async def test_workqueue_connection_timeout(self, ray_cluster):

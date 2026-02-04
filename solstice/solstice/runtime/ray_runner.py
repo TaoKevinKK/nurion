@@ -340,6 +340,7 @@ class RayJobRunner:
             broker_endpoint=self._broker_endpoint,
             upstream_queue_name=upstream_queue_name,
             state_queue_name=self._state_push.queue_name,
+            claim_timeout_secs=self.job.config.claim_timeout_secs,
         )
 
     def _stage_info(self, stage: "Stage") -> Dict[str, Any]:

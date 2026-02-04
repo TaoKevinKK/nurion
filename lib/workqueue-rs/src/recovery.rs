@@ -26,21 +26,28 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, Duration};
 
+use crate::state::WorkQueueState;
 use crate::storage::WorkQueueStorage;
 use crate::types::WorkQueueConfig;
 
 /// Recovery task manager - recovers expired claims
 pub struct RecoveryTask {
     storage: Arc<WorkQueueStorage>,
+    state: Arc<WorkQueueState>,
     config: WorkQueueConfig,
     running: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
 
 impl RecoveryTask {
-    pub fn new(storage: Arc<WorkQueueStorage>, config: WorkQueueConfig) -> Self {
+    pub fn new(
+        storage: Arc<WorkQueueStorage>,
+        state: Arc<WorkQueueState>,
+        config: WorkQueueConfig,
+    ) -> Self {
         Self {
             storage,
+            state,
             config,
             running: Arc::new(AtomicBool::new(false)),
             handle: None,
@@ -56,6 +63,7 @@ impl RecoveryTask {
         self.running.store(true, Ordering::SeqCst);
 
         let storage = self.storage.clone();
+        let state = self.state.clone();
         let running = self.running.clone();
         let interval_secs = self.config.recovery_interval_secs;
         let timeout_secs = self.config.claim_timeout_secs;
@@ -66,8 +74,12 @@ impl RecoveryTask {
             while running.load(Ordering::SeqCst) {
                 ticker.tick().await;
 
+                let lease_snapshot = state.lease_snapshot();
                 // Recovery is now handled entirely by storage
-                if let Err(e) = storage.recover_expired_claims(timeout_secs).await {
+                if let Err(e) = storage
+                    .recover_expired_claims(timeout_secs, Some(&lease_snapshot))
+                    .await
+                {
                     tracing::error!("Recovery error: {}", e);
                 }
             }

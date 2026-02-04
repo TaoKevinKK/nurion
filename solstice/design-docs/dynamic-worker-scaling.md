@@ -1,5 +1,9 @@
 # Dynamic Worker Scaling Design
 
+> NOTE: This document references the former Tansu/Kafka queue model. The current
+> implementation uses the embedded WorkQueue backend. See
+> `design-docs/work-queue-redesign.md`.
+
 _Design document for Solstice auto-scaling feature_
 _Created: December 2025_
 

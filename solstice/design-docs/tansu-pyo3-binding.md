@@ -1,5 +1,9 @@
 # Tansu PyO3 Binding - Embedded Broker Architecture
 
+> NOTE: This document describes a legacy Tansu binding. The current
+> implementation uses the embedded WorkQueue backend. See
+> `design-docs/work-queue-redesign.md`.
+
 ---
 
 ## Implementation Status (Updated 2026-01-19)

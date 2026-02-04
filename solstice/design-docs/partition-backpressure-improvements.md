@@ -1,5 +1,9 @@
 # Partition Management, Skew Detection, and Backpressure Improvements
 
+> NOTE: This document references the former Tansu/Kafka queue model. The current
+> implementation uses the embedded WorkQueue backend. See
+> `design-docs/work-queue-redesign.md`.
+
 _Design Document - December 2025_
 
 ---
@@ -413,7 +417,7 @@ async def _get_consumer(
             # Subscribe - Kafka will assign partitions automatically
             consumer.subscribe([topic])
         else:
-            # Manual assignment (backward compatibility)
+            # Manual assignment (legacy mode)
             partition_id = partition if partition is not None else 0
             consumer.assign([TopicPartition(topic, partition_id)])
     

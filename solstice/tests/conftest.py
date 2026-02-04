@@ -144,7 +144,7 @@ class WorkQueueTestBackend:
     def __init__(self, broker: WorkQueueBrokerManager, client: WorkQueueQueueClient):
         self.broker = broker
         self.client = client
-        # Delegate common methods to client for backward compatibility
+        # Delegate common methods to client for compatibility
         self.create_queue = client.create_queue
         self.delete_queue = client.delete_queue
         self.push = client.push

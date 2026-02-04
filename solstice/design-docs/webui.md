@@ -1,5 +1,9 @@
 # Solstice Debug WebUI Design
 
+> NOTE: This document references the former Tansu/Kafka queue model. The current
+> implementation uses the embedded WorkQueue backend. See
+> `design-docs/work-queue-redesign.md`.
+
 ---
 
 ## Implementation Status (Updated 2026-01-19)

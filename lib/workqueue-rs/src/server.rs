@@ -59,7 +59,7 @@ impl WorkQueueBrokerInner {
         let state = Arc::new(WorkQueueState::new());
 
         // Recovery and GC tasks now only use storage (no memory state to recover)
-        let recovery_task = RecoveryTask::new(storage.clone(), config.clone());
+        let recovery_task = RecoveryTask::new(storage.clone(), state.clone(), config.clone());
         let gc_task = GcTask::new(storage.clone(), config.clone());
 
         Ok(Self {

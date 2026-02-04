@@ -89,6 +89,7 @@ message ClaimRequest {
 message ClaimResponse {
   repeated Message messages = 1;    // Claimed messages
   bool has_more = 2;                // Whether queue has more messages
+  repeated string claim_tokens = 3; // Claim tokens (1:1 with messages)
 }
 
 message AckRequest {
@@ -101,6 +102,7 @@ message AckRequest {
   string state_namespace = 5;       // e.g., "{job_id}/{stage_id}"
   map<string, bytes> state_puts = 6;    // State keys to set
   repeated string state_deletes = 7;     // State keys to delete
+  repeated string claim_tokens = 8;     // Claim tokens (1:1 with msg_ids)
 }
 
 message AckResponse {
@@ -115,6 +117,7 @@ message NackRequest {
   string lease_id = 4;
   NackReason reason = 5;
   int32 delay_ms = 6;               // Delay before message can be reclaimed
+  repeated string claim_tokens = 7; // Claim tokens (1:1 with msg_ids)
 }
 
 enum NackReason {
@@ -144,6 +147,7 @@ message AckAndForwardRequest {
   string state_namespace = 7;
   map<string, bytes> state_puts = 8;
   repeated string state_deletes = 9;
+  repeated string upstream_claim_tokens = 10; // Claim tokens (1:1 with upstream_msg_ids)
 }
 
 message AckAndForwardResponse {

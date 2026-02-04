@@ -38,7 +38,11 @@ Example:
     client = WorkQueueQueueClient("master-host:50051", worker_id="worker-1")
     client.start()
     messages = client.claim("my-queue", batch_size=10)
-    client.ack("my-queue", [m.msg_id for m in messages])
+    client.ack(
+        "my-queue",
+        [m.msg_id for m in messages],
+        claim_tokens=[m.claim_token for m in messages],
+    )
     client.stop()
 """
 
@@ -169,6 +173,7 @@ class WorkQueueRecord:
     queue: str
     created_at: float
     metadata: Dict[str, str]
+    claim_token: Optional[str] = None
 
     @classmethod
     def from_message(cls, msg: Message) -> "WorkQueueRecord":
@@ -178,15 +183,31 @@ class WorkQueueRecord:
             queue=msg.queue,
             created_at=msg.created_at,
             metadata=dict(msg.metadata) if msg.metadata else {},
+            claim_token=getattr(msg, "claim_token", None),
         )
+
+
+def _compute_heartbeat_interval(claim_timeout_secs: Optional[float]) -> Optional[float]:
+    """Compute a safe heartbeat interval from claim timeout."""
+    if claim_timeout_secs is None:
+        return None
+    if claim_timeout_secs <= 0:
+        return 0.1
+    return max(0.1, min(5.0, claim_timeout_secs / 2))
 
 
 class WorkQueueQueueClient:
     """WorkQueue client for claim/ack operations."""
 
-    def __init__(self, broker_url: str, worker_id: str = "default"):
+    def __init__(
+        self,
+        broker_url: str,
+        worker_id: str = "default",
+        heartbeat_interval_secs: Optional[float] = None,
+    ):
         self.broker_url = broker_url
         self.worker_id = worker_id
+        self.heartbeat_interval_secs = heartbeat_interval_secs
         self._client: Optional[WorkQueueClient] = None
         self._running = False
         self.logger = create_ray_logger(f"WorkQueueClient:{worker_id}")
@@ -195,7 +216,14 @@ class WorkQueueQueueClient:
     def start(self) -> None:
         if self._running:
             return
-        self._client = WorkQueueClient(self.broker_url, self.worker_id)
+        if self.heartbeat_interval_secs is None:
+            self._client = WorkQueueClient(self.broker_url, self.worker_id)
+        else:
+            self._client = WorkQueueClient(
+                self.broker_url,
+                self.worker_id,
+                heartbeat_interval_secs=self.heartbeat_interval_secs,
+            )
         self._client.start()
         self._running = True
         self.logger.info(f"Connected to {self.broker_url}")
@@ -242,6 +270,7 @@ class WorkQueueQueueClient:
         self,
         queue: str,
         msg_ids: List[str],
+        claim_tokens: Optional[List[str]] = None,
         state_namespace: Optional[str] = None,
         state_puts: Optional[Dict[str, bytes]] = None,
         state_deletes: Optional[List[str]] = None,
@@ -250,19 +279,34 @@ class WorkQueueQueueClient:
         return self._client.ack(
             queue,
             msg_ids,
+            claim_tokens=claim_tokens,
             state_namespace=state_namespace,
             state_puts=state_puts,
             state_deletes=state_deletes,
         )
 
-    def nack(self, queue: str, msg_ids: List[str]) -> int:
+    def nack(
+        self,
+        queue: str,
+        msg_ids: List[str],
+        claim_tokens: Optional[List[str]] = None,
+        reason: str = "processing_failed",
+        delay_ms: int = 0,
+    ) -> int:
         self._check()
-        return self._client.nack(queue, msg_ids)
+        return self._client.nack(
+            queue,
+            msg_ids,
+            claim_tokens=claim_tokens,
+            reason=reason,
+            delay_ms=delay_ms,
+        )
 
     def ack_and_forward(
         self,
         upstream_queue: str,
         upstream_msg_ids: List[str],
+        upstream_claim_tokens: Optional[List[str]],
         downstream_queue: str,
         downstream_payloads: List[bytes],
         state_namespace: Optional[str] = None,
@@ -273,6 +317,7 @@ class WorkQueueQueueClient:
         return self._client.ack_and_forward(
             upstream_queue,
             upstream_msg_ids,
+            upstream_claim_tokens,
             downstream_queue,
             downstream_payloads,
             state_namespace=state_namespace,

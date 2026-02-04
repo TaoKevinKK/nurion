@@ -76,6 +76,7 @@ pub struct ClaimInfo {
     pub worker_id: String,
     pub lease_id: String,
     pub claimed_at: f64,
+    pub claim_token: String,
 }
 
 impl ClaimInfo {
@@ -85,8 +86,16 @@ impl ClaimInfo {
             worker_id,
             lease_id,
             claimed_at: now_secs(),
+            claim_token: uuid::Uuid::now_v7().to_string(),
         }
     }
+}
+
+/// Message returned by claim with its claim token.
+#[derive(Debug, Clone)]
+pub struct ClaimedMessage {
+    pub message: Message,
+    pub claim_token: String,
 }
 
 /// WorkQueue server configuration
@@ -162,6 +171,7 @@ mod tests {
         assert_eq!(claim.worker_id, "worker-1");
         assert_eq!(claim.lease_id, "lease-456");
         assert!(claim.claimed_at > 0.0);
+        assert!(!claim.claim_token.is_empty());
     }
 
     #[test]
@@ -206,6 +216,7 @@ mod tests {
         let claim2: ClaimInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(claim.msg_id, claim2.msg_id);
         assert_eq!(claim.worker_id, claim2.worker_id);
+        assert_eq!(claim.claim_token, claim2.claim_token);
     }
 
     #[test]

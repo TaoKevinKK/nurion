@@ -18,10 +18,12 @@
 // - Claim locks: serialize concurrent claims per queue
 // - Queue registry: track known queues for stats
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use dashmap::DashMap;
 use tokio::sync::Mutex;
 
+use crate::types::now_secs;
 /// Per-queue state - just a lock for claim serialization
 pub struct QueueState {
     /// Lock for serializing claim operations on this queue.
@@ -47,12 +49,15 @@ impl Default for QueueState {
 pub struct WorkQueueState {
     /// Per-queue state (claim locks)
     queues: DashMap<String, Arc<QueueState>>,
+    /// Lease last-seen timestamps (seconds since epoch)
+    leases: DashMap<String, f64>,
 }
 
 impl WorkQueueState {
     pub fn new() -> Self {
         Self {
             queues: DashMap::new(),
+            leases: DashMap::new(),
         }
     }
 
@@ -77,6 +82,19 @@ impl WorkQueueState {
     /// Get list of known queues
     pub fn list_queues(&self) -> Vec<String> {
         self.queues.iter().map(|e| e.key().clone()).collect()
+    }
+
+    /// Update lease heartbeat timestamp.
+    pub fn update_lease(&self, lease_id: &str) {
+        self.leases.insert(lease_id.to_string(), now_secs());
+    }
+
+    /// Get a snapshot of all leases (lease_id -> last_seen).
+    pub fn lease_snapshot(&self) -> HashMap<String, f64> {
+        self.leases
+            .iter()
+            .map(|entry| (entry.key().clone(), *entry.value()))
+            .collect()
     }
 }
 

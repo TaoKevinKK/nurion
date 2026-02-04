@@ -152,7 +152,9 @@ class TestIcebergPipeline:
     """Integration tests for full Iceberg pipeline with WorkQueue."""
 
     @pytest.mark.asyncio
-    async def test_full_pipeline_with_queue(self, iceberg_test_table, ray_cluster, workqueue_backend):
+    async def test_full_pipeline_with_queue(
+        self, iceberg_test_table, ray_cluster, workqueue_backend
+    ):
         """Test complete IcebergSource pipeline with WorkQueue queue.
 
         This test verifies the full flow:

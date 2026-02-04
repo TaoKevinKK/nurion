@@ -27,7 +27,7 @@ from typing import Dict, List, Optional
 
 import pyarrow as pa
 
-from solstice.core.job import Job, JobConfig
+from solstice.core.job import Job
 from solstice.core.stage import Stage
 from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime
 from solstice.core.models import Split, SplitPayload

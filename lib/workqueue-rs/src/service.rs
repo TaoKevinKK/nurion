@@ -97,8 +97,9 @@ impl WorkQueue for WorkQueueService {
 
         let proto_messages: Vec<proto::Message> = claimed
             .iter()
-            .map(Self::to_proto_message)
+            .map(|c| Self::to_proto_message(&c.message))
             .collect();
+        let claim_tokens: Vec<String> = claimed.iter().map(|c| c.claim_token.clone()).collect();
 
         // Check if there are more messages
         let has_more = match self.storage.get_meta(&req.queue).await {
@@ -109,6 +110,7 @@ impl WorkQueue for WorkQueueService {
         Ok(Response::new(ClaimResponse {
             messages: proto_messages,
             has_more,
+            claim_tokens,
         }))
     }
 
@@ -119,6 +121,12 @@ impl WorkQueue for WorkQueueService {
         let has_state_updates = !req.state_namespace.is_empty()
             && (!req.state_puts.is_empty() || !req.state_deletes.is_empty());
 
+        if !req.msg_ids.is_empty() && req.claim_tokens.len() != req.msg_ids.len() {
+            return Err(Status::invalid_argument(
+                "claim_tokens length must match msg_ids",
+            ));
+        }
+
         // Ack directly in storage
         let result = if has_state_updates {
             let state_puts: HashMap<String, Vec<u8>> = req.state_puts.into_iter().collect();
@@ -126,13 +134,24 @@ impl WorkQueue for WorkQueueService {
                 .ack_with_state(
                     &req.queue,
                     &req.msg_ids,
+                    &req.claim_tokens,
+                    &req.worker_id,
+                    &req.lease_id,
                     &req.state_namespace,
                     &state_puts,
                     &req.state_deletes,
                 )
                 .await
         } else {
-            self.storage.ack_messages(&req.queue, &req.msg_ids).await
+            self.storage
+                .ack_messages(
+                    &req.queue,
+                    &req.msg_ids,
+                    &req.claim_tokens,
+                    &req.worker_id,
+                    &req.lease_id,
+                )
+                .await
         };
 
         match result {
@@ -150,8 +169,24 @@ impl WorkQueue for WorkQueueService {
     async fn nack(&self, request: Request<NackRequest>) -> Result<Response<NackResponse>, Status> {
         let req = request.into_inner();
 
+        if !req.msg_ids.is_empty() && req.claim_tokens.len() != req.msg_ids.len() {
+            return Err(Status::invalid_argument(
+                "claim_tokens length must match msg_ids",
+            ));
+        }
+
         // Nack directly in storage (returns messages to pending at tail)
-        match self.storage.nack_messages(&req.queue, &req.msg_ids).await {
+        match self
+            .storage
+            .nack_messages(
+                &req.queue,
+                &req.msg_ids,
+                &req.claim_tokens,
+                &req.worker_id,
+                &req.lease_id,
+            )
+            .await
+        {
             Ok(()) => Ok(Response::new(NackResponse {
                 nacked_count: req.msg_ids.len() as i32,
             })),
@@ -167,6 +202,14 @@ impl WorkQueue for WorkQueueService {
         request: Request<AckAndForwardRequest>,
     ) -> Result<Response<AckAndForwardResponse>, Status> {
         let req = request.into_inner();
+
+        if !req.upstream_msg_ids.is_empty()
+            && req.upstream_claim_tokens.len() != req.upstream_msg_ids.len()
+        {
+            return Err(Status::invalid_argument(
+                "upstream_claim_tokens length must match upstream_msg_ids",
+            ));
+        }
 
         // Build downstream messages
         let downstream_messages: Vec<Message> = req
@@ -191,6 +234,9 @@ impl WorkQueue for WorkQueueService {
                 .ack_forward_with_state(
                     &req.upstream_queue,
                     &req.upstream_msg_ids,
+                    &req.upstream_claim_tokens,
+                    &req.worker_id,
+                    &req.lease_id,
                     &req.downstream_queue,
                     &downstream_messages,
                     &req.state_namespace,
@@ -203,6 +249,9 @@ impl WorkQueue for WorkQueueService {
                 .ack_and_forward(
                     &req.upstream_queue,
                     &req.upstream_msg_ids,
+                    &req.upstream_claim_tokens,
+                    &req.worker_id,
+                    &req.lease_id,
                     &req.downstream_queue,
                     &downstream_messages,
                 )
@@ -333,6 +382,7 @@ impl WorkQueue for WorkQueueService {
         let mut stream = request.into_inner();
 
         let (tx, rx) = mpsc::channel(16);
+        let state = self.state.clone();
 
         // Heartbeat receive timeout: close connection if no ping received within 30s
         const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -345,6 +395,7 @@ impl WorkQueue for WorkQueueService {
                 // Wait for next ping with timeout
                 match timeout(HEARTBEAT_TIMEOUT, stream.next()).await {
                     Ok(Some(Ok(_ping))) => {
+                        state.update_lease(&lease_id);
                         // Simple pong response - always use the generated lease_id
                         let pong = HeartbeatPong {
                             lease_id: lease_id.clone(),
