@@ -58,7 +58,7 @@ Example:
     ```
 """
 
-from solstice.serve.client import EndpointCache, EndpointInfo, ModelClient
+from solstice.serve.client import ModelClient
 from solstice.serve.config import AutoscaleConfig, ModelConfig, WorkerState
 from solstice.serve.manager import ModelServiceManager
 from solstice.serve.pool import ModelPool
@@ -75,8 +75,6 @@ __all__ = [
     "ModelPool",
     # Data Plane
     "ModelClient",
-    "EndpointInfo",
-    "EndpointCache",
     # Infrastructure
     "ModelRegistry",
     "InferenceWorker",

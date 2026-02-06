@@ -77,7 +77,6 @@ class ModelClient:
         self._cache_ttl = cache_ttl_seconds
         self._registry_url: Optional[str] = None
         self._endpoint_cache: dict[str, EndpointCache] = {}
-        self._local_pending: dict[str, int] = {}
         self._http_client: Optional[httpx.AsyncClient] = None
 
     def _get_http_client(self) -> httpx.AsyncClient:
@@ -126,21 +125,11 @@ class ModelClient:
                 return cache.endpoints
             return []
 
-    def _select_endpoint(self, endpoints: list[EndpointInfo]) -> Optional[str]:
-        if not endpoints:
-            return None
-        ready = [e for e in endpoints if e.is_ready]
-        if not ready:
-            ready = endpoints
+    async def get_endpoints(self, model_id: str) -> list[str]:
+        """Get all ready endpoint URLs for a model.
 
-        def get_load(ep: EndpointInfo) -> int:
-            return ep.pending + self._local_pending.get(ep.endpoint, 0)
-
-        ready.sort(key=get_load)
-        return ready[0].endpoint
-
-    async def get_endpoint(self, model_id: str) -> str:
-        """Get the best endpoint for a model.
+        Returns:
+            List of endpoint URLs (ready ones only, or all if none ready)
 
         Raises:
             RuntimeError: If no endpoints available
@@ -149,20 +138,11 @@ class ModelClient:
         if not endpoints:
             raise RuntimeError(f"No endpoints available for model {model_id}")
 
-        endpoint = self._select_endpoint(endpoints)
-        if endpoint is None:
-            raise RuntimeError(f"No ready endpoints for model {model_id}")
-
-        return endpoint
+        ready = [e.endpoint for e in endpoints if e.is_ready]
+        return ready or [e.endpoint for e in endpoints]
 
     def invalidate_cache(self, model_id: str) -> None:
         self._endpoint_cache.pop(model_id, None)
-
-    def track_pending(self, endpoint: str) -> None:
-        self._local_pending[endpoint] = self._local_pending.get(endpoint, 0) + 1
-
-    def untrack_pending(self, endpoint: str) -> None:
-        self._local_pending[endpoint] = max(0, self._local_pending.get(endpoint, 0) - 1)
 
     async def close(self) -> None:
         if self._http_client is not None:

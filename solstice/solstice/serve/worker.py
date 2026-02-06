@@ -30,7 +30,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -95,8 +94,6 @@ class InferenceWorker:
         self._process: Optional[subprocess.Popen] = None
         self._state = WorkerState.STARTING
         self._is_ready = False
-        self._pending_requests = 0
-        self._running_requests = 0
 
         # Registry (ActorHandle for ref counting, URL for HTTP)
         self._registry = registry
@@ -340,19 +337,19 @@ class InferenceWorker:
         return {"pending": 0, "running": 0}
 
     def _parse_prometheus_metrics(self, text: str) -> dict[str, Any]:
-        """Parse Prometheus metrics text format."""
-        metrics: dict[str, Any] = {}
+        """Parse vLLM Prometheus metrics text format."""
+        from prometheus_client.parser import text_string_to_metric_families
 
-        # vLLM metrics patterns
-        patterns = {
-            "pending": r"vllm:num_requests_waiting\s+(\d+)",
-            "running": r"vllm:num_requests_running\s+(\d+)",
+        metrics: dict[str, Any] = {}
+        mapping = {
+            "vllm:num_requests_waiting": "pending",
+            "vllm:num_requests_running": "running",
         }
 
-        for key, pattern in patterns.items():
-            match = re.search(pattern, text)
-            if match:
-                metrics[key] = int(match.group(1))
+        for family in text_string_to_metric_families(text):
+            key = mapping.get(family.name)
+            if key and family.samples:
+                metrics[key] = int(family.samples[0].value)
 
         return metrics
 
@@ -385,18 +382,6 @@ class InferenceWorker:
 
     # Public API
 
-    def get_endpoint(self) -> str:
-        """Get the endpoint URL of this worker."""
-        return self._endpoint
-
-    def get_worker_id(self) -> str:
-        """Get the worker ID."""
-        return self._worker_id
-
-    def get_state(self) -> str:
-        """Get current worker state."""
-        return self._state.value
-
     def is_ready(self) -> bool:
         """Check if the worker is ready to serve requests."""
         return self._is_ready
@@ -425,17 +410,6 @@ class InferenceWorker:
                 return False
             await asyncio.sleep(1.0)
         return True
-
-    def get_status(self) -> dict[str, Any]:
-        """Get worker status."""
-        return {
-            "worker_id": self._worker_id,
-            "model_id": self._config.model_id,
-            "endpoint": self._endpoint,
-            "state": self._state.value,
-            "is_ready": self._is_ready,
-            "port": self._port,
-        }
 
     async def shutdown(self) -> None:
         """Gracefully shutdown the worker."""

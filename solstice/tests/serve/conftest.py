@@ -14,8 +14,6 @@
 
 """Fixtures for serve tests."""
 
-import os
-
 import pytest
 
 

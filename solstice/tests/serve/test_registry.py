@@ -61,9 +61,7 @@ class TestModelRegistryHTTP:
             assert response.json() == {"ok": True}
 
             # Verify via HTTP GET (query parameter)
-            response = await client.get(
-                f"{http_url}/endpoints", params={"model_id": "test_model"}
-            )
+            response = await client.get(f"{http_url}/endpoints", params={"model_id": "test_model"})
             assert response.status_code == 200
             assert response.json() == ["http://worker1:8001"]
 
@@ -86,9 +84,7 @@ class TestModelRegistryHTTP:
             assert response.status_code == 200
 
             # Verify empty
-            response = await client.get(
-                f"{http_url}/endpoints", params={"model_id": "test_model"}
-            )
+            response = await client.get(f"{http_url}/endpoints", params={"model_id": "test_model"})
             assert response.json() == []
 
     async def test_heartbeat_via_http(self, registry) -> None:
@@ -203,9 +199,7 @@ class TestModelRegistryHTTP:
         _, http_url = registry
 
         async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{http_url}/endpoints", params={"model_id": "nonexistent"}
-            )
+            response = await client.get(f"{http_url}/endpoints", params={"model_id": "nonexistent"})
             assert response.status_code == 200
             assert response.json() == []
 

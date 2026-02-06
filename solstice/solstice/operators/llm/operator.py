@@ -25,6 +25,7 @@ Two modes for endpoint discovery:
 from __future__ import annotations
 
 import asyncio
+import random
 from dataclasses import dataclass
 from typing import Any, ClassVar, Literal, Optional, Type
 
@@ -41,6 +42,26 @@ from solstice.operators.llm.utils import (
     extract_messages,
     extract_prompts,
 )
+from solstice.serve.client import ModelClient
+
+
+class EndpointSelectPolicy:
+    """Policy for selecting endpoints from a list.
+
+    Each instance has a random offset so that different workers in a
+    distributed system don't all start from index 0.
+    """
+
+    def __init__(self, endpoints: list[str]) -> None:
+        self._endpoints = endpoints
+        self._offset = random.randint(0, max(len(endpoints) - 1, 0))
+        self._counter = 0
+
+    def next(self) -> str:
+        """Return next endpoint using round-robin with random start offset."""
+        idx = (self._offset + self._counter) % len(self._endpoints)
+        self._counter += 1
+        return self._endpoints[idx]
 
 
 @dataclass
@@ -130,10 +151,8 @@ class ExternalLLMOperator(Operator):
             self._http_client = httpx.AsyncClient(timeout=self._config.timeout)
         return self._http_client
 
-    def _get_model_client(self) -> Any:
+    def _get_model_client(self) -> ModelClient:
         if self._model_client is None:
-            from solstice.serve import ModelClient
-
             assert self._config.registry is not None, (
                 "registry must be set in config when use_model_client=True"
             )
@@ -143,11 +162,11 @@ class ExternalLLMOperator(Operator):
             )
         return self._model_client
 
-    async def _resolve_endpoint(self) -> str:
-        """Resolve endpoint URL."""
+    async def _get_endpoints(self) -> list[str]:
+        """Get endpoints — from ModelClient or base_url."""
         if self._config.use_model_client:
-            return await self._get_model_client().get_endpoint(self._config.model)
-        return self._config.base_url
+            return await self._get_model_client().get_endpoints(self._config.model)
+        return [self._config.base_url]
 
     async def process_split(
         self, split: Split, payload: Optional[SplitPayload] = None
@@ -164,11 +183,17 @@ class ExternalLLMOperator(Operator):
         else:
             messages_list = self._build_vision_messages(table)
 
+        # Get endpoints once per split, round-robin with random offset
+        endpoints = await self._get_endpoints()
+        selector = EndpointSelectPolicy(endpoints)
+
         # Generate outputs in batches with asyncio.gather
         outputs: list[str] = []
         for i in range(0, len(messages_list), self._config.batch_size):
             batch = messages_list[i : i + self._config.batch_size]
-            batch_results = await asyncio.gather(*(self._generate_one(m) for m in batch))
+            batch_results = await asyncio.gather(
+                *(self._generate_one(m, selector.next()) for m in batch)
+            )
             outputs.extend(batch_results)
 
         # Add outputs to table
@@ -180,14 +205,10 @@ class ExternalLLMOperator(Operator):
             split_id=f"{split.split_id}_{self.worker_id}",
         )
 
-    async def _generate_one(self, messages: list[dict]) -> str:
+    async def _generate_one(self, messages: list[dict], endpoint: str) -> str:
         """Generate response for a single message list with retries."""
-        endpoint = await self._resolve_endpoint()
         url = f"{endpoint}/v1/chat/completions"
         body = self._build_request_body(messages)
-
-        if self._config.use_model_client:
-            self._get_model_client().track_pending(endpoint)
 
         try:
             return await self._call_api(url, body)
@@ -196,9 +217,6 @@ class ExternalLLMOperator(Operator):
             if self._config.use_model_client:
                 self._get_model_client().invalidate_cache(self._config.model)
             return f"[ERROR: {str(e)}]"
-        finally:
-            if self._config.use_model_client:
-                self._get_model_client().untrack_pending(endpoint)
 
     async def _call_api(self, url: str, body: dict[str, Any]) -> str:
         """POST to chat/completions endpoint with retries."""

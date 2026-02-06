@@ -162,42 +162,31 @@ class ModelPool:
             await asyncio.sleep(2.0)
         return False
 
-    def get_endpoints(self) -> list[str]:
-        """Get all worker endpoints."""
-        endpoints = []
-        for worker in self._workers.values():
-            try:
-                endpoints.append(ray.get(worker.get_endpoint.remote()))
-            except Exception:
-                pass
-        return endpoints
-
     async def get_status(self) -> dict[str, Any]:
-        """Get pool status."""
-        worker_statuses = {}
-        ready_count = 0
-        total_pending = 0
+        """Get pool status from registry (single HTTP call, not per-worker RPC)."""
+        import httpx
 
-        for worker_id, worker in self._workers.items():
-            try:
-                status = await worker.get_status.remote()
-                worker_statuses[worker_id] = status
-                if status.get("is_ready"):
-                    ready_count += 1
-            except Exception:
-                worker_statuses[worker_id] = {"state": "unknown"}
+        workers_status: list[dict[str, Any]] = []
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    f"{self._registry_url}/endpoints_status",
+                    params={"model_id": self._config.model_id},
+                )
+                resp.raise_for_status()
+                workers_status = resp.json()
+        except Exception as e:
+            logger.warning(f"Failed to get status from registry: {e}")
+
+        ready_count = sum(1 for w in workers_status if w.get("is_ready"))
+        total_pending = sum(w.get("pending", 0) for w in workers_status)
 
         return {
             "model_id": self._config.model_id,
             "total_workers": len(self._workers),
             "ready_workers": ready_count,
             "total_pending": total_pending,
-            "config": {
-                "min_workers": self._config.min_workers,
-                "max_workers": self._config.max_workers,
-                "tensor_parallel_size": self._config.tensor_parallel_size,
-            },
-            "workers": worker_statuses,
+            "endpoints": [w.get("endpoint", "") for w in workers_status],
             "last_scale_time": self._last_scale_time,
             "autoscale_frozen": self._autoscale_frozen,
         }

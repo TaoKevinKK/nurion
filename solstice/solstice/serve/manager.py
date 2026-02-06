@@ -65,9 +65,6 @@ class ModelServiceManager:
             max_workers=4,
         ))
 
-        # Get endpoints
-        endpoints = manager.get_endpoints("decision")
-
         # Scale manually
         await manager.scale_model("decision", target=6)
 
@@ -188,12 +185,12 @@ class ModelServiceManager:
         result["completed_at"] = time.time()
         result["duration_s"] = result["completed_at"] - result["started_at"]
 
-        # Get endpoints from pool
-        endpoints = ray.get(pool.get_endpoints.remote())
-        result["endpoints"] = endpoints
+        # Get endpoints from pool status (fetched from registry)
+        pool_status = await pool.get_status.remote()
+        result["endpoints"] = pool_status.get("endpoints", [])
 
         logger.info(
-            f"Model {model_id} deployed: {len(endpoints)} endpoints, "
+            f"Model {model_id} deployed: {len(result['endpoints'])} endpoints, "
             f"took {result['duration_s']:.1f}s"
         )
 
@@ -303,13 +300,6 @@ class ModelServiceManager:
         if pool is None:
             raise ValueError(f"Model {model_id} not found")
         ray.get(pool.unfreeze_autoscaler.remote())
-
-    def get_endpoints(self, model_id: str) -> list[str]:
-        """Get endpoint URLs for a model."""
-        pool = self._pools.get(model_id)
-        if pool is None:
-            return []
-        return ray.get(pool.get_endpoints.remote())
 
     def list_models(self) -> list[str]:
         """List all deployed model IDs.
