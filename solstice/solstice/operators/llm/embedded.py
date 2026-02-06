@@ -139,6 +139,7 @@ class EmbeddedLLMOperatorConfig(OperatorConfig):
     vllm_enable_chunked_prefill: bool = False  # Chunked prefill for long prompts
     vllm_kv_offloading_size_gb: Optional[float] = None  # GB to offload KV cache to CPU
     vllm_kv_offloading_backend: Optional[str] = None  # "native", "lmcache"
+    vllm_distributed_executor_backend: Optional[str] = None  # "ray" for multi-node TP
 
     # --- SGLang-specific ---
     sglang_mem_fraction_static: Optional[float] = None  # Static memory fraction
@@ -253,6 +254,10 @@ class EmbeddedLLMOperator(Operator):
 
         if cfg.vllm_enable_chunked_prefill:
             engine_kwargs["enable_chunked_prefill"] = True
+
+        # Distributed executor backend (for multi-node tensor parallelism)
+        if cfg.vllm_distributed_executor_backend:
+            engine_kwargs["distributed_executor_backend"] = cfg.vllm_distributed_executor_backend
 
         # KV Cache offloading (CPU offload for larger effective batch)
         if cfg.vllm_kv_offloading_size_gb is not None:
@@ -428,15 +433,29 @@ class EmbeddedLLMOperator(Operator):
         images: list[Any],
     ) -> list[str]:
         """Generate VLM responses using vLLM."""
+        from io import BytesIO
+
+        from PIL import Image
+
         inputs = []
         for prompt, image_data in zip(prompts, images):
             if image_data is None:
                 inputs.append(prompt)
             else:
+                # Convert bytes to PIL.Image for vLLM
+                if isinstance(image_data, bytes):
+                    image = Image.open(BytesIO(image_data))
+                else:
+                    image = image_data
+
+                # For Qwen-VL models, use the correct vision placeholder
+                # vLLM expects: <|vision_start|><|image_pad|><|vision_end|>
+                vlm_prompt = f"<|vision_start|><|image_pad|><|vision_end|>\n{prompt}"
+
                 inputs.append(
                     {
-                        "prompt": prompt,
-                        "multi_modal_data": {"image": image_data},
+                        "prompt": vlm_prompt,
+                        "multi_modal_data": {"image": image},
                     }
                 )
 

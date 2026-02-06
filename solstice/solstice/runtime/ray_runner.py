@@ -232,7 +232,9 @@ class RayJobRunner:
         self.logger.info(f"Initializing job {self.job.job_id}")
 
         # Create SplitPayloadStore - shared across all stages
+        # Wait for actor to be ready before starting workers
         self._payload_store = RaySplitPayloadStore(name=f"payload_store_{self.job.job_id}")
+        self._payload_store.wait_ready()
         self.logger.info(f"Created SplitPayloadStore for job {self.job.job_id}")
 
         # Try to recover from checkpoint if enabled

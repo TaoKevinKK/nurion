@@ -2,7 +2,6 @@
   "working_dir": ".",
   "excludes": [
     "tests/",
-    "luma-only/",
     ".git/",
     "*.lance",
     "*.mp4",
@@ -32,11 +31,19 @@
     "fastapi",
     "sse-starlette",
     "jinja2",
-    "prometheus-client"
+    "prometheus-client",
+    "nurion-raydp",
+    "nurion-workqueue",
+    "httpx",
+    "aiohttp",
+    "vllm==0.15.1",
+    "aioboto3",
+    "awscrt",
+    "pillow",
+    "torch-c-dlpack-ext"
   ],
   "env_vars": {
-    "AWS_DEFAULT_REGION": "ap-southeast-2",
-    "AWS_REGION": "ap-southeast-2",
-    "RAY_DEDUP_LOGS": "0"
+    "RAY_DEDUP_LOGS": "0",
+    "VLLM_WORKER_MULTIPROC_METHOD": "spawn"
   }
 }

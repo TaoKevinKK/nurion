@@ -3,7 +3,7 @@ requires = ["maturin>=1.9,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "workqueue-py"
+name = "nurion-workqueue"
 version = "0.1.0"
 description = "Python bindings for WorkQueue - single-queue multi-consumer work queue"
 requires-python = ">=3.10"

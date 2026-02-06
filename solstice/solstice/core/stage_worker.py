@@ -78,9 +78,15 @@ class WorkerRuntime:
 
 @dataclass(frozen=True)
 class ProcessResult:
-    """Processing result for a single message."""
+    """Processing result for a single message.
 
-    output_message_bytes: Optional[bytes]
+    output_messages_bytes can contain 0, 1, or N messages:
+    - [] or None: operator filtered/dropped this message
+    - [bytes]: operator produced one output (map, 1:1)
+    - [bytes, bytes, ...]: operator produced multiple outputs (explode, 1:N)
+    """
+
+    output_messages_bytes: list[bytes]
     input_rows: int
     input_bytes: int
     output_rows: int
@@ -281,14 +287,14 @@ class StageWorker:
                     )
 
                     # Atomic ack (+ forward if output exists)
-                    if result.output_message_bytes and self.output_queue_name:
+                    if result.output_messages_bytes and self.output_queue_name:
                         # Atomic: ack upstream + push downstream
                         self.queue_client.ack_and_forward(
                             upstream_queue=self.upstream_queue_name,
                             upstream_msg_ids=[record.msg_id],
                             upstream_claim_tokens=[record.claim_token],
                             downstream_queue=self.output_queue_name,
-                            downstream_payloads=[result.output_message_bytes],
+                            downstream_payloads=result.output_messages_bytes,
                             state_namespace=job_namespace(self.job_id),
                             state_puts=event_puts,
                         )
@@ -376,42 +382,81 @@ class StageWorker:
                 parent_split_ids=[message.split_id],
             )
 
-        # Process with operator
-        output_payload = self._operator.process_split(split, payload)
+        # Process with operator (supports sync, async, iterator, async iterator)
+        result = self._operator.process_split(split, payload)
+
+        # Normalize result into list[SplitPayload]
+        output_payloads = await self._collect_outputs(result)
 
         input_rows = len(payload) if payload else 0
         input_bytes = int(payload.data.nbytes) if payload else 0
-        output_rows = len(output_payload) if output_payload else 0
-        output_bytes = int(output_payload.data.nbytes) if output_payload else 0
+        output_rows = sum(len(p) for p in output_payloads)
+        output_bytes = sum(int(p.data.nbytes) for p in output_payloads)
 
-        # Prepare output for atomic ack_and_forward (if any)
-        if output_payload and self.output_queue_name:
-            payload_key = split_id
-            self.payload_store.store(payload_key, output_payload)
+        # Prepare output messages for atomic ack_and_forward
+        output_messages_bytes: list[bytes] = []
+        if output_payloads and self.output_queue_name:
+            for idx, out_payload in enumerate(output_payloads):
+                out_split_id = split_id if len(output_payloads) == 1 else f"{split_id}_{idx}"
+                payload_key = out_split_id
+                self.payload_store.store(payload_key, out_payload)
 
-            output_message = QueueMessage(
-                message_id=split_id,
-                split_id=split_id,
-                payload_key=payload_key,
-                metadata={
-                    "source_stage": self.stage_id,
-                    "parent_message_id": message.message_id,
-                },
-            )
-            return ProcessResult(
-                output_message_bytes=output_message.to_bytes(),
-                input_rows=input_rows,
-                input_bytes=input_bytes,
-                output_rows=output_rows,
-                output_bytes=output_bytes,
-            )
+                output_message = QueueMessage(
+                    message_id=out_split_id,
+                    split_id=out_split_id,
+                    payload_key=payload_key,
+                    metadata={
+                        "source_stage": self.stage_id,
+                        "parent_message_id": message.message_id,
+                    },
+                )
+                output_messages_bytes.append(output_message.to_bytes())
 
         return ProcessResult(
-            output_message_bytes=None,
+            output_messages_bytes=output_messages_bytes,
             input_rows=input_rows,
             input_bytes=input_bytes,
             output_rows=output_rows,
             output_bytes=output_bytes,
+        )
+
+    @staticmethod
+    async def _collect_outputs(result: Any) -> list:
+        """Normalize process_split return value into list[SplitPayload].
+
+        Supports:
+            None                        → []
+            SplitPayload                → [payload]
+            Coroutine → await → recurse
+            Iterator[SplitPayload]      → list(iter)
+            AsyncIterator[SplitPayload] → [p async for p in iter]
+        """
+        from solstice.core.models import SplitPayload
+
+        # Coroutine (async def process_split)
+        if asyncio.iscoroutine(result):
+            result = await result
+            return await StageWorker._collect_outputs(result)
+
+        # None → drop
+        if result is None:
+            return []
+
+        # Single payload
+        if isinstance(result, SplitPayload):
+            return [result]
+
+        # Async iterator/generator
+        if hasattr(result, "__aiter__"):
+            return [p async for p in result]
+
+        # Sync iterator/generator
+        if hasattr(result, "__iter__"):
+            return list(result)
+
+        raise TypeError(
+            f"process_split returned unsupported type {type(result).__name__}. "
+            "Expected None, SplitPayload, Iterator[SplitPayload], or async variants."
         )
 
     def _build_event_puts(

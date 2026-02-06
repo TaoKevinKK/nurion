@@ -14,15 +14,12 @@
 
 """External LLM/VLM Operator for calling external inference services.
 
-Use this operator to call external LLM services via OpenAI-compatible API.
-For maximum throughput with dedicated GPUs, use EmbeddedLLMOperator instead.
-
-Supports:
-- Text-only chat (messages_field)
-- Single image + text (prompt_field + image_field/image_url_field)
-- Multiple images + text (prompt_field + images_field)
-
 Uses OpenAI-compatible Chat Completions API (/v1/chat/completions).
+
+Two modes for endpoint discovery:
+1. Direct mode: Set `base_url` to call a specific endpoint
+2. ModelClient mode: Set `use_model_client=True` for dynamic endpoint
+   discovery and load balancing via solstice.serve
 """
 
 from __future__ import annotations
@@ -31,11 +28,12 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, ClassVar, Literal, Optional, Type
 
+import httpx
 import pyarrow as pa
+import ray
 
 from solstice.core.models import Split, SplitPayload
-from solstice.core.operator import OperatorRuntime
-from solstice.operators.http.operator import HttpOperator, HttpOperatorConfig
+from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime, operator
 from solstice.operators.llm.utils import (
     build_multi_image_message,
     build_single_image_message,
@@ -46,140 +44,132 @@ from solstice.operators.llm.utils import (
 
 
 @dataclass
-class ExternalLLMOperatorConfig(HttpOperatorConfig):
+class ExternalLLMOperatorConfig(OperatorConfig):
     """Configuration for calling external LLM services via HTTP.
 
-    Use this config to call external LLM services (vLLM, SGLang, OpenAI, etc.)
-    via OpenAI-compatible Chat Completions API.
+    Two modes:
+    1. Direct mode (set `base_url`): Call a specific endpoint
+    2. ModelClient mode (set `use_model_client=True`): Dynamic discovery
 
-    For maximum throughput with dedicated GPUs, use EmbeddedLLMOperatorConfig.
+    Usage:
+        # Direct mode
+        config = ExternalLLMOperatorConfig(
+            base_url="http://server:8000",
+            model="Qwen/Qwen2.5-72B-Instruct",
+            prompt="Describe this image.",
+            image_field="image",
+        )
 
-    Supports three modes based on which fields are set:
-
-    1. Text-only chat: Set `messages_field` to column containing chat messages
-       Input format: [{"role": "user", "content": "Hello"}]
-
-    2. Single image + text: Set `prompt_field` and (`image_field` or `image_url_field`)
-       Input: prompt string + image data/URL
-
-    3. Multiple images + text: Set `prompt_field` and `images_field`
-       Input: prompt string + list of images
-
-    Attributes:
-        model: Model name for the API
-        max_tokens: Maximum tokens to generate
-        temperature: Sampling temperature (0 = deterministic)
-        top_p: Top-p (nucleus) sampling
-        output_field: Output column for generated response
-        batch_size: Number of requests to process concurrently
-
-        # Text-only mode
-        messages_field: Input column containing chat messages (list of dicts)
-
-        # Vision mode (single or multi-image)
-        prompt_field: Input column containing text prompts
-        image_field: Input column containing single image (base64 or bytes)
-        image_url_field: Input column containing single image URL
-        images_field: Input column containing multiple images (list)
-        detail: Image detail level for vision API
+        # ModelClient mode
+        config = ExternalLLMOperatorConfig(
+            use_model_client=True,
+            model="caption_vlm",
+            prompt="Describe this image.",
+            image_field="image",
+        )
     """
 
     operator_class: ClassVar[Type["ExternalLLMOperator"]]
 
-    # Model configuration
+    # Endpoint
+    base_url: str = ""
+    use_model_client: bool = False
+    registry: Optional[ray.actor.ActorHandle] = None  # Required when use_model_client=True
+
+    # Model name — used for both ModelClient discovery AND API request body.
+    # For ModelClient mode, this must match the model_id in ModelServiceManager.
+    # vLLM's served_model_name defaults to model_source (HuggingFace ID).
     model: str = ""
+
+    # HTTP
+    timeout: float = 120.0
+    max_retries: int = 3
 
     # Generation parameters
     max_tokens: int = 512
     temperature: float = 0.7
     top_p: float = 0.95
+    top_k: int = 0
+    presence_penalty: float = 0.0
+    frequency_penalty: float = 0.0
 
-    # Output field
+    # Output
     output_field: str = "response"
 
-    # Batching
+    # Batching (concurrent requests per split)
     batch_size: int = 32
 
     # --- Text-only mode ---
-    messages_field: str = ""  # Column containing chat messages
+    messages_field: str = ""
 
     # --- Vision mode ---
-    prompt: str = ""  # Fixed prompt for all rows
-    prompt_field: str = ""  # Column containing per-row prompts (overrides prompt)
-    image_field: str = ""  # Column containing single image (base64/bytes)
-    image_url_field: str = ""  # Column containing single image URL
-    images_field: str = ""  # Column containing list of images
+    prompt: str = ""
+    prompt_field: str = ""
+    image_field: str = ""
+    image_url_field: str = ""
+    images_field: str = ""
     detail: Literal["auto", "low", "high"] = "auto"
 
 
-class ExternalLLMOperator(HttpOperator):
+@operator(ExternalLLMOperatorConfig)
+class ExternalLLMOperator(Operator):
     """Operator for calling external LLM services via OpenAI-compatible API.
 
-    Use this operator to call external LLM services. For maximum throughput
-    with dedicated GPUs, use EmbeddedLLMOperator instead.
-
-    Supports three modes:
-    1. Text-only: messages_field contains chat messages
-    2. Single image: (prompt or prompt_field) + (image_field or image_url_field)
-    3. Multi-image: (prompt or prompt_field) + images_field
-
-    For vision modes, use `prompt` for a fixed prompt applied to all rows,
-    or `prompt_field` for per-row prompts from a column.
-
-    Usage:
-        # Text-only chat
-        config = ExternalLLMOperatorConfig(
-            base_url="http://server:8000",
-            model="Qwen/Qwen2.5-72B-Instruct",
-            messages_field="messages",
-        )
-
-        # Single image + fixed prompt (VLM)
-        config = ExternalLLMOperatorConfig(
-            base_url="http://server:8000",
-            model="Qwen/Qwen2.5-VL-72B-Instruct",
-            prompt="Describe this image in detail.",
-            image_field="image_base64",
-        )
-
-        # Single image + per-row prompt
-        config = ExternalLLMOperatorConfig(
-            base_url="http://server:8000",
-            model="Qwen/Qwen2.5-VL-72B-Instruct",
-            prompt_field="question",  # Each row has its own prompt
-            image_url_field="image_url",
-        )
-
-        # Multiple images + fixed prompt
-        config = ExternalLLMOperatorConfig(
-            base_url="http://server:8000",
-            model="Qwen/Qwen2.5-VL-72B-Instruct",
-            prompt="Describe the sequence of events in these frames.",
-            images_field="frames",
-        )
+    Async process_split with concurrent batch requests via asyncio.gather.
+    ModelClient handles endpoint discovery; the API call path is unified.
     """
 
     def __init__(self, config: ExternalLLMOperatorConfig, runtime: OperatorRuntime):
         super().__init__(config, runtime)
         self._config = config
+        self._http_client: Optional[httpx.AsyncClient] = None
+        self._model_client: Optional[Any] = None
 
-    def process_split(
+    def _get_http_client(self) -> httpx.AsyncClient:
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(timeout=self._config.timeout)
+        return self._http_client
+
+    def _get_model_client(self) -> Any:
+        if self._model_client is None:
+            from solstice.serve import ModelClient
+
+            assert self._config.registry is not None, (
+                "registry must be set in config when use_model_client=True"
+            )
+            self._model_client = ModelClient(
+                registry=self._config.registry,
+                cache_ttl_seconds=30.0,
+            )
+        return self._model_client
+
+    async def _resolve_endpoint(self) -> str:
+        """Resolve endpoint URL."""
+        if self._config.use_model_client:
+            return await self._get_model_client().get_endpoint(self._config.model)
+        return self._config.base_url
+
+    async def process_split(
         self, split: Split, payload: Optional[SplitPayload] = None
     ) -> Optional[SplitPayload]:
-        """Process a split by generating responses."""
+        """Process a split by generating responses concurrently."""
         if payload is None:
             return None
 
         table = payload.to_table()
 
-        # Determine mode and extract data
+        # Extract messages
         if self._config.messages_field:
             messages_list = extract_messages(table, self._config.messages_field)
         else:
             messages_list = self._build_vision_messages(table)
 
-        # Generate outputs
-        outputs = asyncio.run(self._generate_all(messages_list))
+        # Generate outputs in batches with asyncio.gather
+        outputs: list[str] = []
+        for i in range(0, len(messages_list), self._config.batch_size):
+            batch = messages_list[i : i + self._config.batch_size]
+            batch_results = await asyncio.gather(*(self._generate_one(m) for m in batch))
+            outputs.extend(batch_results)
 
         # Add outputs to table
         output_array = pa.array(outputs, type=pa.string())
@@ -190,12 +180,82 @@ class ExternalLLMOperator(HttpOperator):
             split_id=f"{split.split_id}_{self.worker_id}",
         )
 
+    async def _generate_one(self, messages: list[dict]) -> str:
+        """Generate response for a single message list with retries."""
+        endpoint = await self._resolve_endpoint()
+        url = f"{endpoint}/v1/chat/completions"
+        body = self._build_request_body(messages)
+
+        if self._config.use_model_client:
+            self._get_model_client().track_pending(endpoint)
+
+        try:
+            return await self._call_api(url, body)
+        except Exception as e:
+            self.logger.error(f"Failed to generate response: {e}")
+            if self._config.use_model_client:
+                self._get_model_client().invalidate_cache(self._config.model)
+            return f"[ERROR: {str(e)}]"
+        finally:
+            if self._config.use_model_client:
+                self._get_model_client().untrack_pending(endpoint)
+
+    async def _call_api(self, url: str, body: dict[str, Any]) -> str:
+        """POST to chat/completions endpoint with retries."""
+        client = self._get_http_client()
+        last_error: Optional[Exception] = None
+
+        for attempt in range(self._config.max_retries):
+            try:
+                response = await client.post(url, json=body)
+                response.raise_for_status()
+                return response.json()["choices"][0]["message"]["content"]
+            except (httpx.ConnectError, httpx.TimeoutException) as e:
+                last_error = e
+                self.logger.warning(
+                    f"Request failed (attempt {attempt + 1}/{self._config.max_retries}): {e}"
+                )
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code in (429, 500, 502, 503, 504):
+                    last_error = e
+                    self.logger.warning(
+                        f"Retryable HTTP {e.response.status_code} "
+                        f"(attempt {attempt + 1}/{self._config.max_retries})"
+                    )
+                else:
+                    raise
+            # Brief backoff before retry
+            await asyncio.sleep(0.5 * (attempt + 1))
+
+        raise RuntimeError(
+            f"All {self._config.max_retries} attempts failed for {url}: {last_error}"
+        )
+
+    def _build_request_body(self, messages: list[dict]) -> dict[str, Any]:
+        """Build OpenAI-compatible request body."""
+        body: dict[str, Any] = {
+            "messages": messages,
+            "max_tokens": self._config.max_tokens,
+            "temperature": self._config.temperature,
+            "top_p": self._config.top_p,
+        }
+
+        if self._config.model:
+            body["model"] = self._config.model
+        if self._config.top_k > 0:
+            body["top_k"] = self._config.top_k
+        if self._config.presence_penalty != 0.0:
+            body["presence_penalty"] = self._config.presence_penalty
+        if self._config.frequency_penalty != 0.0:
+            body["frequency_penalty"] = self._config.frequency_penalty
+
+        return body
+
     def _build_vision_messages(self, table: pa.Table) -> list[list[dict]]:
         """Build OpenAI-compatible vision messages from table."""
         prompts = extract_prompts(table, self._config.prompt_field, self._config.prompt)
         detail = self._config.detail
 
-        # Multi-image mode
         if self._config.images_field:
             if self._config.images_field not in table.column_names:
                 raise ValueError(f"Images field '{self._config.images_field}' not found.")
@@ -205,7 +265,6 @@ class ExternalLLMOperator(HttpOperator):
                 for prompt, images in zip(prompts, images_list)
             ]
 
-        # Single image mode
         images = extract_column(table, self._config.image_field, len(prompts))
         image_urls = extract_column(table, self._config.image_url_field, len(prompts))
         return [
@@ -213,40 +272,14 @@ class ExternalLLMOperator(HttpOperator):
             for prompt, image, url in zip(prompts, images, image_urls)
         ]
 
-    async def _generate_all(self, messages_list: list[list[dict]]) -> list[str]:
-        """Generate responses for all message lists."""
-        batch_size = self._config.batch_size
-        results: list[str] = []
-
-        for i in range(0, len(messages_list), batch_size):
-            batch = messages_list[i : i + batch_size]
-            tasks = [self._generate_one(messages) for messages in batch]
-            batch_results = await asyncio.gather(*tasks)
-            results.extend(batch_results)
-
-        return results
-
-    async def _generate_one(self, messages: list[dict]) -> str:
-        """Generate response for a single message list."""
-        endpoint = f"{self._config.base_url}/v1/chat/completions"
-
-        request_body: dict[str, Any] = {
-            "messages": messages,
-            "max_tokens": self._config.max_tokens,
-            "temperature": self._config.temperature,
-            "top_p": self._config.top_p,
-        }
-
-        if self._config.model:
-            request_body["model"] = self._config.model
-
-        try:
-            response = await self._request("POST", endpoint, json=request_body)
-            return response["choices"][0]["message"]["content"]
-        except Exception as e:
-            self.logger.error(f"Failed to generate response: {e}")
-            return f"[ERROR: {str(e)}]"
-
-
-# Set operator_class after definition
-ExternalLLMOperatorConfig.operator_class = ExternalLLMOperator
+    def close(self) -> None:
+        """Clean up resources."""
+        if self._http_client:
+            # Schedule async close if loop is running
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._http_client.aclose())
+            except RuntimeError:
+                pass
+            self._http_client = None
+        super().close()

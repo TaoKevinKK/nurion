@@ -125,6 +125,10 @@ class _RaySplitPayloadStoreActor:
         self._total_deleted = 0
         self._estimated_bytes = 0
 
+    def ping(self) -> bool:
+        """Health check - returns True when actor is ready."""
+        return True
+
     def register(self, key: str, ref_wrapper: dict) -> str:
         """Register an ObjectRef (wrapped in dict to prevent auto-deref) with a key."""
         self._refs[key] = ref_wrapper["ref"]
@@ -177,6 +181,7 @@ class RaySplitPayloadStore(SplitPayloadStore):
 
     Usage:
         store = RaySplitPayloadStore(name="my_store")
+        store.wait_ready()  # Ensure actor is initialized before use
 
         store.store("key", payload)
         payload = store.get("key")
@@ -199,6 +204,24 @@ class RaySplitPayloadStore(SplitPayloadStore):
     def actor_name(self) -> str:
         """Get the actor name."""
         return self._actor_name
+
+    def wait_ready(self, timeout: float = 30.0) -> None:
+        """Wait for the actor to be fully initialized.
+
+        Call this before starting any workers that will use the store.
+
+        Args:
+            timeout: Maximum seconds to wait
+
+        Raises:
+            TimeoutError: If actor doesn't respond within timeout
+        """
+        try:
+            ray.get(self._actor.ping.remote(), timeout=timeout)
+        except ray.exceptions.GetTimeoutError:
+            raise TimeoutError(
+                f"SplitPayloadStore actor '{self._actor_name}' did not become ready within {timeout}s"
+            )
 
     def store(self, key: str, payload: SplitPayload) -> str:
         # Put directly to object store with actor as owner

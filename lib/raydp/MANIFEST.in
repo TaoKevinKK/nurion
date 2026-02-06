@@ -2,4 +2,4 @@ include LICENSE
 include README.md
 include pyproject.toml
 recursive-include jars *.jar
-recursive-include java *.java *.scala *.xml
+recursive-include java *.java *.scala *.xml *.proto

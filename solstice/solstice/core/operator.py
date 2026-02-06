@@ -30,18 +30,32 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, fields
 from typing import (
     Any,
+    AsyncIterator,
     Callable,
     ClassVar,
+    Coroutine,
     Dict,
+    Iterator,
     Optional,
     Type,
     TypeVar,
+    Union,
     TYPE_CHECKING,
 )
 import asyncio
 import logging
 
 from solstice.core.models import SplitPayload, Split
+
+# All supported return types for process_split
+PayloadResult = Union[
+    None,  # drop (filter)
+    SplitPayload,  # single output (map)
+    Iterator[SplitPayload],  # multiple outputs (explode)
+    AsyncIterator[SplitPayload],  # async multiple outputs
+    Coroutine[Any, Any, Optional[SplitPayload]],  # async single
+    Coroutine[Any, Any, Iterator[SplitPayload]],  # async multiple
+]
 
 if TYPE_CHECKING:
     from solstice.core.stage_master import StageMaster
@@ -278,9 +292,20 @@ class Operator(ABC):
     # =========================================================================
 
     @abstractmethod
-    def process_split(
-        self, split: Split, payload: Optional[SplitPayload] = None
-    ) -> Optional[SplitPayload]:
+    def process_split(self, split: Split, payload: Optional[SplitPayload] = None) -> PayloadResult:
+        """Process a split. Can be sync or async, single or multi-output.
+
+        Return types:
+            None                        → drop (filter)
+            SplitPayload                → single output (map, 1:1)
+            Iterator[SplitPayload]      → multiple outputs (explode, 1:N)
+
+        All of the above also work as async:
+            async def process_split(self, split, payload):
+                ...
+                return payload           # single
+                yield payload1           # async generator (1:N)
+        """
         pass
 
     def close(self) -> None:
