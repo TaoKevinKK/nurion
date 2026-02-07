@@ -45,12 +45,13 @@ from typing import (
 import asyncio
 import logging
 
-from solstice.core.models import SplitPayload, Split
+from solstice.core.models import RawOutputBytes, SplitPayload, Split
 
 # All supported return types for process_split
 PayloadResult = Union[
     None,  # drop (filter)
     SplitPayload,  # single output (map)
+    RawOutputBytes,  # raw bytes to forward to output queue (sink commit)
     Iterator[SplitPayload],  # multiple outputs (explode)
     AsyncIterator[SplitPayload],  # async multiple outputs
     Coroutine[Any, Any, Optional[SplitPayload]],  # async single
@@ -58,6 +59,9 @@ PayloadResult = Union[
 ]
 
 if TYPE_CHECKING:
+    from solstice.core.models import QueueEndpoint
+    from solstice.core.source import SourceStrategy
+    from solstice.core.sink import SinkCommitter
     from solstice.core.stage_master import StageMaster
 
 
@@ -82,11 +86,14 @@ class OperatorRuntime:
         job_id: Job identifier
         stage_id: Stage identifier
         worker_id: Worker identifier
+        broker_endpoint: Optional queue broker endpoint for operators that
+            need direct queue access (e.g., sink operators pushing commit metadata)
     """
 
     job_id: str
     stage_id: str
     worker_id: str
+    broker_endpoint: Optional["QueueEndpoint"] = None
 
 
 # =============================================================================
@@ -201,11 +208,46 @@ class OperatorConfig(ABC):
 
     Class Variables:
         operator_class: The operator class to instantiate (set by @operator decorator)
-        master_class: The master class to use (None = use default StageMaster)
+        master_class: Optional override for stage orchestration (e.g., CCIterateMaster).
+            Most operators should use create_source() / create_sink_committer() instead.
     """
 
-    operator_class: ClassVar[Type["Operator"]]
-    master_class: ClassVar[Optional[Type["StageMaster"]]] = None  # Default: use StageMaster
+    operator_class: ClassVar[Optional[Type["Operator"]]] = None
+    master_class: ClassVar[Optional[Type["StageMaster"]]] = None
+
+    def get_merge_upstream(self) -> int:
+        """Number of upstream messages to merge into one process_split() call.
+
+        When > 1, StageWorker claims multiple messages, merges their
+        SplitPayloads (Arrow table concatenation), and calls process_split()
+        once with the merged data. All upstream messages are acked atomically
+        after processing via ack_and_forward.
+
+        Override in configs that benefit from larger batches (e.g., Lance sink
+        wants larger fragments rather than one per upstream message).
+
+        Default: 1 (no merge, process each message individually).
+        """
+        return 1
+
+    def create_source(self) -> Optional["SourceStrategy"]:
+        """Create a source strategy for this operator.
+
+        Override in source operator configs. Returns:
+        - SplitPlanner for regular sources (workers consume splits)
+        - DirectProducer for direct-write sources (no workers)
+        - None for non-source operators (default)
+        """
+        return None
+
+    def create_sink_committer(self) -> Optional["SinkCommitter"]:
+        """Create a sink committer for batched commit coordination.
+
+        Override in sink operator configs that need batched commits
+        (e.g., Lance sink with fragment write + queue-based commit).
+        Returns None for operators that don't need commit coordination.
+        """
+        return None
 
     def setup(self, runtime: OperatorRuntime) -> "Operator":
         """Create and return an operator instance with this configuration.
@@ -215,7 +257,16 @@ class OperatorConfig(ABC):
 
         Returns:
             Configured operator instance
+
+        Raises:
+            TypeError: If operator_class is not set (e.g., DirectProducer configs
+                that have no associated operator).
         """
+        if self.operator_class is None:
+            raise TypeError(
+                f"{type(self).__name__} has no operator_class. "
+                f"DirectProducer sources do not have operators."
+            )
         return self.operator_class(config=self, runtime=runtime)
 
     def to_dict(self) -> Dict[str, Any]:

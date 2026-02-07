@@ -16,7 +16,7 @@
 
 Tests the full pipeline flow:
 1. Create Lance dataset (local or S3)
-2. Run LanceSourceMaster through full pipeline with WorkQueue queue
+2. Run StageMaster (with LanceSplitPlanner) through full pipeline with WorkQueue queue
 3. Verify data is processed correctly
 """
 
@@ -36,8 +36,8 @@ from lance.dataset import write_dataset
 from tests.conftest import make_operator_runtime
 from solstice.core.models import Split
 from solstice.core.stage import Stage, StageRuntime
+from solstice.core.stage_master import StageMaster
 from solstice.operators.sources import LanceTableSourceConfig
-from solstice.operators.sources.lance import LanceSourceMaster
 
 pytestmark = pytest.mark.integration
 
@@ -191,7 +191,7 @@ class TestLancePipeline:
         """Test complete LanceSource pipeline with WorkQueue queue.
 
         This test verifies the full flow:
-        1. LanceSourceMaster starts and creates source queue
+        1. StageMaster (with LanceSplitPlanner) starts and creates planner queue
         2. Splits are written to source queue
         3. Workers consume splits and produce to output queue
         4. All data is processed through the pipeline
@@ -216,7 +216,7 @@ class TestLancePipeline:
             ),
             upstream_queue_name=None,
         )
-        master = LanceSourceMaster(
+        master = StageMaster(
             job_id="test-lance-pipeline",
             stage=source_stage,
             payload_store=payload_store,
@@ -226,12 +226,7 @@ class TestLancePipeline:
         # Start the full pipeline (creates queues, spawns workers)
         await master.start()
 
-        # Verify source queue was created
-        source_queue = master.get_source_client()
-        assert source_queue is not None
-        assert source_queue.health_check()
-
-        # Verify output queue was created
+        # Verify queue client was created (handles all queue operations)
         output_queue = master.get_queue_client()
         assert output_queue is not None
 
@@ -306,7 +301,7 @@ class TestLancePipeline:
             ),
             upstream_queue_name=None,
         )
-        master = LanceSourceMaster(
+        master = StageMaster(
             job_id="test-lance-s3-pipeline",
             stage=source_stage,
             payload_store=payload_store,

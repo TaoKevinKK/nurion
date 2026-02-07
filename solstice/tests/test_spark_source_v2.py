@@ -20,8 +20,6 @@ to output_queue with Arrow data embedded in payload_key.
 
 from __future__ import annotations
 
-import glob
-import os
 from pathlib import Path
 
 import pytest
@@ -29,40 +27,15 @@ import ray
 
 from solstice.core.models import SplitPayload
 from solstice.core.split_payload_store import RaySplitPayloadStore
-from solstice.core.stage import Stage
-from solstice.operators.sources.sparkv2 import (
-    SparkSourceV2Config,
-    SparkSourceV2Master,
-)
-from solstice.core.stage import StageRuntime
-from solstice.core.stage_master import QueueEndpoint
+from solstice.core.stage import Stage, StageRuntime
+from solstice.core.stage_master import QueueEndpoint, StageMaster
+from solstice.operators.sources.sparkv2 import SparkSourceV2Config
 
 
 # Test data path
 TESTDATA_DIR = Path(__file__).parent / "testdata" / "resources" / "spark"
 TEST_DATA_100 = TESTDATA_DIR / "test_data_100.parquet"
 TEST_DATA_1000 = TESTDATA_DIR / "test_data_1000.parquet"
-
-
-def _check_raydp_jars_available():
-    """Check if raydp JAR files are available."""
-    try:
-        from raydp.utils import code_search_path
-
-        paths = code_search_path()
-        for path in paths:
-            jars = glob.glob(os.path.join(path, "*.jar"))
-            # Check for raydp-specific jars (not just pyspark jars)
-            raydp_jars = [j for j in jars if "raydp" in os.path.basename(j).lower()]
-            if raydp_jars:
-                return True
-        return False
-    except Exception:
-        return False
-
-
-RAYDP_JARS_AVAILABLE = _check_raydp_jars_available()
-SKIP_RAYDP_REASON = "raydp JAR files not available (need to build java components)"
 
 
 def _wait_for_actor(store: RaySplitPayloadStore, timeout: float = 5.0):
@@ -81,9 +54,8 @@ def _wait_for_actor(store: RaySplitPayloadStore, timeout: float = 5.0):
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(not RAYDP_JARS_AVAILABLE, reason=SKIP_RAYDP_REASON)
 class TestSparkSourceV2Integration:
-    """Integration tests for SparkSourceV2Master.
+    """Integration tests for SparkDirectProducer.
 
     V2 writes directly to output_queue, bypassing source_queue and operators.
     """
@@ -115,7 +87,7 @@ class TestSparkSourceV2Integration:
             ),
             upstream_queue_name=None,
         )
-        master = SparkSourceV2Master(
+        master = StageMaster(
             job_id="test-v2-output",
             stage=source_stage,
             payload_store=payload_store,
@@ -185,7 +157,7 @@ class TestSparkSourceV2Integration:
             ),
             upstream_queue_name=None,
         )
-        master = SparkSourceV2Master(
+        master = StageMaster(
             job_id="test-v2-parallel",
             stage=source_stage,
             payload_store=payload_store,
@@ -233,7 +205,7 @@ class TestSparkSourceV2Integration:
             ),
             upstream_queue_name=None,
         )
-        master = SparkSourceV2Master(
+        master = StageMaster(
             job_id="test-v2-large",
             stage=source_stage,
             payload_store=payload_store,

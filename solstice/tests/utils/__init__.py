@@ -49,7 +49,7 @@ from .test_pipeline_factory import (
     SlowTransformConfig,
     SlowTransformOperator,
     TestSourceConfig,
-    TestSourceMaster,
+    TestSplitPlanner,
     TestSourceOperator,
     create_multi_stage_pipeline,
     create_test_pipeline,
@@ -71,7 +71,7 @@ __all__ = [
     # Pipeline factory
     "TestSourceConfig",
     "TestSourceOperator",
-    "TestSourceMaster",
+    "TestSplitPlanner",
     "PassthroughConfig",
     "PassthroughOperator",
     "SlowTransformConfig",

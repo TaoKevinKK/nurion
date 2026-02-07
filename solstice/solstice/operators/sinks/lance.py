@@ -12,26 +12,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Lance sink implementation."""
+"""Lance sink implementation with fragment-based writes and queue-based commits.
+
+Each worker writes fragments independently using lance.fragment.write_fragments()
+(no version/commit created). Fragment metadata is returned as RawOutputBytes,
+which StageWorker pushes to the commit queue via atomic ack_and_forward.
+
+This ensures:
+- No ack-before-write: upstream is only acked when fragment is written AND
+  metadata is pushed to the commit queue (atomic via ack_and_forward)
+- No queue client in operator: StageWorker handles all queue communication
+- Smart batched commits: LanceSinkCommitter in StageMaster accumulates
+  fragments and commits on a time/size schedule
+"""
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional, Set
+from typing import Dict, List, Literal, Optional, Set
 
 import pyarrow as pa
-from lance.dataset import write_dataset
-from tenacity import (
-    retry,
-    stop_after_attempt,
-    wait_exponential,
-    before_sleep_log,
-)
+from lance.fragment import write_fragments
 
-from solstice.core.models import Split, SplitPayload
-from solstice.core.operator import OperatorConfig, OperatorRuntime, operator
+from solstice.core.models import RawOutputBytes, Split, SplitPayload
+from solstice.core.operator import OperatorConfig, OperatorRuntime, PayloadResult, operator
 from solstice.core.sink_operator import SinkOperator
+from solstice.operators.sinks.lance_commit import LanceCommitPolicy, LanceSinkCommitter
 
 
 @dataclass
@@ -44,28 +53,66 @@ class LanceSinkConfig(OperatorConfig):
     mode: Literal["create", "append", "overwrite"] = "append"
     """Write mode for the table."""
 
-    buffer_size: int = 1000
-    """Number of records to buffer before flushing."""
-
     blob_columns: List[str] = field(default_factory=lambda: [])
     """Columns to store as Lance blobs (large binary with blob encoding)."""
 
     storage_options: Optional[Dict[str, str]] = None
     """Storage options for S3/cloud backends (e.g., aws_access_key_id, endpoint_url)."""
 
-    write_retry_attempts: int = 5
-    """Number of times to retry a failed write."""
+    # Merge upstream splits into larger fragments
+    merge_batch_size: int = 10
+    """Number of upstream messages to merge before writing a fragment.
+    Larger values produce fewer, bigger fragments. Default 10."""
 
-    write_retry_backoff_s: float = 0.5
-    """Base backoff in seconds between retries."""
+    # Commit policy
+    commit_interval_s: float = 30.0
+    """Minimum seconds between commits."""
 
-    write_retry_max_backoff_s: float = 10.0
-    """Maximum backoff in seconds between retries."""
+    commit_fragment_threshold: int = 10
+    """Commit when this many fragments accumulate."""
+
+    commit_row_threshold: int = 100_000
+    """Commit when this many rows accumulate (0 = disabled)."""
+
+    def get_merge_upstream(self) -> int:
+        return self.merge_batch_size
+
+    def create_sink_committer(self) -> LanceSinkCommitter:
+        """Create a sink committer for batched Lance commits."""
+        storage_options = self.storage_options
+        if storage_options is None and self.table_path.startswith("s3://"):
+            from solstice.utils.remote import get_lance_storage_options
+
+            bucket = self.table_path[5:].split("/")[0]
+            storage_options = get_lance_storage_options(bucket)
+
+        return LanceSinkCommitter(
+            table_path=self.table_path,
+            mode=self.mode,
+            policy=LanceCommitPolicy(
+                interval_s=self.commit_interval_s,
+                fragment_threshold=self.commit_fragment_threshold,
+                row_threshold=self.commit_row_threshold,
+            ),
+            storage_options=storage_options,
+        )
 
 
 @operator(LanceSinkConfig)
 class LanceSink(SinkOperator):
-    """Sink that writes records to a Lance table."""
+    """Sink that writes records to a Lance table via fragment-based writes.
+
+    Each process_split() call:
+    1. Writes a fragment via lance.fragment.write_fragments() (no commit)
+    2. Returns RawOutputBytes with fragment metadata JSON
+
+    StageWorker handles the rest:
+    - Pushes fragment metadata to the commit queue via ack_and_forward
+    - The ack is atomic with the push, ensuring no data loss
+
+    No internal buffering across splits -- each split becomes a fragment.
+    The LanceSinkCommitter batches fragments into commits.
+    """
 
     def __init__(self, config: LanceSinkConfig, runtime: OperatorRuntime):
         super().__init__(config, runtime)
@@ -73,20 +120,11 @@ class LanceSink(SinkOperator):
             raise ValueError("table_path is required for LanceSink")
 
         self.table_path = config.table_path
-        self.mode = config.mode
-        self.buffer_size = config.buffer_size
         self.blob_columns: Set[str] = set(config.blob_columns)
-        self.write_retry_attempts = max(1, config.write_retry_attempts)
-        self.write_retry_backoff_s = max(0.0, config.write_retry_backoff_s)
-        self.write_retry_max_backoff_s = max(
-            self.write_retry_backoff_s, config.write_retry_max_backoff_s
-        )
 
-        # Auto-configure storage options for S3 paths
         if config.storage_options:
             self.storage_options = config.storage_options
         elif self.table_path.startswith("s3://"):
-            # Extract bucket from s3://bucket/path
             from solstice.utils.remote import get_lance_storage_options
 
             bucket = self.table_path[5:].split("/")[0]
@@ -95,98 +133,76 @@ class LanceSink(SinkOperator):
             self.storage_options = None  # type: ignore[assignment]
 
         self.logger = logging.getLogger(self.__class__.__name__)
-        self.buffer: List[Dict[str, Any]] = []
-        self.table = None
 
-    def process_split(
-        self, split: Split, batch: Optional[SplitPayload] = None
-    ) -> Optional[SplitPayload]:
+    def process_split(self, split: Split, batch: Optional[SplitPayload] = None) -> PayloadResult:
+        """Write a fragment and return metadata for the commit queue.
+
+        Each call writes a fragment immediately via write_fragments().
+        Returns RawOutputBytes containing the serialized FragmentMetadata,
+        which StageWorker pushes to the commit queue atomically with the
+        upstream ack.
+        """
         if batch is None:
             raise ValueError("LanceSink requires a batch")
-        self.buffer.extend(batch.to_pylist())
-        if len(self.buffer) >= self.buffer_size:
-            self._flush()
-        return None
 
-    def _flush(self) -> None:
-        if not self.buffer:
-            return
+        table = self._build_table(batch)
+        if table.num_rows == 0:
+            return None
+
+        # Write fragment (NO version/commit created)
+        fragments = write_fragments(
+            table,
+            self.table_path,
+            schema=table.schema,
+            storage_options=self.storage_options,
+        )
+
+        # Return fragment metadata + schema as raw bytes for the commit queue.
+        # Schema is needed by the committer for the first Overwrite commit
+        # (dataset doesn't exist yet, so it can't read schema from disk).
+        schema_b64 = base64.b64encode(table.schema.serialize().to_pybytes()).decode()
+        payloads = [
+            json.dumps({"fragment": frag.to_json(), "schema_b64": schema_b64}).encode()
+            for frag in fragments
+        ]
+        return RawOutputBytes(payloads=payloads)
+
+    def _build_table(self, batch: SplitPayload) -> pa.Table:
+        """Build PyArrow table from batch, handling reserved columns and blob encoding."""
+        records = batch.to_pylist()
 
         # Filter out reserved Lance column names
         reserved_columns = {"_rowid", "_rowaddr"}
-        filtered_buffer = []
-        for record in self.buffer:
-            filtered_record = {k: v for k, v in record.items() if k not in reserved_columns}
-            filtered_buffer.append(filtered_record)
+        filtered = [
+            {k: v for k, v in record.items() if k not in reserved_columns} for record in records
+        ]
 
-        # Create table from pylist first
-        table = pa.Table.from_pylist(filtered_buffer)
+        table = pa.Table.from_pylist(filtered)
 
-        # Check if we need to add blob metadata to any columns
+        # Apply blob column encoding
         has_blob_columns = any(col in self.blob_columns for col in table.column_names)
-
         if has_blob_columns:
-            # Rebuild schema with blob metadata for binary columns
             new_fields = []
-            for field in table.schema:
-                if field.name in self.blob_columns:
-                    # Add Lance blob encoding metadata
-                    metadata = dict(field.metadata) if field.metadata else {}
+            for f in table.schema:
+                if f.name in self.blob_columns:
+                    metadata = dict(f.metadata) if f.metadata else {}
                     metadata[b"lance-encoding:blob"] = b"true"
-                    new_field = pa.field(field.name, pa.large_binary(), metadata=metadata)
-                    new_fields.append(new_field)
+                    new_fields.append(pa.field(f.name, pa.large_binary(), metadata=metadata))
                 else:
-                    new_fields.append(field)
+                    new_fields.append(f)
 
             new_schema = pa.schema(new_fields)
-
-            # Cast table to new schema with blob columns
             new_columns = []
-            for i, field in enumerate(table.schema):
+            for i, f in enumerate(table.schema):
                 col = table.column(i)
-                if field.name in self.blob_columns:
-                    # Cast to large_binary for blob storage
+                if f.name in self.blob_columns:
                     col = col.cast(pa.large_binary())
                 new_columns.append(col)
 
             table = pa.table(dict(zip(table.column_names, new_columns)), schema=new_schema)
 
-        # Write with retry using tenacity
-        self._write_with_retry(table)
-
-        if self.table is None:
-            self.mode = "append"
-
-        blob_info = (
-            f" (blob columns: {list(self.blob_columns & set(table.column_names))})"
-            if has_blob_columns
-            else ""
-        )
-        self.logger.info(f"Flushed {len(self.buffer)} records to Lance table{blob_info}")
-        self.buffer.clear()
-
-    def _write_with_retry(self, table: pa.Table) -> None:
-        """Write table to Lance with retry logic."""
-
-        @retry(
-            stop=stop_after_attempt(self.write_retry_attempts),
-            wait=wait_exponential(
-                multiplier=self.write_retry_backoff_s,
-                max=self.write_retry_max_backoff_s,
-            ),
-            before_sleep=before_sleep_log(self.logger, logging.WARNING),
-            reraise=True,
-        )
-        def _do_write() -> None:
-            write_dataset(
-                table,
-                self.table_path,
-                mode=self.mode if self.table is None else "append",
-                storage_options=self.storage_options,
-            )
-
-        _do_write()
+        return table
 
     def close(self) -> None:
-        """Flush remaining buffered records when closing."""
-        self._flush()
+        """No cleanup needed -- no buffer, no queue client."""
+        pass

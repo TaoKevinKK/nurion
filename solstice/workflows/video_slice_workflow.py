@@ -131,7 +131,7 @@ def create_job(
         sink_config = LanceSinkConfig(
             table_path=output_path,
             mode="overwrite",
-            buffer_size=config.get("sink_buffer_size", 256),
+            merge_batch_size=config.get("sink_buffer_size", 256),
             blob_columns=["slice_binary"],
         )
     else:

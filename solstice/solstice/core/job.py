@@ -51,8 +51,6 @@ class JobConfig:
         ray_init_kwargs: Arguments to pass to ray.init()
         autoscale_config: Configuration for autoscaling (None to disable)
         webui: WebUI debugging interface configuration
-        checkpoint_path: Path for checkpoint storage (local or s3://)
-        recover_from_checkpoint: Whether to recover from existing checkpoint on startup
     """
 
     workqueue_db_path: str = "memory://"
@@ -61,8 +59,6 @@ class JobConfig:
     ray_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     autoscale_config: Optional["AutoscaleConfig"] = None
     webui: WebUIConfig = field(default_factory=WebUIConfig)
-    checkpoint_path: str = "/tmp/solstice-checkpoints/"
-    recover_from_checkpoint: bool = True
 
 
 class Job:

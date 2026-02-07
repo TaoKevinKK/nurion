@@ -5,17 +5,17 @@ from solstice.operators.sources.iceberg import IcebergSource, IcebergSourceConfi
 from solstice.operators.sources.lance import (
     LanceTableSource,
     LanceTableSourceConfig,
-    LanceSourceMaster,
+    LanceSplitPlanner,
 )
-from solstice.operators.sources.source import SourceMaster
+from solstice.core.source import SplitPlanner
 from solstice.operators.sources.spark import (
     SparkSource,
     SparkSourceConfig,
-    SparkSourceMaster,
+    SparkSplitPlanner,
 )
 from solstice.operators.sources.sparkv2 import (
     SparkSourceV2Config,
-    SparkSourceV2Master,
+    SparkDirectProducer,
 )
 
 __all__ = [
@@ -28,14 +28,14 @@ __all__ = [
     # Lance source
     "LanceTableSource",
     "LanceTableSourceConfig",
-    "LanceSourceMaster",
-    # Source base
-    "SourceMaster",
+    "LanceSplitPlanner",
+    # Source protocol
+    "SplitPlanner",
     # Spark source V1
     "SparkSource",
     "SparkSourceConfig",
-    "SparkSourceMaster",
-    # Spark source V2 (simplified - no operator needed)
+    "SparkSplitPlanner",
+    # Spark source V2 (DirectProducer - no operator needed)
     "SparkSourceV2Config",
-    "SparkSourceV2Master",
+    "SparkDirectProducer",
 ]

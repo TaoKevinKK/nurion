@@ -32,7 +32,6 @@ from solstice.core.stage import Stage
 from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime
 from solstice.core.models import Split, SplitPayload
 from solstice.runtime.ray_runner import RayJobRunner
-from solstice.operators.sources.source import SourceMaster
 
 pytestmark = pytest.mark.asyncio(loop_scope="function")
 
@@ -56,7 +55,7 @@ class MockSourceOperator(Operator):
         for i in range(num_batches):
             splits.append(
                 Split(
-                    split_id=f"source_split_{i}",
+                    split_id=f"split_{i}",
                     stage_id="source",
                     data_range={
                         "start": i * self.config.batch_size,
@@ -95,32 +94,36 @@ class MockSourceConfig(OperatorConfig):
     num_records: int = 100
     batch_size: int = 10
 
+    def create_source(self) -> "MockSplitPlanner":
+        return MockSplitPlanner(self)
+
 
 # Set operator_class after class definition
 MockSourceConfig.operator_class = MockSourceOperator
 
 
-class MockSourceMaster(SourceMaster):
-    """Test source master that generates splits from config."""
+class MockSplitPlanner:
+    """Test split planner that generates splits from config."""
 
-    def plan_splits(self):
+    def __init__(self, config: MockSourceConfig):
+        self._config = config
+
+    def cleanup(self) -> None:
+        pass
+
+    def plan_splits(self, stage_id: str):
         """Generate splits based on operator config."""
-        config = self.stage.operator_config
-        num_batches = config.num_records // config.batch_size
+        num_batches = self._config.num_records // self._config.batch_size
 
         for i in range(num_batches):
             yield Split(
-                split_id=f"source_split_{i}",
-                stage_id=self.stage_id,
+                split_id=f"split_{i}",
+                stage_id=stage_id,
                 data_range={
-                    "start": i * config.batch_size,
-                    "end": (i + 1) * config.batch_size,
+                    "start": i * self._config.batch_size,
+                    "end": (i + 1) * self._config.batch_size,
                 },
             )
-
-
-# Set master_class after class definition
-MockSourceConfig.master_class = MockSourceMaster
 
 
 class MockTransformOperator(Operator):

@@ -29,7 +29,6 @@ from solstice.core.job import Job, JobConfig
 from solstice.core.models import Split, SplitPayload
 from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime
 from solstice.core.stage import Stage
-from solstice.operators.sources.source import SourceMaster
 
 from .collecting_sink import CollectingSinkConfig
 
@@ -49,9 +48,11 @@ class TestSourceConfig(OperatorConfig):
     # Pre-generated data (optional, for custom test data)
     source_data: Optional[List[Dict]] = None
 
+    def create_source(self) -> "TestSplitPlanner":
+        return TestSplitPlanner(self)
+
 
 TestSourceConfig.operator_class = None  # Will be set below
-TestSourceConfig.master_class = None  # Will be set below
 
 
 class TestSourceOperator(Operator):
@@ -72,7 +73,7 @@ class TestSourceOperator(Operator):
             end = min((i + 1) * self.config.batch_size, self.config.num_records)
             splits.append(
                 Split(
-                    split_id=f"source_split_{i}",
+                    split_id=f"split_{i}",
                     stage_id="source",
                     data_range={
                         "start": start,
@@ -131,28 +132,32 @@ class TestSourceOperator(Operator):
 TestSourceConfig.operator_class = TestSourceOperator
 
 
-class TestSourceMaster(SourceMaster):
-    """Test source master that generates splits from config."""
+class TestSplitPlanner:
+    """Test split planner that generates splits from config."""
 
-    def plan_splits(self):
+    def __init__(self, config: TestSourceConfig):
+        self._config = config
+
+    def cleanup(self) -> None:
+        pass
+
+    def plan_splits(self, stage_id: str):
         """Generate splits based on operator config."""
-        config = self.stage.operator_config
-        num_batches = (config.num_records + config.batch_size - 1) // config.batch_size
+        num_batches = (
+            self._config.num_records + self._config.batch_size - 1
+        ) // self._config.batch_size
 
         for i in range(num_batches):
-            start = i * config.batch_size
-            end = min((i + 1) * config.batch_size, config.num_records)
+            start = i * self._config.batch_size
+            end = min((i + 1) * self._config.batch_size, self._config.num_records)
             yield Split(
-                split_id=f"source_split_{i}",
-                stage_id=self.stage_id,
+                split_id=f"split_{i}",
+                stage_id=stage_id,
                 data_range={
                     "start": start,
                     "end": end,
                 },
             )
-
-
-TestSourceConfig.master_class = TestSourceMaster
 
 
 # ============================================================================

@@ -52,6 +52,7 @@ class MockStageMaster:
         self._workers = {f"worker_{i}": MagicMock() for i in range(worker_count)}
         self._running = True
         self._finished = False
+        self._source = None  # Not a source stage by default
 
         # Stage (replaces config)
         self.stage = MagicMock()
@@ -93,7 +94,7 @@ class MockStageMaster:
 
 
 class MockSourceMaster:
-    """Mock SourceMaster for testing (should be skipped by autoscaler)."""
+    """Mock source master for testing (should be skipped by autoscaler)."""
 
     def __init__(self, stage_id: str = "source_stage"):
         self.stage_id = stage_id
@@ -491,7 +492,7 @@ class TestMetricsCollection:
             stage_queue_configs={"stage_a": stage_cfg},
         )
 
-        # Collect metrics - MockStageMaster is not a SourceMaster
+        # Collect metrics - MockStageMaster is not a source stage
         metrics = await autoscaler._collect_metrics({"stage_a": master})
 
         assert "stage_a" in metrics
@@ -501,11 +502,10 @@ class TestMetricsCollection:
         assert metrics["stage_a"].is_source is False
 
     async def test_source_stage_marked_correctly(self):
-        from solstice.operators.sources.source import SourceMaster
-
-        # Create a mock that passes isinstance check
-        source = MagicMock(spec=SourceMaster)
+        # Create a mock StageMaster with _source set (indicating it's a source stage)
+        source = MagicMock()
         source.stage_id = "source"
+        source._source = MagicMock()  # Non-None means it's a source stage
         source._workers = {"worker_0": MagicMock()}
         source._running = True
         source._finished = False
@@ -519,9 +519,7 @@ class TestMetricsCollection:
             backpressure_threshold_lag=1000,
             backpressure_threshold_queue_size=1000,
         )
-        stats_client = FakeQueueStatsClient(
-            {"output_source": QueueStats(pending_count=25)}
-        )
+        stats_client = FakeQueueStatsClient({"output_source": QueueStats(pending_count=25)})
         autoscaler = SimpleAutoscaler(
             queue_stats_client=stats_client,
             stage_queue_configs={"source": stage_cfg},

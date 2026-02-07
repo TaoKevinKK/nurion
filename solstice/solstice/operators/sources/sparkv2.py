@@ -21,25 +21,25 @@ Key improvements over V1:
 - Eliminates Python-side plan_splits() iteration
 - Eliminates source_queue and operator read step
 - JVM writes directly to output_queue with managed ObjectRef lifetime
-- Single serialization path (Spark → Arrow → Object Store → output_queue)
+- Single serialization path (Spark -> Arrow -> Object Store -> output_queue)
 
 Architecture:
     ┌─────────────────────────────────────────────────────────────┐
-    │                    SparkSourceV2Master                       │
-    │  (Python - control plane)                                    │
+    │                    SparkDirectProducer                        │
+    │  (Python - control plane, via StageMaster)                   │
     │                                                              │
-    │  1. Create output_queue                                      │
+    │  1. Create output_queue (StageMaster handles this)           │
     │  2. Call JVM with (storeActorName, queueEndpoint)           │
     │  3. Wait for JVM to complete                                 │
-    │  4. Update metrics, notify downstream                        │
+    │  4. Return count, StageMaster marks complete                 │
     └──────────────────────────┬──────────────────────────────────┘
                                │
                                ▼
     ┌─────────────────────────────────────────────────────────────┐
     │                    JVM (Spark Executor)                      │
     │                                                              │
-    │  1. Ray.put(arrowBytes, owner=storeActor)  ← managed lifetime│
-    │  2. Kafka produce to output_queue          ← direct write    │
+    │  1. Ray.put(arrowBytes, owner=storeActor)  <- managed       │
+    │  2. Produce to output_queue                <- direct write   │
     │     payload_key = "_v2ref:{object_id_b64}"                   │
     └─────────────────────────────────────────────────────────────┘
                                │
@@ -49,9 +49,9 @@ Architecture:
     │                                                              │
     │  1. Consume from output_queue                                │
     │  2. payload_store.get(payload_key)                          │
-    │     → detects _v2ref: prefix                                 │
-    │     → reconstructs ObjectRef from ID                         │
-    │     → ray.get() → auto-convert Arrow to SplitPayload        │
+    │     -> detects _v2ref: prefix                                │
+    │     -> reconstructs ObjectRef from ID                        │
+    │     -> ray.get() -> auto-convert Arrow to SplitPayload       │
     └─────────────────────────────────────────────────────────────┘
 
 Usage:
@@ -65,19 +65,15 @@ Usage:
 
 from __future__ import annotations
 
-import time
+import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterator, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 
-from solstice.core.models import Split
 from solstice.core.operator import OperatorConfig
-from solstice.core.stage_master import StageMaster
-from solstice.utils.logging import create_ray_logger
+from solstice.core.source import DirectProduceContext
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession, DataFrame
-    from solstice.core.stage import Stage, StageRuntime
-    from solstice.core.split_payload_store import SplitPayloadStore
 
 
 # Type alias for the DataFrame factory function
@@ -114,101 +110,35 @@ class SparkSourceV2Config(OperatorConfig):
     # Output configuration
     parallelism: Optional[int] = None
 
+    def create_source(self) -> "SparkDirectProducer":
+        """Create a direct producer for this Spark V2 source."""
+        return SparkDirectProducer(self)
 
-class SparkSourceV2Master(StageMaster):
-    """Spark Source V2: JVM writes directly to output_queue.
 
-    This is a simplified source master that:
-    - Does NOT use source_queue (JVM writes directly to output_queue)
-    - Does NOT need operators (data is already in Object Store)
-    - Only acts as control plane for Spark initialization and metrics
+class SparkDirectProducer:
+    """Produces data directly via Spark JVM to the output queue.
 
-    The downstream stage workers:
-    - Consume from output_queue
-    - Call payload_store.get(payload_key) which handles _v2ref: prefix
-    - Receive SplitPayload directly (auto-converted from Arrow)
+    Implements the DirectProducer protocol. JVM-side executors write
+    Arrow data directly to the output queue, bypassing workers entirely.
     """
 
-    def __init__(
-        self,
-        job_id: str,
-        stage: "Stage",
-        payload_store: "SplitPayloadStore",
-        runtime: "StageRuntime",
-        **kwargs,
-    ):
-        # Get config from stage.operator_config
-        operator_cfg = stage.operator_config
-        if not isinstance(operator_cfg, SparkSourceV2Config):
-            raise TypeError(
-                f"SparkSourceV2Master requires SparkSourceV2Config, got {type(operator_cfg)}"
-            )
-
-        # SparkSourceV2 has no workers (JVM writes directly)
-        # We still call parent init which will initialize with 0 workers
-        super().__init__(
-            job_id=job_id,
-            stage=stage,
-            payload_store=payload_store,
-            runtime=runtime,
-        )
-
-        self._config = operator_cfg
-        self._spark: Any = None  # SparkSession, typed as Any due to raydp dynamic API
+    def __init__(self, config: SparkSourceV2Config):
+        self._config = config
+        self._spark: Any = None
         self._spark_initialized = False
-        self._splits_produced = 0
+        self._logger = logging.getLogger("SparkDirectProducer")
 
-        # Override logger
-        self.logger = create_ray_logger(f"SparkSourceV2Master-{self.stage_id}")
-
-    async def start(self) -> None:
-        """Start the source master.
-
-        V2 simplified flow:
-        1. Create output_queue
-        2. Execute Spark write (JVM writes directly to output_queue)
-        3. Mark as complete
-        """
-        if self._running:
-            return
-
-        self.logger.info(f"Starting SparkSourceV2 {self.stage_id}")
-        self._start_time = time.time()
-        self._running = True
-
-        # 1. Create output queue (JVM will write directly to this)
-        await self._create_queue_client()
-
-        # 2. Execute Spark write (JVM writes to Object Store + output_queue)
-        splits_count = await self._execute_spark_write()
-        self._splits_produced = splits_count
-
-        self.logger.info(
-            f"SparkSourceV2 {self.stage_id} completed: {splits_count} splits "
-            f"written directly to output_queue"
-        )
-
-        # V2 is complete immediately - no workers to spawn
-        # Downstream stage will consume from our output_queue
-
-    async def _execute_spark_write(self) -> int:
-        """Execute Spark write via JVM with backpressure awareness.
+    async def produce(self, ctx: DirectProduceContext) -> int:
+        """Execute Spark write via JVM.
 
         JVM writes directly to output_queue:
         1. Ray.put(arrowBytes, owner=storeActor) - managed lifetime
-        2. Kafka produce to output_queue with payload_key = "_v2ref:{id}"
-
-        Note: Current implementation writes all data at once. For true backpressure
-        support, JVM-side streaming write with periodic backpressure checks is needed.
-        This is a TODO for future enhancement.
+        2. Produce to output_queue with payload_key = "_v2ref:{id}"
 
         Returns:
             Number of splits written
         """
         import raydp
-
-        # Note: Backpressure checking is not supported in V2 batch write.
-        # For true backpressure support, JVM-side streaming write is needed.
 
         # Initialize Spark
         spark_configs = {
@@ -224,7 +154,7 @@ class SparkSourceV2Master(StageMaster):
             configs=spark_configs,
         )
         self._spark_initialized = True
-        self.logger.info(f"Initialized Spark session: {self._config.app_name}")
+        self._logger.info(f"Initialized Spark session: {self._config.app_name}")
 
         # Get DataFrame
         if self._config.dataframe_fn is None:
@@ -242,16 +172,12 @@ class SparkSourceV2Master(StageMaster):
                 df = df.repartition(self._config.parallelism)
 
         # Output queue connection info
-        assert self.broker_endpoint is not None, "broker_endpoint not set"
-        queue_bootstrap = f"{self.broker_endpoint.host}:{self.broker_endpoint.port}"
-        queue_topic = self._output_queue_name
+        queue_bootstrap = f"{ctx.broker_endpoint.host}:{ctx.broker_endpoint.port}"
+        queue_topic = ctx.output_queue_name
 
-        self.logger.info(f"JVM writing directly to output_queue: {queue_bootstrap}/{queue_topic}")
+        self._logger.info(f"JVM writing directly to output_queue: {queue_bootstrap}/{queue_topic}")
 
         # Call JVM method to write Arrow data directly to output_queue
-        # TODO: For true backpressure support, this should be a streaming write
-        # that periodically checks backpressure and pauses/resumes accordingly.
-        # This requires JVM-side changes to support incremental writes.
         jvm: Any = df.sql_ctx.sparkSession.sparkContext._jvm
         writer = jvm.org.apache.spark.sql.raydp.ObjectStoreWriter(df._jdf)
 
@@ -259,34 +185,18 @@ class SparkSourceV2Master(StageMaster):
             False,  # useBatch
             queue_bootstrap,
             queue_topic,
-            self.stage_id,
+            ctx.stage_id,
         )
 
-        self.logger.info(f"JVM write completed: {count} splits to output_queue")
-
+        self._logger.info(f"JVM write completed: {count} splits to output_queue")
         return count
 
-    def plan_splits(self) -> Iterator[Split]:
-        """Not used in V2 - JVM writes directly to output_queue."""
-        raise NotImplementedError(
-            "V2 does not use plan_splits(). JVM writes directly to output_queue."
-        )
-
-    async def stop(self) -> None:
-        """Stop the source master and cleanup Spark."""
-        await super().stop()
-        self._stop_spark()
-
-    def _stop_spark(self) -> None:
-        """Internal method to stop Spark session."""
+    def cleanup(self) -> None:
+        """Stop Spark session."""
         if self._spark_initialized:
             import raydp
 
             raydp.stop_spark()
             self._spark = None
             self._spark_initialized = False
-            self.logger.info("Stopped Spark session")
-
-
-# Set master_class after class definition
-SparkSourceV2Config.master_class = SparkSourceV2Master
+            self._logger.info("Stopped Spark session")

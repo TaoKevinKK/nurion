@@ -26,16 +26,11 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, TYPE_CHECKING, Union
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 import ray
 
 from solstice.core.job import Job
-from solstice.checkpoint import (
-    FsspecCheckpointStorage,
-    JobCheckpointData,
-    recover_from_checkpoint,
-)
 
 if TYPE_CHECKING:
     from solstice.core.stage import Stage
@@ -46,7 +41,6 @@ from solstice.core.stage_master import (
     StageMaster,
     QueueEndpoint,
 )
-from solstice.operators.sources.source import SourceMaster
 from solstice.core.split_payload_store import RaySplitPayloadStore
 from solstice.queue import WorkQueueBrokerManager
 from solstice.runtime.autoscaler import SimpleAutoscaler
@@ -108,7 +102,7 @@ class RayJobRunner:
         self._payload_store: Optional[RaySplitPayloadStore] = None
 
         # Stage masters (not Ray actors - they manage their own workers)
-        self._masters: Dict[str, Union[StageMaster, SourceMaster]] = {}
+        self._masters: Dict[str, StageMaster] = {}
         self._master_tasks: Dict[str, asyncio.Task] = {}
 
         # Autoscaler (configured in run())
@@ -137,10 +131,6 @@ class RayJobRunner:
 
         # DAG info
         self._reverse_dag: Dict[str, List[str]] = {}
-
-        # Checkpoint recovery
-        self._checkpoint_storage: Optional[FsspecCheckpointStorage] = None
-        self._recovered_checkpoint: Optional[JobCheckpointData] = None
 
     def _ensure_ray(self) -> None:
         """Ensure Ray is initialized."""
@@ -185,44 +175,6 @@ class RayJobRunner:
             self._shared_broker = None
             self._broker_endpoint = None
 
-    async def _try_recover_checkpoint(self) -> None:
-        """Try to recover from a checkpoint if enabled.
-
-        Sets self._recovered_checkpoint if a valid checkpoint is found.
-        """
-        config = self.job.config
-
-        # Check if recovery is enabled
-        if not config.recover_from_checkpoint:
-            self.logger.debug("Checkpoint recovery disabled")
-            return
-
-        checkpoint_path = config.checkpoint_path
-        if not checkpoint_path:
-            self.logger.debug("No checkpoint path configured")
-            return
-
-        # Create checkpoint storage
-        self._checkpoint_storage = FsspecCheckpointStorage(
-            base_path=checkpoint_path,
-            job_id=self.job.job_id,
-        )
-
-        # Try to load checkpoint
-        checkpoint, result = await recover_from_checkpoint(
-            storage=self._checkpoint_storage,
-            job_id=self.job.job_id,
-        )
-
-        if result.recovered and checkpoint:
-            self._recovered_checkpoint = checkpoint
-            self.logger.info(
-                f"Recovered from checkpoint {result.checkpoint_id}, "
-                f"iteration={checkpoint.iteration}"
-            )
-        elif result.error:
-            self.logger.warning(f"Checkpoint recovery failed: {result.error}")
-
     async def initialize(self) -> None:
         """Initialize the pipeline."""
         if self._initialized:
@@ -236,9 +188,6 @@ class RayJobRunner:
         self._payload_store = RaySplitPayloadStore(name=f"payload_store_{self.job.job_id}")
         self._payload_store.wait_ready()
         self.logger.info(f"Created SplitPayloadStore for job {self.job.job_id}")
-
-        # Try to recover from checkpoint if enabled
-        await self._try_recover_checkpoint()
 
         # Create shared WorkQueue broker for all stages (if using WorkQueue)
         await self._create_shared_broker()
@@ -392,26 +341,32 @@ class RayJobRunner:
         self,
         stage: "Stage",
         runtime: StageRuntime,
-    ) -> Union[StageMaster, SourceMaster]:
+    ) -> StageMaster:
         """Create appropriate master for a stage.
 
-        Uses operator_config.master_class if specified, otherwise defaults
-        to StageMaster.
+        Uses operator_config.master_class if specified (for special orchestration
+        like CCIterateMaster), otherwise creates StageMaster with optional
+        source strategy and sink committer from operator config.
 
         Args:
             stage: The stage definition
             runtime: Immutable runtime parameters
         """
-        master_class = stage.operator_config.master_class
-
-        if master_class is None:
-            # Default to StageMaster for regular operators
-            master_class = StageMaster
-
         # Payload store must be initialized before creating masters
         assert self._payload_store is not None, "payload_store not initialized"
 
-        return master_class(
+        # Check for special orchestration (e.g., CCIterateMaster)
+        master_class = stage.operator_config.master_class
+        if master_class is not None:
+            return master_class(
+                job_id=self.job.job_id,
+                stage=stage,
+                payload_store=self._payload_store,
+                runtime=runtime,
+            )
+
+        # Default: StageMaster (internally calls create_source/create_sink_committer)
+        return StageMaster(
             job_id=self.job.job_id,
             stage=stage,
             payload_store=self._payload_store,
@@ -668,61 +623,6 @@ class RayJobRunner:
     @property
     def is_initialized(self) -> bool:
         return self._initialized
-
-    # === Autoscaling Manual Intervention API ===
-
-    def set_stage_workers(self, stage_id: str, count: int) -> None:
-        """Set a fixed worker count for a stage (manual override).
-
-        This will override automatic scaling decisions for the specified stage.
-        Use `clear_stage_workers()` to return to automatic scaling.
-
-        Args:
-            stage_id: The stage to configure
-            count: Fixed number of workers to maintain
-        """
-        if not self._autoscaler:
-            self.logger.warning("Autoscaler not enabled, ignoring set_stage_workers")
-            return
-        self._autoscaler.set_fixed_workers(stage_id, count)
-
-    def clear_stage_workers(self, stage_id: str) -> None:
-        """Clear manual override, return stage to automatic scaling."""
-        if not self._autoscaler:
-            return
-        self._autoscaler.clear_fixed_workers(stage_id)
-
-    def freeze_stage(self, stage_id: str) -> None:
-        """Freeze a stage (disable autoscaling for it)."""
-        if not self._autoscaler:
-            self.logger.warning("Autoscaler not enabled, ignoring freeze_stage")
-            return
-        self._autoscaler.freeze_stage(stage_id)
-
-    def unfreeze_stage(self, stage_id: str) -> None:
-        """Unfreeze a stage (re-enable autoscaling)."""
-        if not self._autoscaler:
-            return
-        self._autoscaler.unfreeze_stage(stage_id)
-
-    def pause_autoscaling(self) -> None:
-        """Pause all automatic scaling decisions."""
-        if not self._autoscaler:
-            self.logger.warning("Autoscaler not enabled, ignoring pause_autoscaling")
-            return
-        self._autoscaler.pause()
-
-    def resume_autoscaling(self) -> None:
-        """Resume automatic scaling decisions."""
-        if not self._autoscaler:
-            return
-        self._autoscaler.resume()
-
-    def get_autoscale_status(self) -> Dict[str, Any]:
-        """Get current autoscaler status and metrics."""
-        if not self._autoscaler:
-            return {"enabled": False, "reason": "autoscaler not configured"}
-        return self._autoscaler.get_status()
 
     # === WebUI Integration ===
 

@@ -100,6 +100,19 @@ class Record:
 
 
 @dataclass
+class RawOutputBytes:
+    """Raw bytes to forward to the output queue via ack_and_forward.
+
+    Returned by sink operators that need to push raw data (e.g., fragment metadata)
+    to a commit queue. StageWorker pushes these directly without going through
+    payload_store or QueueMessage wrapping.
+    """
+
+    payloads: List[bytes]
+    """Raw byte payloads to push to the output queue."""
+
+
+@dataclass
 class SplitPayload:
     """Arrow-backed payload of records tied to a split.
 

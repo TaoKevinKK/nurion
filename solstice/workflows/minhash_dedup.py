@@ -279,7 +279,7 @@ def create_job(
         sink_config = LanceSinkConfig(
             table_path=output_path,
             mode="overwrite",
-            buffer_size=config.get("sink_buffer_size", 1000),
+            merge_batch_size=config.get("sink_buffer_size", 1000),
         )
     else:
         sink_config = FileSinkConfig(

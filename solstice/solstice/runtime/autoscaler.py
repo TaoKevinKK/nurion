@@ -32,7 +32,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, Optional, Set, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional, Set
 
 
 from solstice.runtime.queue_stats import QueueStatsClient, StageQueueConfig
@@ -40,7 +40,6 @@ from solstice.utils.logging import create_ray_logger
 
 if TYPE_CHECKING:
     from solstice.core.stage_master import StageMaster
-    from solstice.operators.sources.source import SourceMaster
 
 
 @dataclass
@@ -135,12 +134,12 @@ class SimpleAutoscaler:
 
     async def run_loop(
         self,
-        masters: Dict[str, Union["StageMaster", "SourceMaster"]],
+        masters: Dict[str, "StageMaster"],
     ) -> None:
         """Main autoscaling loop.
 
         Args:
-            masters: Dictionary of stage_id -> StageMaster/SourceMaster
+            masters: Dictionary of stage_id -> StageMaster
         """
         self._running = True
         self.logger.info(
@@ -180,22 +179,20 @@ class SimpleAutoscaler:
 
     async def _collect_metrics(
         self,
-        masters: Dict[str, Union["StageMaster", "SourceMaster"]],
+        masters: Dict[str, "StageMaster"],
     ) -> Dict[str, StageMetrics]:
         """Collect metrics from all stages.
 
         For non-source stages, we use WorkQueue pending/claimed counts
         from the upstream queue.
         """
-        from solstice.operators.sources.source import SourceMaster
-
         if not self._queue_stats_client:
             raise RuntimeError("Queue stats client is required for autoscaling")
 
         metrics = {}
 
         for stage_id, master in masters.items():
-            is_source = isinstance(master, SourceMaster)
+            is_source = master._source is not None
 
             # Get min/max workers from stage
             min_workers = master.stage.min_parallelism
@@ -289,7 +286,7 @@ class SimpleAutoscaler:
 
     async def _execute_decisions(
         self,
-        masters: Dict[str, Union["StageMaster", "SourceMaster"]],
+        masters: Dict[str, "StageMaster"],
         decisions: Dict[str, int],
     ) -> None:
         """Execute scaling decisions with cooldown protection."""

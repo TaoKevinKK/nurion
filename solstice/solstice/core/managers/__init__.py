@@ -17,12 +17,18 @@
 These managers handle specific concerns within a StageMaster:
 - WorkerManager: Worker lifecycle (spawn, stop, status)
 - RecoveryManager: Failure tracking and worker recovery
+- SourceManager: SplitPlanner / DirectProducer lifecycle
+- SinkManager: SinkCommitter background commit lifecycle
 """
 
-from solstice.core.managers.worker_manager import WorkerManager
 from solstice.core.managers.recovery_manager import RecoveryManager
+from solstice.core.managers.sink_manager import SinkManager
+from solstice.core.managers.source_manager import SourceManager
+from solstice.core.managers.worker_manager import WorkerManager
 
 __all__ = [
     "WorkerManager",
     "RecoveryManager",
+    "SourceManager",
+    "SinkManager",
 ]

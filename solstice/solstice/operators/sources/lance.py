@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Lance table source operator and source master."""
+"""Lance table source operator and split planner."""
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Iterable, Iterator, Optional
 
@@ -24,19 +25,17 @@ import lance
 from solstice.core.models import Split, SplitPayload
 from solstice.core.operator import OperatorConfig, OperatorRuntime, operator
 from solstice.core.source_operator import SourceOperator
-from solstice.operators.sources.source import SourceMaster
 
 if TYPE_CHECKING:
-    from solstice.core.stage import Stage, StageRuntime
-    from solstice.core.split_payload_store import SplitPayloadStore
+    pass
 
 
 @dataclass
 class LanceTableSourceConfig(OperatorConfig):
-    """Configuration for LanceTableSource operator and LanceSourceMaster.
+    """Configuration for LanceTableSource operator and LanceSplitPlanner.
 
     This unified config is used by both the operator (for reading splits)
-    and the master (for planning splits).
+    and the planner (for planning splits via create_source()).
 
     Note: queue_type and workqueue_db_path are configured via JobConfig,
     not here. The runner passes these to the master via StageRuntime.
@@ -56,6 +55,10 @@ class LanceTableSourceConfig(OperatorConfig):
 
     max_rows: Optional[int] = None
     """Maximum total rows to read. None = no limit (read all rows)."""
+
+    def create_source(self) -> "LanceSplitPlanner":
+        """Create a split planner for this Lance source."""
+        return LanceSplitPlanner(self)
 
 
 def _get_lance_storage_options(uri: str) -> Optional[dict]:
@@ -105,45 +108,18 @@ class LanceTableSource(SourceOperator):
         self.dataset_uri = None  # type: ignore[assignment]
 
 
-class LanceSourceMaster(SourceMaster):
-    """Source master for Lance tables.
+class LanceSplitPlanner:
+    """Plans splits from Lance dataset fragments.
 
-    Generates splits based on Lance dataset fragments and writes
-    split metadata to a persistent WorkQueue.
-
-    Workers consume from the queue and use LanceTableSource operator
-    to read actual data for each split.
+    Implements the SplitPlanner protocol. Created by
+    LanceTableSourceConfig.create_source().
     """
 
-    def __init__(
-        self,
-        job_id: str,
-        stage: "Stage",
-        payload_store: "SplitPayloadStore",
-        runtime: "StageRuntime",
-    ):
-        # Get Lance-specific config from stage.operator_config
-        operator_cfg = stage.operator_config
-        if not isinstance(operator_cfg, LanceTableSourceConfig):
-            raise TypeError(
-                f"LanceSourceMaster requires LanceTableSourceConfig, got {type(operator_cfg)}"
-            )
+    def __init__(self, config: LanceTableSourceConfig):
+        self._config = config
+        self._logger = logging.getLogger("LanceSplitPlanner")
 
-        super().__init__(job_id, stage, payload_store, runtime)
-
-        # Lance-specific configuration
-        self.dataset_uri: str = operator_cfg.dataset_uri
-        self.filter: Optional[str] = operator_cfg.filter
-        self.columns: Optional[Iterable[str]] = operator_cfg.columns
-        self.split_size: int = operator_cfg.split_size
-        self.max_rows: Optional[int] = operator_cfg.max_rows
-        self.storage_options = _get_lance_storage_options(self.dataset_uri)
-
-        # Load dataset for split planning
-        self.dataset = lance.dataset(self.dataset_uri, storage_options=self.storage_options)
-        self.logger.info(f"Loaded Lance dataset: {self.dataset_uri}")
-
-    def plan_splits(self) -> Iterator[Split]:
+    def plan_splits(self, stage_id: str) -> Iterator[Split]:
         """Plan splits based on Lance dataset fragments.
 
         Generates one split per (fragment, offset) pair, ensuring
@@ -151,36 +127,36 @@ class LanceSourceMaster(SourceMaster):
 
         If max_rows is set, stops generating splits once the limit is reached.
         """
-        # Sort fragments by fragment_id for deterministic ordering
-        sorted_fragments = sorted(self.dataset.get_fragments(), key=lambda x: x.fragment_id)
+        storage_options = _get_lance_storage_options(self._config.dataset_uri)
+        dataset = lance.dataset(self._config.dataset_uri, storage_options=storage_options)
+
+        sorted_fragments = sorted(dataset.get_fragments(), key=lambda x: x.fragment_id)
 
         split_idx = 0
         total_rows_planned = 0
 
         for frag in sorted_fragments:
             row_count = frag.count_rows()
-            for offset in range(0, row_count, self.split_size):
-                # Calculate actual rows in this split
-                rows_in_split = min(self.split_size, row_count - offset)
+            for offset in range(0, row_count, self._config.split_size):
+                rows_in_split = min(self._config.split_size, row_count - offset)
 
-                # Check if we've reached max_rows limit
-                if self.max_rows is not None:
-                    remaining = self.max_rows - total_rows_planned
+                if self._config.max_rows is not None:
+                    remaining = self._config.max_rows - total_rows_planned
                     if remaining <= 0:
-                        self.logger.info(
+                        self._logger.info(
                             f"Planned {split_idx} splits ({total_rows_planned} rows, "
-                            f"limited by max_rows={self.max_rows}) from {len(sorted_fragments)} fragments"
+                            f"limited by max_rows={self._config.max_rows}) "
+                            f"from {len(sorted_fragments)} fragments"
                         )
                         return
-                    # Adjust limit for this split if it would exceed max_rows
                     rows_in_split = min(rows_in_split, remaining)
 
                 yield Split(
-                    split_id=f"{self.stage.stage_id}_split_{split_idx}",
-                    stage_id=self.stage.stage_id,
+                    split_id=f"split_{split_idx}",
+                    stage_id=stage_id,
                     data_range={
-                        "filter": self.filter,
-                        "columns": list(self.columns) if self.columns else None,
+                        "filter": self._config.filter,
+                        "columns": list(self._config.columns) if self._config.columns else None,
                         "fragment_id": frag.fragment_id,
                         "offset": offset,
                         "limit": rows_in_split,
@@ -189,16 +165,18 @@ class LanceSourceMaster(SourceMaster):
                 split_idx += 1
                 total_rows_planned += rows_in_split
 
-                # Check again after yielding (in case this was the last one)
-                if self.max_rows is not None and total_rows_planned >= self.max_rows:
-                    self.logger.info(
+                if (
+                    self._config.max_rows is not None
+                    and total_rows_planned >= self._config.max_rows
+                ):
+                    self._logger.info(
                         f"Planned {split_idx} splits ({total_rows_planned} rows, "
-                        f"limited by max_rows={self.max_rows}) from {len(sorted_fragments)} fragments"
+                        f"limited by max_rows={self._config.max_rows}) "
+                        f"from {len(sorted_fragments)} fragments"
                     )
                     return
 
-        self.logger.info(f"Planned {split_idx} splits from {len(sorted_fragments)} fragments")
+        self._logger.info(f"Planned {split_idx} splits from {len(sorted_fragments)} fragments")
 
-
-# Set master_class after class definition
-LanceTableSourceConfig.master_class = LanceSourceMaster
+    def cleanup(self) -> None:
+        pass

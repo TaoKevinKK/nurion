@@ -84,8 +84,8 @@ class Stage:
         Args:
             stage_id: Unique identifier for the stage
             operator_config: Configuration for the operator (OperatorConfig subclass).
-                For source stages, the config should have a master_class attribute
-                that specifies which SourceMaster class to use.
+                For source stages, the config should implement create_source()
+                to provide a SplitPlanner or DirectProducer.
             parallelism: Number of workers. Can be:
                 - int: Fixed number of workers (no auto-scaling)
                 - Tuple[int, int]: (min_workers, max_workers) for auto-scaling

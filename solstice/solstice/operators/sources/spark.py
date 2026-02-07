@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Spark source operator and source master for reading data via raydp."""
+"""Spark source operator and split planner for reading data via raydp."""
 
 from __future__ import annotations
 
 import base64
+import logging
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterator, Optional, TYPE_CHECKING
 
@@ -26,11 +27,9 @@ import ray
 from solstice.core.models import Split, SplitPayload
 from solstice.core.operator import OperatorConfig, OperatorRuntime, operator
 from solstice.core.source_operator import SourceOperator
-from solstice.operators.sources.source import SourceMaster
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession, DataFrame
-    from solstice.core.stage import Stage
 
 
 # Type alias for the DataFrame factory function
@@ -39,11 +38,11 @@ DataFrameFactory = Callable[["SparkSession"], "DataFrame"]
 
 @dataclass
 class SparkSourceConfig(OperatorConfig):
-    """Unified configuration for Spark source (both operator and master).
+    """Unified configuration for Spark source (both operator and planner).
 
     Contains raydp init_spark parameters and a DataFrame factory function.
     The operator reads Arrow data from Ray object store (ObjectRefs),
-    while the master uses the Spark config to initialize Spark and create splits.
+    while the planner uses the Spark config to initialize Spark and create splits.
 
     Attributes:
         app_name: Spark application name
@@ -61,18 +60,6 @@ class SparkSourceConfig(OperatorConfig):
         ...     num_executors=2,
         ...     dataframe_fn=lambda spark: spark.read.json("/data/events.json"),
         ... )
-
-        >>> # Or with SQL:
-        >>> config = SparkSourceConfig(
-        ...     dataframe_fn=lambda spark: spark.sql("SELECT * FROM my_table"),
-        ... )
-
-        >>> # Or with complex logic:
-        >>> def load_data(spark):
-        ...     df1 = spark.read.parquet("/data/users")
-        ...     df2 = spark.read.parquet("/data/orders")
-        ...     return df1.join(df2, "user_id")
-        >>> config = SparkSourceConfig(dataframe_fn=load_data)
     """
 
     # raydp init_spark parameters
@@ -92,13 +79,17 @@ class SparkSourceConfig(OperatorConfig):
     workqueue_db_path: str = "memory://"
     """WorkQueue storage path (memory://, file://)."""
 
+    def create_source(self) -> "SparkSplitPlanner":
+        """Create a split planner for this Spark source."""
+        return SparkSplitPlanner(self)
+
 
 @operator(SparkSourceConfig)
 class SparkSource(SourceOperator):
     """Source operator for reading Arrow data from Ray object store.
 
     This operator reads Arrow data from ObjectRefs that were persisted
-    by SparkSourceMaster using raydp.
+    by SparkSplitPlanner using raydp.
     """
 
     def __init__(self, config: SparkSourceConfig, runtime: OperatorRuntime):
@@ -132,8 +123,9 @@ class SparkSource(SourceOperator):
             arrow_table = pa.Table.from_batches([arrow_data])
         elif isinstance(arrow_data, bytes):
             # Arrow IPC format (from raydp) - deserialize using IPC reader
-            import pyarrow.ipc as ipc
             import io
+
+            import pyarrow.ipc as ipc
 
             reader = ipc.open_stream(io.BytesIO(arrow_data))
             arrow_table = reader.read_all()
@@ -153,73 +145,27 @@ class SparkSource(SourceOperator):
         pass
 
 
-class SparkSourceMaster(SourceMaster):
-    """Source master for Spark that handles split planning.
+class SparkSplitPlanner:
+    """Plans splits by initializing Spark, loading data, and persisting to object store.
 
-    Initializes Spark via raydp, loads data using the dataframe_fn,
-    persists to Ray object store, then yields splits containing ObjectRefs.
+    Implements the SplitPlanner protocol. Created by SparkSourceConfig.create_source().
+
+    Uses raydp to efficiently transfer Spark data to Ray object store as Arrow blocks,
+    then yields splits containing serialized ObjectRefs.
     """
 
-    def __init__(
-        self,
-        job_id: str,
-        stage: "Stage",
-        **kwargs,
-    ):
-        # Get config from stage.operator_config
-        operator_cfg = stage.operator_config
-        if not isinstance(operator_cfg, SparkSourceConfig):
-            raise TypeError(
-                f"SparkSourceMaster requires SparkSourceConfig, got {type(operator_cfg)}"
-            )
-
-        super().__init__(job_id, stage, **kwargs)
-
-        self._config = operator_cfg
+    def __init__(self, config: SparkSourceConfig):
+        self._config = config
         self._spark = None
         self._spark_initialized = False
+        self._logger = logging.getLogger("SparkSplitPlanner")
 
-    def _init_spark(self):
-        """Initialize Spark session via raydp."""
-        if self._spark_initialized:
-            return
-
-        import raydp
-
-        # Merge default configs with user configs
-        spark_configs = {
-            "spark.sql.execution.arrow.pyspark.enabled": "true",
-            **self._config.spark_configs,
-        }
-
-        self._spark = raydp.init_spark(
-            app_name=self._config.app_name,
-            num_executors=self._config.num_executors,
-            executor_cores=self._config.executor_cores,
-            executor_memory=self._config.executor_memory,
-            configs=spark_configs,
+    def plan_splits(self, stage_id: str) -> Iterator[Split]:
+        """Initialize Spark, load data, persist to object store, and yield splits."""
+        from raydp.spark.dataset import (
+            _save_spark_df_to_object_store,
+            get_raydp_master_owner,
         )
-        self._spark_initialized = True
-        self.logger.info(f"Initialized Spark session: {self._config.app_name}")
-
-    def _get_dataframe(self):
-        """Get DataFrame by calling the dataframe_fn with SparkSession."""
-        if self._config.dataframe_fn is None:
-            raise ValueError(
-                "dataframe_fn must be provided in SparkSourceConfig. "
-                "Example: dataframe_fn=lambda spark: spark.read.json('/path/to/data')"
-            )
-
-        self.logger.info("Calling dataframe_fn to load data")
-        return self._config.dataframe_fn(self._spark)
-
-    def plan_splits(self) -> Iterator[Split]:
-        """Initialize Spark, load data, persist to object store, and yield splits.
-
-        Uses raydp's _save_spark_df_to_object_store to efficiently transfer
-        Spark data to Ray object store as Arrow blocks.
-        """
-        from raydp.spark.dataset import _save_spark_df_to_object_store, get_raydp_master_owner
 
         # Initialize Spark
         self._init_spark()
@@ -236,25 +182,24 @@ class SparkSourceMaster(SourceMaster):
         # Get the owner for object lifetime management
         owner = get_raydp_master_owner(self._spark)
 
-        # Save DataFrame to object store, returns list of ObjectRefs and block sizes
+        # Save DataFrame to object store
         blocks, block_sizes = _save_spark_df_to_object_store(
             df,
-            use_batch=False,  # Return Arrow tables, not batches
+            use_batch=False,
             owner=owner,
         )
 
-        self.logger.info(
+        self._logger.info(
             f"Persisted Spark DataFrame to object store: "
             f"{len(blocks)} blocks, {sum(block_sizes)} total records"
         )
 
-        # Yield splits containing ObjectRef serialized via cloudpickle (for JSON)
+        # Yield splits containing ObjectRef serialized via cloudpickle
         for idx, (block_ref, block_size) in enumerate(zip(blocks, block_sizes)):
-            # Serialize ObjectRef using cloudpickle and base64 encode for JSON
             object_ref_b64 = base64.b64encode(ray.cloudpickle.dumps(block_ref)).decode("ascii")
             yield Split(
-                split_id=f"{self.stage.stage_id}_split_{idx}",
-                stage_id=self.stage.stage_id,
+                split_id=f"split_{idx}",
+                stage_id=stage_id,
                 data_range={
                     "object_ref": object_ref_b64,
                     "block_size": block_size,
@@ -262,21 +207,57 @@ class SparkSourceMaster(SourceMaster):
                 },
             )
 
-    async def stop(self) -> None:
-        """Stop the source master and cleanup Spark."""
-        await super().stop()
+        # NOTE: Do NOT stop Spark here. The object refs in splits are owned by
+        # the raydp master; stopping Spark kills the owner and invalidates the
+        # refs. Cleanup happens via cleanup() after workers finish.
+
+    def _init_spark(self) -> None:
+        """Initialize Spark session via raydp."""
+        if self._spark_initialized:
+            return
+
+        import raydp
+
+        spark_configs = {
+            "spark.sql.execution.arrow.pyspark.enabled": "true",
+            **self._config.spark_configs,
+        }
+
+        self._spark = raydp.init_spark(
+            app_name=self._config.app_name,
+            num_executors=self._config.num_executors,
+            executor_cores=self._config.executor_cores,
+            executor_memory=self._config.executor_memory,
+            configs=spark_configs,
+        )
+        self._spark_initialized = True
+        self._logger.info(f"Initialized Spark session: {self._config.app_name}")
+
+    def _get_dataframe(self):
+        """Get DataFrame by calling the dataframe_fn with SparkSession."""
+        if self._config.dataframe_fn is None:
+            raise ValueError(
+                "dataframe_fn must be provided in SparkSourceConfig. "
+                "Example: dataframe_fn=lambda spark: spark.read.json('/path/to/data')"
+            )
+
+        self._logger.info("Calling dataframe_fn to load data")
+        return self._config.dataframe_fn(self._spark)
+
+    def cleanup(self) -> None:
+        """Clean up resources (stop Spark session).
+
+        Called by SourceManager when the stage finishes, after all workers
+        have read the object refs from the store.
+        """
         self._stop_spark()
 
     def _stop_spark(self) -> None:
-        """Internal method to stop Spark session."""
+        """Stop Spark session."""
         if self._spark_initialized:
             import raydp
 
             raydp.stop_spark()
             self._spark = None
             self._spark_initialized = False
-            self.logger.info("Stopped Spark session")
-
-
-# Set master_class after class definition
-SparkSourceConfig.master_class = SparkSourceMaster
+            self._logger.info("Stopped Spark session")

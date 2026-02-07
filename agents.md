@@ -272,6 +272,26 @@ WorkQueue is embedded; no external broker is required.
    
    **Rule of thumb**: Return the canonical data, let clients compute derived values. This avoids inconsistencies and keeps the API contract simple.
 
+9. **Don't add stats/counter fields**: Avoid `_total_xxx_count`, `_items_processed`, `_splits_produced` and similar counters as instance state. They add noise, are never accurate in distributed systems, and waste code review bandwidth. Use logging for observability, not counters.
+   ```python
+   # Bad: Useless counters cluttering the class
+   class MyManager:
+       def __init__(self):
+           self._total_processed = 0
+           self._total_committed = 0
+           self._total_bytes = 0
+       
+       def process(self, item):
+           ...
+           self._total_processed += 1  # Nobody reads this
+   
+   # Good: Just do the work, log important events
+   class MyManager:
+       def process(self, item):
+           ...
+           self.logger.info(f"Committed {len(fragments)} fragments")
+   ```
+
 ### Preferred Patterns
 
 1. **Operators are config-driven, stateless containers**: All runtime context flows through `OperatorConfig`

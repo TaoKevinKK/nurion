@@ -324,9 +324,7 @@ class TestWorkQueueAckAndForward:
                 downstream_payloads=[b"output data"],
             )
 
-    def test_ack_and_forward_rejects_token_length_mismatch(
-        self, workqueue_broker_and_client
-    ):
+    def test_ack_and_forward_rejects_token_length_mismatch(self, workqueue_broker_and_client):
         """Ack and forward should reject claim_token length mismatch."""
         broker, client = workqueue_broker_and_client
         upstream = "upstream-queue"
