@@ -41,6 +41,11 @@ class WorkQueueStorageReader:
         else:
             self._reader = reader
 
+    def close(self) -> None:
+        close_fn = getattr(self._reader, "close", None)
+        if callable(close_fn):
+            close_fn()
+
     def get_queue_stats(self, queue: str) -> QueueStats:
         stats: Dict[str, int] = self._reader.get_queue_stats(queue)
         return QueueStats(

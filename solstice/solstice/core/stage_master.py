@@ -204,43 +204,40 @@ class StageMaster:
         self._start_time = time.time()
 
         await self._create_queue_client()
+        queue_client = self._queue_client
+        assert queue_client is not None
+        broker_endpoint = self.broker_endpoint
+        assert broker_endpoint is not None
 
         # --- DirectProducer: no workers ---
         if self._source_manager and self._source_manager.is_direct_producer:
             await self._source_manager.run_direct_producer(
-                self._queue_client, self._output_queue_name, self.broker_endpoint
+                queue_client, self._output_queue_name, broker_endpoint
             )
             self._write_stage_state(status="RUNNING")
             self._running = True
             return
 
-        # Mark running early so produce_splits and other init code can
-        # check ``self._running`` to decide whether to continue.
         self._running = True
-
-        # --- SplitPlanner: create planner queue, produce splits ---
-        if self._source_manager and not self._source_manager.is_direct_producer:
-            planner_queue = self._source_manager.planner_queue_name
-            assert planner_queue is not None
-            self._queue_client.create_queue(planner_queue)
-            self.logger.info(f"Created planner queue {planner_queue}")
-            await self._source_manager.produce_splits(
-                self._queue_client,
-                backpressure_fn=self._check_backpressure,
-                running_fn=lambda: self._running,
-            )
-            self.upstream_queue_name = planner_queue
 
         # --- Sink manager: create commit queue and start background loop ---
         if self._sink_manager:
-            self._sink_manager.create_queue_and_start_loop(self._queue_client)
+            self._sink_manager.create_queue_and_start_loop(queue_client)
 
         # --- Init workers ---
         self._init_managers()
         assert self._worker_manager is not None
 
+        # --- SplitPlanner: create planner queue, launch async production ---
         if self._source_manager and not self._source_manager.is_direct_producer:
+            self.upstream_queue_name = self._source_manager.planner_queue_name
             self._worker_manager.set_upstream_queue_name(self._source_manager.planner_queue_name)
+            self._source_manager.start_split_production(
+                queue_client,
+                self._worker_manager,
+                backpressure_fn=self._check_backpressure,
+                running_fn=lambda: self._running,
+            )
 
         for _ in range(self.stage.min_parallelism):
             worker_id = await self._worker_manager.spawn_worker(is_min_worker=True)
@@ -251,13 +248,6 @@ class StageMaster:
 
         self._write_stage_state(status="RUNNING")
 
-        if self._source_manager and self._source_manager.production_done:
-            await self._source_manager.notify_splits_done(
-                self._queue_client,
-                self._worker_manager,
-                running_fn=lambda: self._running,
-            )
-
         self.logger.info(
             f"Stage {self.stage_id} started with {self._worker_manager.worker_count} workers"
         )
@@ -266,15 +256,16 @@ class StageMaster:
         """Run the stage until completion."""
         if not self._running:
             await self.start()
+        queue_client = self._queue_client
+        assert queue_client is not None
 
         # --- DirectProducer: immediate finish ---
         if self._source_manager and self._source_manager.is_direct_producer:
             self._finished = True
-            if self._queue_client:
-                try:
-                    self._queue_client.mark_queue_finished(self._output_queue_name)
-                except Exception as e:
-                    self.logger.warning(f"Failed to mark output queue as finished: {e}")
+            try:
+                queue_client.mark_queue_finished(self._output_queue_name)
+            except Exception as e:
+                self.logger.warning(f"Failed to mark output queue as finished: {e}")
             self._write_stage_state(status="COMPLETED")
             return True
 
@@ -323,14 +314,13 @@ class StageMaster:
 
             # --- Sink finalize ---
             if self._sink_manager and not self._failed:
-                await self._sink_manager.finalize(self._queue_client)
+                await self._sink_manager.finalize(queue_client)
 
             # Mark output queue as finished
-            if self._queue_client:
-                try:
-                    self._queue_client.mark_queue_finished(self._output_queue_name)
-                except Exception as e:
-                    self.logger.warning(f"Failed to mark output queue as finished: {e}")
+            try:
+                queue_client.mark_queue_finished(self._output_queue_name)
+            except Exception as e:
+                self.logger.warning(f"Failed to mark output queue as finished: {e}")
 
             self._write_stage_state(status="FAILED" if self._failed else "COMPLETED")
 
@@ -346,14 +336,14 @@ class StageMaster:
         """Stop the stage master."""
         self._running = False
 
+        if self._source_manager:
+            await self._source_manager.stop()
+
         if self._sink_manager:
             await self._sink_manager.cancel()
 
         if self._worker_manager:
             await self._worker_manager.stop_all_workers()
-
-        if self._source_manager:
-            self._source_manager.cleanup()
 
         self.logger.info(f"Stage {self.stage_id} stopped")
 

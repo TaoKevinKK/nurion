@@ -49,13 +49,14 @@ class ModelPool:
         await pool.shutdown.remote()
     """
 
-    def __init__(self, config: ModelConfig, registry: "ray.ActorHandle") -> None:
+    def __init__(self, config: ModelConfig, registry: ray.actor.ActorHandle) -> None:
         self._config = config
         self._registry = registry
-        self._workers: dict[str, ray.ActorHandle] = {}
+        self._workers: dict[str, ray.actor.ActorHandle] = {}
         self._worker_ports: dict[str, int] = {}
         self._shutdown_event = asyncio.Event()
         self._last_scale_time = 0.0
+        self._registry_url: Optional[str] = None
 
         # Autoscaler state
         self._autoscale_config: Optional[AutoscaleConfig] = None
@@ -67,7 +68,7 @@ class ModelPool:
 
     # --- Worker lifecycle ---
 
-    async def _spawn_worker(self) -> tuple[str, ray.ActorHandle]:
+    async def _spawn_worker(self) -> tuple[str, ray.actor.ActorHandle]:
         port = find_free_port()
         worker_id = f"{self._config.model_id}_worker_{port}"
         resources = self._config.get_worker_resources()
@@ -165,6 +166,9 @@ class ModelPool:
     async def get_status(self) -> dict[str, Any]:
         """Get pool status from registry (single HTTP call, not per-worker RPC)."""
         import httpx
+
+        if self._registry_url is None:
+            self._registry_url = ray.get(self._registry.get_http_url.remote())
 
         workers_status: list[dict[str, Any]] = []
         try:

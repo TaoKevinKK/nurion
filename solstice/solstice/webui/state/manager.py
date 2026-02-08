@@ -48,6 +48,9 @@ class JobStateManager:
         self._storage = storage
         self.logger = create_ray_logger("JobStateManager")
 
+    def close(self) -> None:
+        self._storage.close()
+
     # ---------------------------------------------------------------------
     # Job & Configuration
     # ---------------------------------------------------------------------

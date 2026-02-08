@@ -72,7 +72,7 @@ class ModelClient:
         # → "http://10.1.48.251:8000"
     """
 
-    def __init__(self, registry: ray.ActorHandle, cache_ttl_seconds: float = 30.0) -> None:
+    def __init__(self, registry: ray.actor.ActorHandle, cache_ttl_seconds: float = 30.0) -> None:
         self._registry = registry
         self._cache_ttl = cache_ttl_seconds
         self._registry_url: Optional[str] = None

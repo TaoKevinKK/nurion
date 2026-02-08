@@ -144,12 +144,10 @@ class TestAutoscaleConfig:
             enabled=False,
             check_interval_s=30.0,
             scale_up_lag_threshold=500,
-            fixed_workers={"stage_a": 5},
         )
         assert config.enabled is False
         assert config.check_interval_s == 30.0
         assert config.scale_up_lag_threshold == 500
-        assert config.fixed_workers == {"stage_a": 5}
 
 
 class TestStageMetrics:
@@ -327,88 +325,6 @@ class TestScalingDecisions:
         decisions = autoscaler._compute_decisions(metrics)
 
         assert "stage_a" not in decisions
-
-
-class TestManualOverrides:
-    """Tests for manual intervention API."""
-
-    @pytest.fixture
-    def autoscaler(self):
-        return SimpleAutoscaler()
-
-    def test_set_fixed_workers(self, autoscaler):
-        """Manual override should take priority."""
-        autoscaler.set_fixed_workers("stage_a", 5)
-
-        metrics = {
-            "stage_a": StageMetrics(
-                stage_id="stage_a",
-                worker_count=2,
-                min_workers=1,
-                max_workers=8,
-                input_queue_lag=0,  # Would normally not scale
-            )
-        }
-
-        decisions = autoscaler._compute_decisions(metrics)
-
-        assert decisions["stage_a"] == 5
-
-    def test_clear_fixed_workers(self, autoscaler):
-        autoscaler.set_fixed_workers("stage_a", 5)
-        autoscaler.clear_fixed_workers("stage_a")
-
-        assert autoscaler.config.fixed_workers.get("stage_a") is None
-
-    def test_freeze_stage(self, autoscaler):
-        autoscaler.freeze_stage("stage_a")
-
-        metrics = {
-            "stage_a": StageMetrics(
-                stage_id="stage_a",
-                worker_count=2,
-                min_workers=1,
-                max_workers=8,
-                input_queue_lag=5000,  # Would normally scale up
-            )
-        }
-
-        decisions = autoscaler._compute_decisions(metrics)
-
-        assert "stage_a" not in decisions
-
-    def test_unfreeze_stage(self, autoscaler):
-        autoscaler.freeze_stage("stage_a")
-        autoscaler.unfreeze_stage("stage_a")
-
-        assert "stage_a" not in autoscaler.config.frozen_stages
-
-    def test_pause_resume(self, autoscaler):
-        autoscaler.pause()
-        assert autoscaler.config.enabled is False
-
-        autoscaler.resume()
-        assert autoscaler.config.enabled is True
-
-    def test_get_status(self, autoscaler):
-        autoscaler.freeze_stage("stage_a")
-        autoscaler.set_fixed_workers("stage_b", 10)
-
-        # Simulate some metrics
-        autoscaler._current_metrics = {
-            "stage_a": StageMetrics(
-                stage_id="stage_a",
-                worker_count=2,
-                min_workers=1,
-                max_workers=8,
-            )
-        }
-
-        status = autoscaler.get_status()
-
-        assert status["enabled"] is True
-        assert "stage_a" in status["frozen_stages"]
-        assert status["fixed_workers"]["stage_b"] == 10
 
 
 @pytest.mark.asyncio

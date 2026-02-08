@@ -128,7 +128,7 @@ async def run_workflow(
     input_path: str,
     output_path: str,
     model_id: str,
-    registry: "ray.ActorHandle",
+    registry: ray.actor.ActorHandle,
     image_field: str,
     split_size: int,
 ) -> None:

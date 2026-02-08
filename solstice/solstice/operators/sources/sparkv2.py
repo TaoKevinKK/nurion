@@ -138,7 +138,7 @@ class SparkDirectProducer:
         Returns:
             Number of splits written
         """
-        import raydp
+        import raydp  # type: ignore[import-not-found]
 
         # Initialize Spark
         spark_configs = {
@@ -194,7 +194,7 @@ class SparkDirectProducer:
     def cleanup(self) -> None:
         """Stop Spark session."""
         if self._spark_initialized:
-            import raydp
+            import raydp  # type: ignore[import-not-found]
 
             raydp.stop_spark()
             self._spark = None

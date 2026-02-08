@@ -223,8 +223,8 @@ def restore_s3_object(path: str, days: int = 2) -> bool:
     bucket = parsed.netloc
     key = parsed.path.lstrip("/")
 
-    import boto3
-    from botocore.config import Config
+    import boto3  # type: ignore[import-untyped]
+    from botocore.config import Config  # type: ignore[import-untyped]
 
     endpoint_url = os.environ.get("AWS_ENDPOINT_URL") or os.environ.get("FSSPEC_S3_ENDPOINT_URL")
     region_name = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")

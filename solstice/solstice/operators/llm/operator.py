@@ -142,7 +142,7 @@ class ExternalLLMOperator(Operator):
 
     def __init__(self, config: ExternalLLMOperatorConfig, runtime: OperatorRuntime):
         super().__init__(config, runtime)
-        self._config = config
+        self._config: ExternalLLMOperatorConfig = config
         self._http_client: Optional[httpx.AsyncClient] = None
         self._model_client: Optional[Any] = None
 

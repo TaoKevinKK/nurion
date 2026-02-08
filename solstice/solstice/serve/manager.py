@@ -89,7 +89,7 @@ class ModelServiceManager:
         """
         self._autoscale_config = autoscale_config or AutoscaleConfig()
 
-        self._pools: dict[str, ray.ActorHandle] = {}
+        self._pools: dict[str, ray.actor.ActorHandle] = {}
         self._configs: dict[str, ModelConfig] = {}
 
         # Create registry actor
@@ -105,7 +105,7 @@ class ModelServiceManager:
         logger.info("ModelServiceManager initialized")
 
     @property
-    def registry(self) -> ray.ActorHandle:
+    def registry(self) -> ray.actor.ActorHandle:
         """Registry ActorHandle — pass to ExternalLLMOperatorConfig."""
         return self._registry
 

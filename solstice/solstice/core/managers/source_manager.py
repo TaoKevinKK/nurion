@@ -14,15 +14,15 @@
 
 """Source manager: handles SplitPlanner and DirectProducer lifecycle for StageMaster.
 
-Encapsulates all source-related logic: planner queue creation, split production
-with backpressure, queue completion polling, and DirectProducer execution.
+Encapsulates all source-related logic: planner queue creation, async split
+production with backpressure, queue completion polling, and DirectProducer execution.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Awaitable, Optional
 
 from tenacity import (
     RetryCallState,
@@ -48,7 +48,7 @@ class SourceManager:
     """Manages source strategy lifecycle for a stage.
 
     Two modes:
-    - SplitPlanner: creates a planner queue, produces splits, workers consume
+    - SplitPlanner: creates planner queue, produces splits async, workers consume
     - DirectProducer: external system writes directly to output queue, no workers
     """
 
@@ -67,8 +67,7 @@ class SourceManager:
         self._planner_queue_name: Optional[str] = (
             f"{job_id}_{stage_id}_planner" if isinstance(source, SplitPlanner) else None
         )
-        self._split_count = 0
-        self._production_done = False
+        self._production_task: Optional[asyncio.Task] = None
 
     @property
     def is_direct_producer(self) -> bool:
@@ -77,10 +76,6 @@ class SourceManager:
     @property
     def planner_queue_name(self) -> Optional[str]:
         return self._planner_queue_name
-
-    @property
-    def production_done(self) -> bool:
-        return self._production_done
 
     # =========================================================================
     # DirectProducer
@@ -107,28 +102,91 @@ class SourceManager:
 
     def cleanup(self) -> None:
         """Clean up source resources (Spark session, etc.)."""
-        self._source.cleanup()
+        if isinstance(self._source, DirectProducer):
+            # DirectProducer.cleanup is async but we call from sync stop();
+            # the event loop handles it via _source_manager.stop() in StageMaster.
+            pass
 
     # =========================================================================
-    # SplitPlanner
+    # SplitPlanner: start / stop
     # =========================================================================
 
-    async def produce_splits(
+    def start_split_production(
         self,
         queue_client: "WorkQueueQueueClient",
-        backpressure_fn: Optional[object] = None,
-        running_fn: Optional[object] = None,
+        worker_manager: "WorkerManager",
+        backpressure_fn: Callable[[], Awaitable[bool]],
+        running_fn: Callable[[], bool],
     ) -> None:
-        """Generate splits and push to planner queue.
+        """Create planner queue and launch async split production.
 
-        Args:
-            queue_client: Queue client for pushing splits
-            backpressure_fn: Async callable returning True if should pause
-            running_fn: Callable returning False if should stop
+        Workers can start consuming immediately while splits are being produced.
+        When production finishes, the planner queue is marked as finished and
+        workers are notified to exit once the queue is drained.
         """
+        assert self._planner_queue_name is not None
+
+        queue_client.create_queue(self._planner_queue_name)
+        self._logger.info(f"Created planner queue {self._planner_queue_name}")
+
+        self._production_task = asyncio.create_task(
+            self._run_production(queue_client, worker_manager, backpressure_fn, running_fn),
+            name=f"split_production_{self._stage_id}",
+        )
+
+    async def stop(self) -> None:
+        """Cancel split production and clean up."""
+        if self._production_task:
+            self._production_task.cancel()
+            try:
+                await self._production_task
+            except asyncio.CancelledError:
+                pass
+            self._production_task = None
+
+        if isinstance(self._source, DirectProducer):
+            self._source.cleanup()
+
+    # =========================================================================
+    # Internal: production loop
+    # =========================================================================
+
+    async def _run_production(
+        self,
+        queue_client: "WorkQueueQueueClient",
+        worker_manager: "WorkerManager",
+        backpressure_fn: Callable[[], Awaitable[bool]],
+        running_fn: Callable[[], bool],
+    ) -> None:
+        """Background task: produce splits, then mark queue as finished."""
         assert isinstance(self._source, SplitPlanner)
         assert self._planner_queue_name is not None
 
+        try:
+            await self._produce_splits(queue_client, backpressure_fn, running_fn)
+
+            # Mark planner queue as finished so workers know no more data
+            if running_fn():
+                self._mark_queue_finished(queue_client)
+                asyncio.create_task(
+                    self._poll_queue_drained(queue_client, worker_manager, running_fn),
+                    name=f"poll_source_completion_{self._stage_id}",
+                )
+        except asyncio.CancelledError:
+            self._logger.debug("Split production cancelled")
+            raise
+        except Exception as e:
+            self._logger.error(f"Split production failed: {e}")
+            raise
+
+    async def _produce_splits(
+        self,
+        queue_client: "WorkQueueQueueClient",
+        backpressure_fn: Callable[[], Awaitable[bool]],
+        running_fn: Callable[[], bool],
+    ) -> None:
+        """Generate splits and push to planner queue with backpressure."""
+        assert isinstance(self._source, SplitPlanner)
         self._logger.info(f"Generating splits for source {self._stage_id}")
 
         split_iterator = self._source.plan_splits(self._stage_id)
@@ -137,18 +195,17 @@ class SourceManager:
         idx = 0
 
         for split in split_iterator:
-            if running_fn and not running_fn():
+            if not running_fn():
                 break
 
-            # Backpressure check
-            if backpressure_fn and idx % backpressure_check_interval == 0:
+            if idx % backpressure_check_interval == 0:
                 should_pause = await backpressure_fn()
                 if should_pause:
                     consecutive_pauses += 1
                     if consecutive_pauses >= 100:
                         self._logger.warning(
-                            f"Source {self._stage_id} paused for {consecutive_pauses} "
-                            f"consecutive checks due to backpressure"
+                            f"Source {self._stage_id} paused for "
+                            f"{consecutive_pauses} consecutive backpressure checks"
                         )
                     await asyncio.sleep(0.1)
                     continue
@@ -161,45 +218,30 @@ class SourceManager:
             if idx % 100 == 0:
                 self._logger.info(f"Produced {idx} splits")
 
-        self._split_count = idx
-        self._production_done = True
         self._logger.info(f"Source {self._stage_id} produced {idx} splits to queue")
 
-    async def notify_splits_done(
-        self,
-        queue_client: "WorkQueueQueueClient",
-        worker_manager: Optional["WorkerManager"],
-        running_fn: Optional[object] = None,
-    ) -> None:
-        """Mark planner queue as finished and start polling for completion."""
+    def _mark_queue_finished(self, queue_client: "WorkQueueQueueClient") -> None:
         assert self._planner_queue_name is not None
+        try:
+            queue_client.mark_queue_finished(self._planner_queue_name)
+            self._logger.info(f"Marked planner queue {self._planner_queue_name} as finished")
+        except Exception as e:
+            self._logger.warning(f"Failed to mark planner queue as finished: {e}")
 
-        if queue_client:
-            try:
-                queue_client.mark_queue_finished(self._planner_queue_name)
-                self._logger.info(f"Marked planner queue {self._planner_queue_name} as finished")
-            except Exception as e:
-                self._logger.warning(f"Failed to mark planner queue as finished: {e}")
-
-            asyncio.create_task(
-                self._poll_planner_queue_completion(queue_client, worker_manager, running_fn),
-                name=f"poll_source_completion_{self._stage_id}",
-            )
-
-    async def _poll_planner_queue_completion(
+    async def _poll_queue_drained(
         self,
         queue_client: "WorkQueueQueueClient",
-        worker_manager: Optional["WorkerManager"],
-        running_fn: Optional[object] = None,
+        worker_manager: "WorkerManager",
+        running_fn: Callable[[], bool],
     ) -> None:
-        """Poll planner queue until safe for workers to exit."""
+        """Poll planner queue until drained, then notify workers to exit."""
         assert self._planner_queue_name is not None
 
         poll_interval = 0.1
         max_consecutive_errors = 10
         consecutive_errors = 0
 
-        while running_fn is None or running_fn():
+        while running_fn():
             try:
                 result = queue_client.is_queue_finished(self._planner_queue_name)
                 consecutive_errors = 0
@@ -207,14 +249,12 @@ class SourceManager:
                     self._logger.debug(
                         f"Source {self._stage_id} planner queue drained, notifying workers"
                     )
-                    if worker_manager:
-                        await worker_manager.notify_safe_to_exit()
+                    await worker_manager.notify_safe_to_exit()
                     return
             except Exception as e:
                 consecutive_errors += 1
                 if consecutive_errors >= max_consecutive_errors:
                     raise RuntimeError(f"Failed to poll planner queue completion: {e}") from e
-                self._logger.debug(f"Error polling planner queue completion: {e}")
 
             await asyncio.sleep(poll_interval)
 

@@ -72,7 +72,7 @@ class InferenceWorker:
     def __init__(
         self,
         config: ModelConfig,
-        registry: "ray.ActorHandle",
+        registry: ray.actor.ActorHandle,
         port: Optional[int] = None,
         worker_id: Optional[str] = None,
     ) -> None:

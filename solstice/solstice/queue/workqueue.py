@@ -254,28 +254,28 @@ class WorkQueueQueueClient:
 
     # Admin
     def create_queue(self, queue: str) -> None:
-        self._check()
-        self._client.create_queue(queue)
+        client = self._check()
+        client.create_queue(queue)
 
     def delete_queue(self, queue: str) -> None:
-        self._check()
-        self._client.delete_queue(queue)
+        client = self._check()
+        client.delete_queue(queue)
 
     # Producer
     def push(self, queue: str, value: bytes, metadata: Optional[Dict[str, str]] = None) -> str:
-        self._check()
-        return self._client.push(queue, value, metadata or {})
+        client = self._check()
+        return client.push(queue, value, metadata or {})
 
     def push_batch(self, queue: str, values: List[bytes]) -> List[str]:
-        self._check()
-        return self._client.push_batch(queue, values)
+        client = self._check()
+        return client.push_batch(queue, values)
 
     # Consumer
     def claim(
         self, queue: str, batch_size: int = 1, timeout_ms: int = 5000
     ) -> List[WorkQueueRecord]:
-        self._check()
-        messages = self._client.claim(queue, batch_size, timeout_ms)
+        client = self._check()
+        messages = client.claim(queue, batch_size, timeout_ms)
         return [WorkQueueRecord.from_message(m) for m in messages]
 
     def ack(
@@ -287,8 +287,8 @@ class WorkQueueQueueClient:
         state_puts: Optional[Dict[str, bytes]] = None,
         state_deletes: Optional[List[str]] = None,
     ) -> int:
-        self._check()
-        return self._client.ack(
+        client = self._check()
+        return client.ack(
             queue,
             msg_ids,
             claim_tokens=claim_tokens,
@@ -308,8 +308,8 @@ class WorkQueueQueueClient:
         state_puts: Optional[Dict[str, bytes]] = None,
         state_deletes: Optional[List[str]] = None,
     ) -> int:
-        self._check()
-        return self._client.nack(
+        client = self._check()
+        return client.nack(
             queue,
             msg_ids,
             claim_tokens=claim_tokens,
@@ -331,8 +331,8 @@ class WorkQueueQueueClient:
         state_puts: Optional[Dict[str, bytes]] = None,
         state_deletes: Optional[List[str]] = None,
     ) -> List[str]:
-        self._check()
-        return self._client.ack_and_forward(
+        client = self._check()
+        return client.ack_and_forward(
             upstream_queue,
             upstream_msg_ids,
             upstream_claim_tokens,
@@ -345,8 +345,8 @@ class WorkQueueQueueClient:
 
     # State
     def state_get(self, namespace: str, keys: List[str]) -> Dict[str, bytes]:
-        self._check()
-        return self._client.state_get(namespace, keys)
+        client = self._check()
+        return client.state_get(namespace, keys)
 
     def state_put(
         self,
@@ -354,13 +354,13 @@ class WorkQueueQueueClient:
         puts: Optional[Dict[str, bytes]] = None,
         deletes: Optional[List[str]] = None,
     ) -> tuple:
-        self._check()
-        return self._client.state_put(namespace, puts, deletes)
+        client = self._check()
+        return client.state_put(namespace, puts, deletes)
 
     # Stats
     def get_stats(self, queue: str) -> Dict[str, int]:
-        self._check()
-        result = self._client.get_stats(queue)
+        client = self._check()
+        result = client.get_stats(queue)
         stats = result.get("queues", {}).get(queue, {})
         return {
             "pending_count": stats.get("pending_count", 0),
@@ -375,17 +375,18 @@ class WorkQueueQueueClient:
     # Queue Completion API
     def mark_queue_finished(self, queue: str) -> bool:
         """Mark queue as finished (no more messages will be pushed)."""
-        self._check()
-        return self._client.mark_queue_finished(queue)
+        client = self._check()
+        return client.mark_queue_finished(queue)
 
     def is_queue_finished(self, queue: str) -> Dict[str, int]:
         """Check if queue is finished and safe to exit.
 
         Returns dict with: finished, drained, safe_to_exit, pending_count, claimed_count
         """
-        self._check()
-        return self._client.is_queue_finished(queue)
+        client = self._check()
+        return client.is_queue_finished(queue)
 
-    def _check(self) -> None:
+    def _check(self) -> WorkQueueClient:
         if self._client is None:
             raise RuntimeError("Client not started")
+        return self._client

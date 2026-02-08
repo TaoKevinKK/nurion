@@ -78,7 +78,7 @@ class JobWebUI:
             config_data = {
                 "job_config": {
                     "job_id": job_runner.job.job_id,
-                    "queue_type": job_runner.queue_type.value,
+                    "queue_type": "workqueue",
                     "workqueue_db_path": job_runner.workqueue_db_path,
                 },
                 "stage_configs": stage_configs,

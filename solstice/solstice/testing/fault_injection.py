@@ -46,7 +46,7 @@ Usage in tests:
 
 import os
 import random
-from typing import Optional
+from typing import Any, Optional, cast
 
 import ray
 
@@ -162,7 +162,8 @@ def _get_or_create_actor() -> Optional[ray.actor.ActorHandle]:
         _fault_actor = ray.get_actor(_FAULT_ACTOR_NAME)
     except ValueError:
         # Create new actor
-        _fault_actor = _FaultStateActor.options(
+        actor_class = cast(Any, _FaultStateActor)
+        _fault_actor = actor_class.options(
             name=_FAULT_ACTOR_NAME,
             lifetime="detached",
             get_if_exists=True,

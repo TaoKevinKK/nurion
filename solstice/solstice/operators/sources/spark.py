@@ -162,7 +162,7 @@ class SparkSplitPlanner:
 
     def plan_splits(self, stage_id: str) -> Iterator[Split]:
         """Initialize Spark, load data, persist to object store, and yield splits."""
-        from raydp.spark.dataset import (
+        from raydp.spark.dataset import (  # type: ignore[import-not-found]
             _save_spark_df_to_object_store,
             get_raydp_master_owner,
         )
@@ -216,7 +216,7 @@ class SparkSplitPlanner:
         if self._spark_initialized:
             return
 
-        import raydp
+        import raydp  # type: ignore[import-not-found]
 
         spark_configs = {
             "spark.sql.execution.arrow.pyspark.enabled": "true",
@@ -255,7 +255,7 @@ class SparkSplitPlanner:
     def _stop_spark(self) -> None:
         """Stop Spark session."""
         if self._spark_initialized:
-            import raydp
+            import raydp  # type: ignore[import-not-found]
 
             raydp.stop_spark()
             self._spark = None

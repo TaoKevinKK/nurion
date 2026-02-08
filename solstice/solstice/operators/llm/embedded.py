@@ -437,7 +437,7 @@ class EmbeddedLLMOperator(Operator):
 
         from PIL import Image
 
-        inputs = []
+        inputs: list[dict[str, Any] | str] = []
         for prompt, image_data in zip(prompts, images):
             if image_data is None:
                 inputs.append(prompt)

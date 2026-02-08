@@ -27,7 +27,7 @@ This avoids per-request Ray calls by:
 import asyncio
 import logging
 import time
-from typing import Optional
+from typing import Any, Optional, cast
 
 import ray
 
@@ -329,7 +329,8 @@ def get_or_create_rate_limiter(
     Returns:
         Ray actor handle to the global rate limiter
     """
-    return GlobalRateLimiter.options(
+    actor_class = cast(Any, GlobalRateLimiter)
+    return actor_class.options(
         name=name,
         get_if_exists=True,
         # No lifetime="detached" - actor will be GC'd when no references exist

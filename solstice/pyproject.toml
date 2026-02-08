@@ -114,6 +114,18 @@ module = [
     "lance.*",
     "pyiceberg.*",
     "grpc.*",
+    "boto3",
+    "boto3.*",
+    "botocore",
+    "botocore.*",
+    "raydp",
+    "raydp.*",
+    "vllm",
+    "vllm.*",
+    "sglang",
+    "sglang.*",
+    "PIL",
+    "PIL.*",
 ]
 ignore_missing_imports = true
 
