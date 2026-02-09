@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 def _deterministic_hash(key: str) -> int:
     """Compute deterministic hash using SHA-256.
-    
+
     Python's built-in hash() is non-deterministic across runs due to
     hash randomization. We need deterministic routing for Union-Find shards.
     """

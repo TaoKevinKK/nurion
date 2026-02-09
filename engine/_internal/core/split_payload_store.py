@@ -17,13 +17,15 @@
 This module provides a flexible storage abstraction for SplitPayload objects.
 Different implementations can use various backends:
 - Ray Object Store (default, for distributed in-memory storage)
-- S3/GCS (for persistent storage)
-- Redis (for shared caching)
-- etc.
+- Fsspec-compatible filesystems (S3, GCS, local/shared filesystems)
 
 Usage:
     # Create a Ray-backed store
     store = RaySplitPayloadStore(name="my_store")
+
+    # Create an fsspec-backed store (S3, shared filesystem, local disk, etc.)
+    store = FsspecSplitPayloadStore(base_uri="s3://bucket/prefix", job_id="my_job")
+    store = FsspecSplitPayloadStore(base_uri="file:///mnt/shared", job_id="my_job")
 
     # Store payload (synchronous API - same across all implementations)
     store.store("key1", payload)
@@ -40,13 +42,16 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import ray
 
 from _internal.core.models import SplitPayload
 from _internal.utils.logging import create_ray_logger
+
+logger = logging.getLogger(__name__)
 
 
 class SplitPayloadStore(ABC):
@@ -303,3 +308,133 @@ class RaySplitPayloadStore(SplitPayloadStore):
             - estimated_bytes: Estimated storage size (placeholder)
         """
         return ray.get(self._actor.get_metrics.remote())
+
+
+def _sanitize_key(key: str) -> str:
+    """Sanitize a payload key for use as a filesystem path component.
+
+    Keys like ``job1:stage1:split_0`` contain colons which are invalid on
+    some filesystems (e.g. Windows, some S3 clients).
+    """
+    return key.replace(":", "_").replace("/", "_")
+
+
+# =============================================================================
+# Fsspec (S3 / Shared Filesystem / Local Disk) Implementation
+# =============================================================================
+
+
+class FsspecSplitPayloadStore(SplitPayloadStore):
+    """Fsspec-backed implementation of SplitPayloadStore.
+
+    Works with any fsspec-compatible filesystem URI:
+    - ``s3://bucket/prefix`` -- Amazon S3
+    - ``gs://bucket/prefix`` -- Google Cloud Storage
+    - ``file:///mnt/shared`` -- shared filesystem (NFS/EFS/Lustre) or local disk
+
+    Payloads are serialized as Arrow IPC streaming bytes and stored as
+    individual files under ``{base_uri}/{job_id}/{sanitized_key}.arrow``.
+
+    Usage:
+        store = FsspecSplitPayloadStore(
+            base_uri="s3://my-bucket/payloads",
+            job_id="job_123",
+        )
+        store.store("key1", payload)
+        payload = store.get("key1")
+        store.delete("key1")
+        store.clear()
+    """
+
+    def __init__(
+        self,
+        base_uri: str,
+        job_id: str,
+        storage_options: Optional[Dict[str, Any]] = None,
+    ):
+        """Initialize the fsspec-backed store.
+
+        Args:
+            base_uri: Fsspec-compatible URI for the storage root
+                (e.g. ``s3://bucket/prefix``, ``file:///mnt/shared``).
+            job_id: Job identifier used to namespace payloads.
+            storage_options: Extra options passed to ``fsspec.core.url_to_fs``
+                (e.g. S3 credentials, custom endpoint).
+        """
+        import fsspec.core
+
+        self._base_uri = base_uri.rstrip("/")
+        self._job_id = job_id
+        full_path = f"{self._base_uri}/{job_id}"
+        self._fs, self._root = fsspec.core.url_to_fs(full_path, **(storage_options or {}))
+        self._fs.mkdirs(self._root, exist_ok=True)
+
+        # Metrics tracking
+        self._total_stored = 0
+        self._total_deleted = 0
+
+        logger.info(
+            f"FsspecSplitPayloadStore initialized: "
+            f"root={full_path} fs_type={type(self._fs).__name__}"
+        )
+
+    def _key_to_path(self, key: str) -> str:
+        """Map a payload key to a filesystem path."""
+        safe = _sanitize_key(key)
+        return f"{self._root}/{safe}.arrow"
+
+    def store(self, key: str, payload: SplitPayload) -> str:
+        import pyarrow.ipc as ipc
+
+        path = self._key_to_path(key)
+        with self._fs.open(path, "wb") as f:
+            writer = ipc.new_file(f, payload.data.schema)
+            writer.write_table(payload.data)
+            writer.close()
+        self._total_stored += 1
+        return key
+
+    def get(self, key: str) -> Optional[SplitPayload]:
+        import pyarrow.ipc as ipc
+
+        path = self._key_to_path(key)
+        if not self._fs.exists(path):
+            return None
+        with self._fs.open(path, "rb") as f:
+            reader = ipc.open_file(f)
+            table = reader.read_all()
+        return SplitPayload.from_arrow(table, split_id=key)
+
+    def delete(self, key: str) -> bool:
+        path = self._key_to_path(key)
+        if not self._fs.exists(path):
+            return False
+        self._fs.rm(path)
+        self._total_deleted += 1
+        return True
+
+    def clear(self) -> int:
+        try:
+            files = self._fs.ls(self._root, detail=False)
+        except FileNotFoundError:
+            return 0
+        count = len(files)
+        if count > 0:
+            self._fs.rm(self._root, recursive=True)
+            self._fs.mkdirs(self._root, exist_ok=True)
+        return count
+
+    def get_metrics(self) -> dict:
+        """Get storage metrics for monitoring.
+
+        Returns:
+            Dictionary with:
+            - total_stored: Lifetime count of stored objects
+            - total_deleted: Lifetime count of deleted objects
+            - fs_type: Filesystem backend type name
+        """
+        return {
+            "total_stored": self._total_stored,
+            "total_deleted": self._total_deleted,
+            "fs_type": type(self._fs).__name__,
+        }

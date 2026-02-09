@@ -41,7 +41,11 @@ from _internal.core.stage_master import (
     StageMaster,
     QueueEndpoint,
 )
-from _internal.core.split_payload_store import RaySplitPayloadStore
+from _internal.core.split_payload_store import (
+    SplitPayloadStore,
+    RaySplitPayloadStore,
+    FsspecSplitPayloadStore,
+)
 from _internal.queue import WorkQueueBrokerManager
 from _internal.runtime.autoscaler import SimpleAutoscaler
 from _internal.runtime.backpressure import JobBackpressureController
@@ -99,7 +103,7 @@ class RayJobRunner:
         self.logger = create_ray_logger(f"RayJobRunner-{job.job_id}")
 
         # SplitPayloadStore - shared across all stages
-        self._payload_store: Optional[RaySplitPayloadStore] = None
+        self._payload_store: Optional[SplitPayloadStore] = None
 
         # Stage masters (not Ray actors - they manage their own workers)
         self._masters: Dict[str, StageMaster] = {}
@@ -175,6 +179,26 @@ class RayJobRunner:
             self._shared_broker = None
             self._broker_endpoint = None
 
+    def _create_payload_store(self) -> SplitPayloadStore:
+        """Create a SplitPayloadStore based on job config URI.
+
+        Returns:
+            A ``RaySplitPayloadStore`` for ``ray://`` URIs (default), or a
+            ``FsspecSplitPayloadStore`` for any other fsspec-compatible URI
+            (e.g. ``s3://``, ``file://``).
+        """
+        uri = self.job.config.payload_store_uri
+        if uri == "ray://" or uri.startswith("ray://"):
+            store = RaySplitPayloadStore(name=f"payload_store_{self.job.job_id}")
+            store.wait_ready()
+            return store
+        else:
+            return FsspecSplitPayloadStore(
+                base_uri=uri,
+                job_id=self.job.job_id,
+                storage_options=self.job.config.payload_store_options or None,
+            )
+
     async def initialize(self) -> None:
         """Initialize the pipeline."""
         if self._initialized:
@@ -184,9 +208,7 @@ class RayJobRunner:
         self.logger.info(f"Initializing job {self.job.job_id}")
 
         # Create SplitPayloadStore - shared across all stages
-        # Wait for actor to be ready before starting workers
-        self._payload_store = RaySplitPayloadStore(name=f"payload_store_{self.job.job_id}")
-        self._payload_store.wait_ready()
+        self._payload_store = self._create_payload_store()
         self.logger.info(f"Created SplitPayloadStore for job {self.job.job_id}")
 
         # Create shared WorkQueue broker for all stages (if using WorkQueue)

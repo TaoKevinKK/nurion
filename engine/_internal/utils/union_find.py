@@ -132,7 +132,7 @@ class UnionFind:
         # Union by rank, with deterministic tie-breaking by key lexicographic order
         rank_a = self._rank[root_a]
         rank_b = self._rank[root_b]
-        
+
         if rank_a < rank_b:
             self._parent[root_a] = root_b
         elif rank_a > rank_b:

@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 def _deterministic_hash(key: str) -> int:
     """Compute deterministic hash using SHA-256.
-    
+
     Must match the implementation in client.py for consistent routing.
     """
     return int(hashlib.sha256(key.encode("utf-8")).hexdigest()[:16], 16)
@@ -210,7 +210,7 @@ class UnionFindServiceManager:
         unique_edges_set: set[tuple[str, str]] = set()
         for a, b in all_cross_edges:
             unique_edges_set.add((min(a, b), max(a, b)))
-        
+
         # Sort edges for deterministic processing order
         unique_edges = sorted(unique_edges_set)
 
@@ -221,7 +221,7 @@ class UnionFindServiceManager:
         for a, b in unique_edges:
             all_keys_set.add(a)
             all_keys_set.add(b)
-        
+
         # Sort keys for deterministic processing
         all_keys = sorted(all_keys_set)
 
@@ -245,10 +245,10 @@ class UnionFindServiceManager:
             if local_root != global_root:
                 key_shard = _deterministic_hash(key) % self._config.num_shards
                 root_shard = _deterministic_hash(global_root) % self._config.num_shards
-                
+
                 # Send mapping to key's shard
                 shard_mappings[key_shard][key] = global_root
-                
+
                 # If global_root belongs to a different shard, ensure it knows about itself
                 # This handles the case where key is in shard A, global_root is in shard B
                 if key_shard != root_shard:

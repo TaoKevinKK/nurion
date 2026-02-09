@@ -362,9 +362,9 @@ class TestCombinedFailures:
 
         job = create_test_pipeline(
             num_records=NUM_RECORDS,
-            batch_size=500,  # Larger batches = fewer splits = faster processing
-            min_workers=3,
-            max_workers=6,
+            batch_size=100,  # Small batches = 100 splits = slow enough for chaos injection
+            min_workers=2,
+            max_workers=4,
             collector_name=self.collector_name,
             with_checksum=True,
             source_data=source_data,
@@ -382,13 +382,15 @@ class TestCombinedFailures:
             await runner.initialize()
             run_task = asyncio.create_task(runner.run())
 
-            # Wait for some progress before killing (but not too much)
+            # Wait for minimal progress so workers exist, but not so much
+            # that the pipeline finishes before we can inject chaos.
             await wait_for_progress(
-                runner, min_processed=200, timeout=60, collector_name=self.collector_name
+                runner, min_processed=50, timeout=60, collector_name=self.collector_name
             )
 
-            # Kill workers in different stages
-            for _ in range(3):
+            # Kill workers in different stages -- first kill immediately,
+            # subsequent kills after a short delay.
+            for attempt in range(5):
                 if run_task.done():
                     break
 
@@ -402,7 +404,8 @@ class TestCombinedFailures:
                 except Exception as e:
                     logger.debug(f"Failed to kill worker in {stage}: {e}")
 
-                await asyncio.sleep(random.uniform(0.5, 2.0))
+                if not run_task.done() and attempt < 4:
+                    await asyncio.sleep(random.uniform(0.5, 2.0))
 
             await asyncio.wait_for(run_task, timeout=180)
         finally:

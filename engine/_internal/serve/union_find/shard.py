@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 def _deterministic_hash(key: str) -> int:
     """Compute deterministic hash using SHA-256.
-    
+
     Must match the implementation in client.py and manager.py for consistent routing.
     """
     return int(hashlib.sha256(key.encode("utf-8")).hexdigest()[:16], 16)
@@ -194,7 +194,7 @@ class UFShard:
 
     def resolve_cross_shard(self, global_mappings: dict[str, str]) -> int:
         """Apply global cross-shard resolution mappings.
-        
+
         Important: We apply all mappings regardless of ownership, because:
         1. A doc_id owned by this shard may need to point to a global_root in another shard
         2. The global_root will be created as a stub if it doesn't exist locally
@@ -210,38 +210,42 @@ class UFShard:
 
     def export_clusters(self) -> pa.Table:
         """Export (doc_id, cluster_id) mappings for keys owned by this shard.
-        
+
         Only exports keys that this shard is responsible for (based on hash partitioning).
         This prevents duplicate entries when multiple shards have the same key due to
         cross-shard resolution.
         """
         full_table = self._uf.export_clusters()
-        
+
         if full_table.num_rows == 0:
             return full_table
-        
+
         # Filter to only keys owned by this shard
         doc_ids = full_table.column("doc_id").to_pylist()
         cluster_ids = full_table.column("cluster_id").to_pylist()
-        
+
         owned_doc_ids = []
         owned_cluster_ids = []
-        
+
         for doc_id, cluster_id in zip(doc_ids, cluster_ids):
             if self._owns_key(doc_id):
                 owned_doc_ids.append(doc_id)
                 owned_cluster_ids.append(cluster_id)
-        
+
         if not owned_doc_ids:
-            return pa.table({
-                "doc_id": pa.array([], type=pa.string()),
-                "cluster_id": pa.array([], type=pa.string()),
-            })
-        
-        return pa.table({
-            "doc_id": owned_doc_ids,
-            "cluster_id": owned_cluster_ids,
-        })
+            return pa.table(
+                {
+                    "doc_id": pa.array([], type=pa.string()),
+                    "cluster_id": pa.array([], type=pa.string()),
+                }
+            )
+
+        return pa.table(
+            {
+                "doc_id": owned_doc_ids,
+                "cluster_id": owned_cluster_ids,
+            }
+        )
 
     # =========================================================================
     # Checkpoint / Restore

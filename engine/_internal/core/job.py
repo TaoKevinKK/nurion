@@ -51,6 +51,11 @@ class JobConfig:
         ray_init_kwargs: Arguments to pass to ray.init()
         autoscale_config: Configuration for autoscaling (None to disable)
         webui: WebUI debugging interface configuration
+        payload_store_uri: URI for the SplitPayloadStore backend.
+            ``ray://`` (default) uses Ray Object Store; any fsspec-compatible URI
+            (e.g. ``s3://bucket/prefix``, ``file:///mnt/shared``) uses
+            ``FsspecSplitPayloadStore``.
+        payload_store_options: Extra options passed to fsspec (e.g. S3 credentials).
     """
 
     workqueue_db_path: str = "memory://"
@@ -59,6 +64,8 @@ class JobConfig:
     ray_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     autoscale_config: Optional["AutoscaleConfig"] = None
     webui: WebUIConfig = field(default_factory=WebUIConfig)
+    payload_store_uri: str = "ray://"
+    payload_store_options: Dict[str, Any] = field(default_factory=dict)
 
 
 class Job:
