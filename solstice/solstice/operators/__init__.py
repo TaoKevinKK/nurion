@@ -43,21 +43,12 @@ from solstice.operators.dedupe import (
     HashDedupeOperator,
     HashDedupeConfig,
 )
-from solstice.operators.minhash import (
-    MinHashComputeConfig,
-    MinHashComputeOperator,
-    CandidatePairConfig,
-    CandidatePairOperator,
-)
-from solstice.operators.connected_components import (
-    CCInitConfig,
-    CCInitOperator,
-    CCIterateConfig,
-    CCIterateOperator,
-    CCMessageConfig,
-    CCMessageOperator,
-    DedupeByClusterConfig,
-    DedupeByClusterOperator,
+
+# New dedup operators (Union-Find Service architecture)
+from solstice.operators.dedup import (
+    MinHashEncoderConfig,
+    BucketUnionOperatorConfig,
+    DedupFilterOperatorConfig,
 )
 
 # HTTP operators
@@ -117,20 +108,10 @@ __all__ = [
     # Dedupe operators and configs
     "HashDedupeOperator",
     "HashDedupeConfig",
-    # MinHash operators and configs
-    "MinHashComputeConfig",
-    "MinHashComputeOperator",
-    "CandidatePairConfig",
-    "CandidatePairOperator",
-    # Connected Components operators and configs
-    "CCInitConfig",
-    "CCInitOperator",
-    "CCIterateConfig",
-    "CCIterateOperator",
-    "CCMessageConfig",
-    "CCMessageOperator",
-    "DedupeByClusterConfig",
-    "DedupeByClusterOperator",
+    # Dedup operators (Union-Find Service architecture)
+    "MinHashEncoderConfig",
+    "BucketUnionOperatorConfig",
+    "DedupFilterOperatorConfig",
     # HTTP operators
     "HttpOperator",
     "HttpOperatorConfig",

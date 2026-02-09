@@ -26,6 +26,8 @@ dependencies = [
     "tenacity>=8.2.0",          # Retry library for transient failures
     # Compute engine
     "duckdb>=1.1.0",            # Embedded OLAP database for shuffle/aggregation
+    # Dedup
+    "xxhash>=3.4.0",            # Fast non-cryptographic hash for MinHash
     # WebUI dependencies
     "slatedb>=0.8.1",           # S3-backed KV store for history
     "fastapi>=0.115.0",         # Web framework

@@ -1,4 +1,10 @@
-# Deduplication & Fault Tolerance TODO
+# Deduplication & Fault Tolerance TODO (DEPRECATED)
+
+> **DEPRECATED** - This document describes the old CC label propagation dedup design.
+> The dedup system has been replaced by the Union-Find Service architecture.
+> See `design-docs/minhash-dedup.md` and `todo/dedup.md` for the current design.
+>
+> _Deprecated: 2026-02-09_
 
 Track implementation status of deduplication operators and fault tolerance features.
 

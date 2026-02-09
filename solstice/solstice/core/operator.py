@@ -62,7 +62,6 @@ if TYPE_CHECKING:
     from solstice.core.models import QueueEndpoint
     from solstice.core.source import SourceStrategy
     from solstice.core.sink import SinkCommitter
-    from solstice.core.stage_master import StageMaster
 
 
 T = TypeVar("T", bound="Operator")
@@ -213,7 +212,6 @@ class OperatorConfig(ABC):
     """
 
     operator_class: ClassVar[Optional[Type["Operator"]]] = None
-    master_class: ClassVar[Optional[Type["StageMaster"]]] = None
 
     def get_merge_upstream(self) -> int:
         """Number of upstream messages to merge into one process_split() call.

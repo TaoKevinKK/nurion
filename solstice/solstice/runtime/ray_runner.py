@@ -355,17 +355,6 @@ class RayJobRunner:
         # Payload store must be initialized before creating masters
         assert self._payload_store is not None, "payload_store not initialized"
 
-        # Check for special orchestration (e.g., CCIterateMaster)
-        master_class = stage.operator_config.master_class
-        if master_class is not None:
-            return master_class(
-                job_id=self.job.job_id,
-                stage=stage,
-                payload_store=self._payload_store,
-                runtime=runtime,
-            )
-
-        # Default: StageMaster (internally calls create_source/create_sink_committer)
         return StageMaster(
             job_id=self.job.job_id,
             stage=stage,
