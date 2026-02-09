@@ -1,0 +1,259 @@
+{% extends "base.html" %}
+
+{% block title %}Worker {{ worker.worker_id[:16] }}{% endblock %}
+
+{% block content %}
+<article class="compact"
+         hx-get="{{ base_path }}/jobs/{{ job_id }}/workers/{{ worker.worker_id }}"
+         hx-trigger="nurion-poll from:body"
+         hx-swap="outerHTML"
+         hx-select="article.compact">
+    <header>
+        <nav aria-label="breadcrumb">
+            <ul>
+                <li><a href="{{ base_path }}/">Jobs</a></li>
+                <li><a href="{{ base_path }}/jobs/{{ job_id }}/">{{ job_id }}</a></li>
+                {% if worker.stage_id %}
+                <li><a href="{{ base_path }}/jobs/{{ job_id }}/stages/{{ worker.stage_id }}">{{ worker.stage_id }}</a></li>
+                {% endif %}
+                <li>Worker</li>
+            </ul>
+        </nav>
+        <div style="display: flex; align-items: center; gap: 0.5rem; margin-top: 0.25rem;">
+            <h1 style="margin: 0; font-size: 1.2rem;">Worker: <code style="font-size: 0.9rem;">{{ worker.worker_id[:24] }}...</code></h1>
+            <span class="badge badge-{{ worker.status|lower }}">{{ worker.status }}</span>
+        </div>
+    </header>
+    
+    <section>
+        <p style="color: var(--pico-muted-color);">
+            Worker-level throughput and record counters are not collected.
+            Use WorkQueue queue stats on the stage page for progress.
+        </p>
+    </section>
+    
+    <!-- Lifecycle Info -->
+    <section>
+        <details open>
+            <summary>Lifecycle</summary>
+            <div style="display: grid; grid-template-columns: auto 1fr; gap: 0.25rem 1rem; font-size: 0.85rem;">
+                <strong>Status:</strong>
+                <span class="badge badge-{{ worker.status|lower }}">{{ worker.status }}</span>
+                
+                <strong>Start Time:</strong>
+                <span>
+                    {% if worker.start_time %}
+                    {{ worker.start_time|format_datetime }}
+                    {% else %}
+                    -
+                    {% endif %}
+                </span>
+                
+                <strong>End Time:</strong>
+                <span>
+                    {% if worker.end_time %}
+                    {{ worker.end_time|format_datetime }}
+                    {% elif worker.status == 'RUNNING' %}
+                    <em style="color: var(--pico-primary);">Still running...</em>
+                    {% else %}
+                    -
+                    {% endif %}
+                </span>
+                
+                <strong>Duration:</strong>
+                <span>
+                    {% if worker.end_time and worker.start_time %}
+                    {{ (worker.end_time - worker.start_time)|format_duration }}
+                    {% elif worker.start_time %}
+                    <em>{{ (now - worker.start_time)|format_duration }}</em> (ongoing)
+                    {% else %}
+                    -
+                    {% endif %}
+                </span>
+            </div>
+        </details>
+    </section>
+    
+    <!-- System Info -->
+    <section>
+        <details open>
+            <summary>System Information</summary>
+            <div style="display: grid; grid-template-columns: auto 1fr; gap: 0.25rem 1rem; font-size: 0.85rem;">
+                <strong>Worker ID:</strong> <code style="font-size: 0.75rem;">{{ worker.worker_id }}</code>
+                <strong>Stage:</strong> <span>{{ worker.stage_id|default('N/A') }}</span>
+                {% if worker.actor_id %}
+                <strong>Actor ID:</strong> 
+                <span>
+                    <code style="font-size: 0.75rem;">{{ worker.actor_id }}</code>
+                    <a href="http://localhost:8265/#/actors/{{ worker.actor_id }}" target="_blank" class="small">Ray ↗</a>
+                </span>
+                {% endif %}
+                {% if worker.node_id %}
+                <strong>Node ID:</strong> 
+                <span>
+                    <code style="font-size: 0.75rem;">{{ worker.node_id[:24] }}...</code>
+                    <a href="http://localhost:8265/#/node/{{ worker.node_id }}" target="_blank" class="small">Ray ↗</a>
+                </span>
+                {% endif %}
+                {% if worker.pid %}
+                <strong>PID:</strong> <span>{{ worker.pid }}</span>
+                {% endif %}
+                {% if worker.ip %}
+                <strong>IP:</strong> <span>{{ worker.ip }}</span>
+                {% endif %}
+            </div>
+        </details>
+    </section>
+    
+    <!-- Assigned Partitions with Offsets -->
+    {% if worker.assigned_partitions or worker.partition_offsets %}
+    <section>
+        <details open>
+            <summary>Assigned Partitions</summary>
+            {% if worker.partition_offsets %}
+            <div class="table-container">
+                <table style="font-size: 0.85rem;">
+                    <thead>
+                        <tr>
+                            <th>Partition</th>
+                            <th class="number">Current Offset</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for partition_id, offset in worker.partition_offsets.items() %}
+                        <tr>
+                            <td>{{ partition_id }}</td>
+                            <td class="number">{{ offset|format_number }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% elif worker.assigned_partitions %}
+            <div style="display: flex; flex-wrap: wrap; gap: 0.25rem;">
+                {% for p in worker.assigned_partitions %}
+                <span class="badge" style="background: var(--pico-secondary-background);">{{ p }}</span>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </details>
+    </section>
+    {% endif %}
+    
+    <!-- Worker Events -->
+    {% if worker_events %}
+    <section>
+        <details>
+            <summary>Worker Events ({{ worker_events|length }})</summary>
+            <div style="max-height: 200px; overflow-y: auto;">
+                <table style="font-size: 0.8rem;">
+                    <thead>
+                        <tr>
+                            <th>Event</th>
+                            <th>Time</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for event in worker_events %}
+                        <tr>
+                            <td>
+                                <span class="badge badge-{{ event.event_type|lower }}">{{ event.event_type }}</span>
+                            </td>
+                            <td>{{ event.timestamp|format_datetime }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </details>
+    </section>
+    {% endif %}
+    
+    <!-- Logs -->
+    <section>
+        <h2>Logs</h2>
+        <div class="log-viewer" 
+             x-data="logViewer({ endpoint: '{{ base_path }}/api/jobs/{{ job_id }}/workers/{{ worker.worker_id }}/logs' })"
+             x-init="init()">
+            
+            <div class="log-toolbar" style="display: flex; gap: 0.5rem; margin-bottom: 0.5rem;">
+                <button class="small outline" @click="refresh()">Refresh</button>
+                <button class="small" :class="{ 'outline': !autoScroll }" @click="autoScroll = !autoScroll">
+                    Auto-refresh: <span x-text="autoScroll ? 'ON' : 'OFF'"></span>
+                </button>
+            </div>
+            
+            <div class="log-content" x-ref="logContainer" 
+                 style="background: #1e293b; color: #e2e8f0; padding: 0.75rem; border-radius: 4px; font-family: monospace; font-size: 0.75rem; max-height: 400px; overflow: auto;">
+                <pre x-text="logs" style="margin: 0; white-space: pre-wrap; word-break: break-all;"></pre>
+            </div>
+        </div>
+    </section>
+    
+    <!-- Stacktrace (only for running workers) -->
+    {% if worker.status == 'RUNNING' %}
+    <section>
+        <h3>Live Stacktrace (py-spy)</h3>
+        <div style="background: #1e293b; color: #e2e8f0; padding: 0.75rem; border-radius: 4px; font-family: monospace; font-size: 0.75rem; max-height: 300px; overflow: auto;">
+            <div hx-get="{{ base_path }}/api/jobs/{{ job_id }}/workers/{{ worker.worker_id }}/stacktrace" 
+                 hx-trigger="load, nurion-poll from:body"
+                 hx-swap="innerHTML">
+                <em>Loading stacktrace... (requires py-spy installed)</em>
+            </div>
+        </div>
+    </section>
+    {% endif %}
+    
+    <!-- Back link -->
+    <section style="margin-top: 1rem;">
+        <a href="{{ base_path }}/jobs/{{ job_id }}/workers" role="button" class="outline small">← All Workers</a>
+        {% if worker.stage_id %}
+        <a href="{{ base_path }}/jobs/{{ job_id }}/stages/{{ worker.stage_id }}" role="button" class="outline small">← Stage</a>
+        {% endif %}
+        <a href="{{ base_path }}/jobs/{{ job_id }}/" role="button" class="outline small">← Job</a>
+    </section>
+</article>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+// Log viewer component
+document.addEventListener('alpine:init', () => {
+    Alpine.data('logViewer', (config) => ({
+        logs: 'Loading logs...',
+        autoScroll: true,
+        intervalId: null,
+        
+        init() {
+            this.refresh();
+            this.intervalId = setInterval(() => {
+                if (this.autoScroll) this.refresh();
+            }, 3000);
+        },
+        
+        async refresh() {
+            try {
+                const response = await fetch(config.endpoint + '?tail=200');
+                if (response.ok) {
+                    this.logs = await response.text();
+                    if (this.autoScroll) {
+                        this.$nextTick(() => {
+                            this.$refs.logContainer.scrollTop = this.$refs.logContainer.scrollHeight;
+                        });
+                    }
+                } else {
+                    this.logs = 'Error: ' + response.status + ' ' + response.statusText;
+                }
+            } catch (e) {
+                this.logs = 'Error loading logs: ' + e.message;
+            }
+        },
+        
+        destroy() {
+            if (this.intervalId) clearInterval(this.intervalId);
+        }
+    }));
+});
+
+</script>
+{% endblock %}

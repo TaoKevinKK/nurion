@@ -227,8 +227,8 @@ jobs:
       uses: tj-actions/changed-files@v45
       with:
         files: |
-          aether/**
-          solstice/**
+          control/**
+          engine/**
           lib/**
           scripts/**
           pyproject.toml
@@ -264,25 +264,25 @@ jobs:
       run: |
         python3 scripts/check_license_headers.py
     
-    - name: Check aether
+    - name: Check control
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
-        cd aether
+        cd control
         uv sync --dev --python 3.12
         uv run --no-sync ruff check .
         uv run --no-sync ruff format --check .
 
-    - name: Check solstice
+    - name: Check engine
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
-        cd solstice
+        cd engine
         # CI mode: use pre-built wheels via --find-links, skip editable sources
         uv sync --dev --python 3.12 --no-sources --find-links /tmp/wheels/
-        uv run --no-sync ruff check solstice/
-        uv run --no-sync ruff format --check solstice/
+        uv run --no-sync ruff check _internal/
+        uv run --no-sync ruff format --check _internal/
     
   # ============================================================================
-  # Solstice type checks
+  # Engine type checks
   # ============================================================================
 
   mypy:
@@ -301,13 +301,13 @@ jobs:
       uses: tj-actions/changed-files@v45
       with:
         files: |
-          solstice/**
+          engine/**
           lib/**
           uv.lock
 
-    - name: Skip if no Solstice/lib changes
+    - name: Skip if no Engine/lib changes
       if: steps.changed-files.outputs.any_changed == 'false' && github.event_name == 'pull_request'
-      run: echo "No Solstice/lib files changed, skipping..."
+      run: echo "No Engine/lib files changed, skipping..."
 
     - name: Download pre-built wheels
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
@@ -333,22 +333,22 @@ jobs:
     - name: Install dependencies
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
-        cd solstice
+        cd engine
         # CI mode: use pre-built wheels via --find-links, skip editable sources
         uv sync --dev --python 3.12 --no-sources --find-links /tmp/wheels/
     
     - name: Run mypy
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
-        cd solstice
-        uv run --no-sync mypy solstice/
+        cd engine
+        uv run --no-sync mypy _internal/
 
   # ============================================================================
   # Aether tests (Python 3.12, no Rust/Java dependencies)
   # ============================================================================
 
-  test-aether:
-    name: Aether Tests
+  test-control:
+    name: Control Plane Tests
     runs-on: ubuntu-latest
     
     steps:
@@ -361,7 +361,7 @@ jobs:
       uses: tj-actions/changed-files@v45
       with:
         files: |
-          aether/**
+          control/**
           scripts/**
           pyproject.toml
           uv.lock
@@ -385,30 +385,30 @@ jobs:
     - name: Install dependencies
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
-        cd aether
+        cd control
         uv sync --dev
     
     - name: Run tests
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
-        cd aether
+        cd control
         uv run --no-sync pytest tests/ -v
     
     - name: Upload coverage to Codecov
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       uses: codecov/codecov-action@v4
       with:
-        file: ./aether/coverage.xml
+        file: ./control/coverage.xml
         flags: unittests
         name: codecov-umbrella
         fail_ci_if_error: false
 
   # ============================================================================
-  # Solstice unit tests (no external services, fast)
+  # Engine unit tests (no external services, fast)
   # ============================================================================
 
-  test-solstice-unit:
-    name: Solstice Unit Tests
+  test-engine-unit:
+    name: Engine Unit Tests
     runs-on: ubuntu-latest
     needs: [build-raydp, build-workqueue-rs]
     if: always() && !cancelled()
@@ -423,12 +423,12 @@ jobs:
       uses: tj-actions/changed-files@v45
       with:
         files: |
-          solstice/**
+          engine/**
           lib/**
     
-    - name: Skip if no Solstice/lib changes
+    - name: Skip if no Engine/lib changes
       if: steps.changed-files.outputs.any_changed == 'false' && github.event_name == 'pull_request'
-      run: echo "No Solstice/lib files changed, skipping..."
+      run: echo "No Engine/lib files changed, skipping..."
     
     - name: Download pre-built wheels
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
@@ -454,14 +454,14 @@ jobs:
     - name: Install dependencies
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
-        cd solstice
+        cd engine
         # CI mode: use pre-built wheels via --find-links, skip editable sources
         uv sync --dev --python 3.12 --no-sources --find-links /tmp/wheels/
     
     - name: Run unit tests
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
-        cd solstice
+        cd engine
         uv run --no-sync pytest tests/ -v --tb=short -m "not integration and not distributed and not workflow and not chaos and not stability"
     
     - name: Upload Ray logs on failure
@@ -474,11 +474,11 @@ jobs:
         if-no-files-found: ignore
 
   # ============================================================================
-  # Solstice integration tests (requires Aether, Spark JARs)
+  # Engine integration tests (requires Aether, Spark JARs)
   # ============================================================================
 
-  test-solstice-integration:
-    name: Solstice Integration Tests
+  test-engine-integration:
+    name: Engine Integration Tests
     runs-on: ubuntu-latest
     needs: [build-raydp, build-workqueue-rs]
     if: always() && !cancelled()
@@ -517,16 +517,16 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
     
-    - name: Start aether services
+    - name: Start control plane services
       run: |
-        cd aether
+        cd control
         docker compose build
         docker compose up -d 
         
         echo "Waiting for aether to be ready..."
         for i in {1..30}; do
           if curl -f http://localhost:8000/api/health 2>/dev/null; then
-            echo "Aether is ready!"
+            echo "Control plane is ready!"
             break
           fi
           echo "Waiting... ($i/30)"
@@ -547,13 +547,13 @@ jobs:
       
     - name: Install dependencies
       run: |
-        cd solstice
+        cd engine
         # CI mode: use pre-built wheels via --find-links, skip editable sources
         uv sync --dev --python 3.12 --no-sources --find-links /tmp/wheels/
     
     - name: Run integration tests
       run: |
-        cd solstice
+        cd engine
         uv run --no-sync pytest tests/ -v --tb=short -m "integration"
     
     - name: Upload Ray logs on failure
@@ -568,15 +568,15 @@ jobs:
     - name: Stop services
       if: always()
       run: |
-        cd aether
+        cd control
         docker compose down -v
 
   # ============================================================================
-  # Solstice distributed tests (multi-worker Ray pipelines)
+  # Engine distributed tests (multi-worker Ray pipelines)
   # ============================================================================
 
-  test-solstice-distributed:
-    name: Solstice Distributed Tests
+  test-engine-distributed:
+    name: Engine Distributed Tests
     runs-on: ubuntu-latest
     needs: [build-raydp, build-workqueue-rs]
     if: always() && !cancelled()
@@ -591,12 +591,12 @@ jobs:
       uses: tj-actions/changed-files@v45
       with:
         files: |
-          solstice/**
+          engine/**
           lib/**
     
-    - name: Skip if no Solstice/lib changes
+    - name: Skip if no Engine/lib changes
       if: steps.changed-files.outputs.any_changed == 'false' && github.event_name == 'pull_request'
-      run: echo "No Solstice/lib files changed, skipping..."
+      run: echo "No Engine/lib files changed, skipping..."
     
     - name: Download pre-built wheels
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
@@ -622,14 +622,14 @@ jobs:
     - name: Install dependencies
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
-        cd solstice
+        cd engine
         # CI mode: use pre-built wheels via --find-links, skip editable sources
         uv sync --dev --python 3.12 --no-sources --find-links /tmp/wheels/
     
     - name: Run distributed tests
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
-        cd solstice
+        cd engine
         uv run --no-sync pytest tests/ -v --tb=short -m "distributed"
     
     - name: Upload Ray logs on failure
@@ -642,11 +642,11 @@ jobs:
         if-no-files-found: ignore
 
   # ============================================================================
-  # Solstice stability tests (deterministic fault injection)
+  # Engine stability tests (deterministic fault injection)
   # ============================================================================
 
-  test-solstice-stability:
-    name: Solstice Stability Tests
+  test-engine-stability:
+    name: Engine Stability Tests
     runs-on: ubuntu-latest
     needs: [build-raydp, build-workqueue-rs]
     if: always() && !cancelled()
@@ -661,12 +661,12 @@ jobs:
       uses: tj-actions/changed-files@v45
       with:
         files: |
-          solstice/**
+          engine/**
           lib/**
     
-    - name: Skip if no Solstice/lib changes
+    - name: Skip if no Engine/lib changes
       if: steps.changed-files.outputs.any_changed == 'false' && github.event_name == 'pull_request'
-      run: echo "No Solstice/lib files changed, skipping..."
+      run: echo "No Engine/lib files changed, skipping..."
     
     - name: Download pre-built wheels
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
@@ -692,14 +692,14 @@ jobs:
     - name: Install dependencies
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
-        cd solstice
+        cd engine
         # CI mode: use pre-built wheels via --find-links, skip editable sources
         uv sync --dev --python 3.12 --no-sources --find-links /tmp/wheels/
     
     - name: Run stability tests
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
-        cd solstice
+        cd engine
         uv run --no-sync pytest tests/ -v --tb=short -m "stability" --timeout=1200
     
     - name: Upload Ray logs on failure
@@ -712,11 +712,11 @@ jobs:
         if-no-files-found: ignore
 
   # ============================================================================
-  # Solstice workflow tests (end-to-end pipeline tests, slow)
+  # Engine workflow tests (end-to-end pipeline tests, slow)
   # ============================================================================
 
-  test-solstice-workflow:
-    name: Solstice Workflow Tests
+  test-engine-workflow:
+    name: Engine Workflow Tests
     runs-on: ubuntu-latest
     needs: [build-raydp, build-workqueue-rs]
     if: always() && !cancelled()
@@ -745,12 +745,12 @@ jobs:
       uses: tj-actions/changed-files@v45
       with:
         files: |
-          solstice/**
+          engine/**
           lib/**
     
-    - name: Skip if no Solstice/lib changes
+    - name: Skip if no Engine/lib changes
       if: steps.changed-files.outputs.any_changed == 'false' && github.event_name == 'pull_request'
-      run: echo "No Solstice/lib files changed, skipping..."
+      run: echo "No Engine/lib files changed, skipping..."
     
     - name: Install system dependencies
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
@@ -782,14 +782,14 @@ jobs:
     - name: Install dependencies
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
-        cd solstice
+        cd engine
         # CI mode: use pre-built wheels via --find-links, skip editable sources
         uv sync --dev --python 3.12 --no-sources --find-links /tmp/wheels/
     
     - name: Run workflow tests
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
-        cd solstice
+        cd engine
         uv run --no-sync pytest tests/ -v --tb=short -m "workflow" --timeout=1200
     
     - name: Upload Ray logs on failure
@@ -806,14 +806,14 @@ jobs:
       run: |
         rm -rf /tmp/video_workflow_test_*
         rm -rf /tmp/minhash_*
-        rm -rf /tmp/solstice_cache
+        rm -rf /tmp/nurion_cache
 
   # ============================================================================
-  # Solstice chaos tests (experimental, unstable)
+  # Engine chaos tests (experimental, unstable)
   # ============================================================================
 
-  test-solstice-chaos:
-    name: Solstice Chaos Tests
+  test-engine-chaos:
+    name: Engine Chaos Tests
     runs-on: ubuntu-latest
     needs: [build-raydp, build-workqueue-rs]
     if: always() && !cancelled()
@@ -830,12 +830,12 @@ jobs:
       uses: tj-actions/changed-files@v45
       with:
         files: |
-          solstice/**
+          engine/**
           lib/**
     
-    - name: Skip if no Solstice/lib changes
+    - name: Skip if no Engine/lib changes
       if: steps.changed-files.outputs.any_changed == 'false' && github.event_name == 'pull_request'
-      run: echo "No Solstice/lib files changed, skipping..."
+      run: echo "No Engine/lib files changed, skipping..."
     
     - name: Download pre-built wheels
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
@@ -861,14 +861,14 @@ jobs:
     - name: Install dependencies
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
-        cd solstice
+        cd engine
         # CI mode: use pre-built wheels via --find-links, skip editable sources
         uv sync --dev --python 3.12 --no-sources --find-links /tmp/wheels/
 
     - name: Run chaos tests
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
-        cd solstice
+        cd engine
         uv run --no-sync pytest tests/ -v --tb=short -m "chaos" --timeout=600
     
     - name: Upload Ray logs on failure

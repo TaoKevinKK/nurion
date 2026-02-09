@@ -10,15 +10,15 @@ A modern data platform workspace combining orchestration and multimodal data pro
 
 Nurion is a modern data platform workspace designed to provide:
 
-- **Data Orchestration & Coordination**: Task management, Kubernetes integration, and data lake catalog APIs through the Aether service
-- **Multimodal Data Processing**: Support for Ray, Spark, and other compute modes through the Solstice framework
+- **Data Orchestration & Coordination**: Task management, Kubernetes integration, and data lake catalog APIs through the Nurion Control Plane
+- **Multimodal Data Processing**: Support for Ray, Spark, and other compute modes through the Nurion Engine
 - **Unified Development Experience**: Consistent development environment and toolchain
 - **Scalable Architecture**: Microservices architecture and containerized deployment support
 
 ### Core Components
 
-- **Aether**: FastAPI-driven orchestration service connecting tasks, infrastructure, and data products
-- **Solstice**: Ray and Spark-based multimodal data processing toolkit
+- **Nurion Control Plane**: FastAPI-driven orchestration service connecting tasks, infrastructure, and data products
+- **Nurion Engine**: Ray and Spark-based multimodal data processing toolkit
 
 ## Development Setup
 
@@ -49,9 +49,9 @@ Nurion is a modern data platform workspace designed to provide:
 
 4. **Run development services**
    ```bash
-   # Start Aether API service
-   cd aether
-   uv run uvicorn aether.app:app --reload
+   # Start Nurion Control Plane API service (path: control/)
+   cd control
+   uv run uvicorn control.app:app --reload
    ```
 
 ### Development Tools
@@ -73,13 +73,15 @@ The project provides convenient development scripts:
 
 ```
 nurion/
-├── aether/          # Orchestration service (FastAPI)
-├── solstice/        # Data processing toolkit (Ray/Spark)
+├── control/          # Nurion Control Plane (FastAPI)
+├── engine/        # Nurion Engine (Ray/Spark)
 ├── infra/           # Pulumi infrastructure (K8s deployment)
 ├── e2e/             # End-to-end test suite
 ├── scripts/         # Development and CI scripts
 └── pyproject.toml   # Workspace configuration
 ```
+
+Note: The control plane lives under `control/` and the runtime under `engine/` for now; public-facing names use "Nurion Control Plane" and "Nurion Engine".
 
 ### Development Standards
 
@@ -90,8 +92,8 @@ nurion/
 
 ### Detailed Documentation
 
-- [Aether Service Documentation](aether/README.md) - Detailed orchestration service documentation
-- [Solstice Framework Documentation](solstice/README.md) - Detailed data processing toolkit documentation
+- [Nurion Control Plane Documentation](control/README.md) - Detailed orchestration service documentation
+- [Nurion Engine Documentation](engine/README.md) - Detailed data processing toolkit documentation
 - [Nightly E2E Testing Setup](e2e/README.md) - E2E testing infrastructure and configuration
 
 ## E2E Testing

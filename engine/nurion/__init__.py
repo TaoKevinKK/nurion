@@ -1,0 +1,64 @@
+"""Nurion public API.
+
+This module re-exports engine symbols from the internal implementation so
+users can depend on a single "nurion" name.
+"""
+
+from pkgutil import extend_path
+
+__path__ = extend_path(__path__, __name__)
+
+from _internal import __version__ as __version__
+from _internal.core.job import Job, JobConfig, WebUIConfig
+from _internal.core.models import Split, SplitPayload
+from _internal.core.operator import Operator, OperatorConfig, OperatorRuntime
+from _internal.core.source_operator import SourceOperator
+from _internal.core.stage import Stage
+from _internal.operators.filter import FilterOperatorConfig
+from _internal.operators.map import (
+    FlatMapOperatorConfig,
+    MapBatchesOperatorConfig,
+    MapOperatorConfig,
+)
+from _internal.operators.sinks import (
+    FileSinkConfig,
+    LanceCommitPolicy,
+    LanceSinkCommitter,
+    LanceSinkConfig,
+    PrintSinkConfig,
+)
+from _internal.operators.sources import (
+    FileSourceConfig,
+    IcebergSourceConfig,
+    LanceTableSourceConfig,
+    SparkSourceConfig,
+    SparkSourceV2Config,
+)
+
+__all__ = [
+    "__version__",
+    "Job",
+    "JobConfig",
+    "WebUIConfig",
+    "Stage",
+    "SourceOperator",
+    "Operator",
+    "OperatorConfig",
+    "OperatorRuntime",
+    "Split",
+    "SplitPayload",
+    "FileSourceConfig",
+    "IcebergSourceConfig",
+    "LanceTableSourceConfig",
+    "SparkSourceConfig",
+    "SparkSourceV2Config",
+    "FileSinkConfig",
+    "LanceCommitPolicy",
+    "LanceSinkCommitter",
+    "LanceSinkConfig",
+    "PrintSinkConfig",
+    "MapOperatorConfig",
+    "MapBatchesOperatorConfig",
+    "FlatMapOperatorConfig",
+    "FilterOperatorConfig",
+]

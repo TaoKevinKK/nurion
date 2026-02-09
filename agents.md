@@ -10,14 +10,14 @@ This document provides project context and development guidelines for AI coding 
 
 | Component | Path | Description |
 |-----------|------|-------------|
-| **Aether** | `/aether` | FastAPI-driven orchestration service connecting tasks, infrastructure, and data products |
-| **Solstice** | `/solstice` | Ray + Spark multimodal data processing framework with high-throughput batch processing and streaming-style execution |
+| **Nurion Control Plane** | `/aether` | FastAPI-driven orchestration service connecting tasks, infrastructure, and data products |
+| **Nurion Engine** | `/solstice` | Ray + Spark multimodal data processing framework with high-throughput batch processing and streaming-style execution |
 
 ## Tech Stack
 
-- **Languages**: Python 3.12+ (Aether 3.13, Solstice 3.12), Scala (Spark integration)
+- **Languages**: Python 3.12+ (Control Plane 3.13, Runtime 3.12), Scala (Spark integration)
 - **Runtime**: Ray (distributed computing), Apache Spark
-- **API Framework**: FastAPI (Aether)
+- **API Framework**: FastAPI (Control Plane)
 - **Package Manager**: uv
 - **Code Quality**: Ruff (linting + formatting)
 - **Testing**: pytest
@@ -43,8 +43,8 @@ nurion/
 │       ├── raydp/           # Python package
 │       └── java/            # Spark Java/Scala components
 │
-├── solstice/                # Data processing framework
-│   ├── solstice/
+├── engine/                # Data processing framework
+│   ├── engine/
 │   │   ├── core/            # Core abstractions (Job, Stage, Operator)
 │   │   ├── operators/       # Built-in operators
 │   │   │   ├── sources/     # Data sources (Lance, Iceberg, Spark, File)
@@ -52,7 +52,7 @@ nurion/
 │   │   │   ├── map.py       # Transform operators
 │   │   │   └── filter.py    # Filter operators
 │   │   ├── queue/           # Queue backend (WorkQueue)
-│   │   └── runtime/         # Ray runtime and autoscaling
+│   │   └── engine/         # Ray runtime and autoscaling
 │   ├── workflows/           # Example workflows
 │   ├── tests/
 │   ├── design-docs/         # Design documents (architecture decisions)
@@ -63,7 +63,7 @@ nurion/
 
 ## Architecture Core Concepts
 
-### Solstice Streaming Architecture
+### Nurion Engine Streaming Architecture
 
 ```
                  +--------------------+
@@ -110,11 +110,11 @@ nurion/
 ### Environment Setup
 
 ```bash
-# Aether (Python 3.13)
+# Nurion Control Plane (Python 3.13)
 cd aether
 uv sync --dev
 
-# Solstice (Python 3.12)
+# Nurion Engine (Python 3.12)
 cd solstice
 uv sync --dev --python 3.12
 ```
@@ -130,13 +130,13 @@ uv sync --dev --python 3.12
 
 2. **Python Style**: Use Ruff for formatting and linting
    ```bash
-   # Aether
+   # Control Plane
    cd aether && uv run ruff check .
    cd aether && uv run ruff format --check .
 
-   # Solstice
-   cd solstice && uv run ruff check solstice/
-   cd solstice && uv run ruff format --check solstice/
+   # Runtime
+   cd solstice && uv run ruff check engine/
+   cd solstice && uv run ruff format --check engine/
    ```
 
 3. **Type Annotations**: Use Python type hints; project is `py.typed`
@@ -144,21 +144,21 @@ uv sync --dev --python 3.12
 ### Testing
 
 ```bash
-# Aether tests
+# Control Plane tests
 cd aether && uv run pytest tests/ -v
 
-# Solstice unit tests (no external dependencies)
+# Runtime unit tests (no external dependencies)
 cd solstice && uv run pytest tests/ -v --tb=short -m "not integration"
 
-# Solstice integration tests (requires Java 11, Aether services, RayDP JARs)
+# Runtime integration tests (requires Java 11, Control Plane services, RayDP JARs)
 cd solstice && uv run pytest tests/ -v --tb=short -m "integration"
 ```
 
 #### Integration Test Prerequisites
 
-For Solstice integration tests, you need:
+For runtime integration tests, you need:
 1. **Java 11**: For Spark components
-2. **Aether services**: `cd aether && docker compose up -d` (Iceberg REST catalog)
+2. **Control Plane services**: `cd aether && docker compose up -d` (Iceberg REST catalog)
 3. **RayDP JARs**: `cd lib/raydp/java && mvn clean package -DskipTests -q`
 
 WorkQueue is embedded; no external broker is required.
@@ -167,24 +167,24 @@ WorkQueue is embedded; no external broker is required.
 
 ### When Understanding Code
 
-1. **Design Docs**: Check `/solstice/design-docs/` for architecture decisions
-2. **TODO Tracking**: Check `/solstice/todo/` for implementation status and pending work
-3. **Core Abstractions**: Start with `solstice/core/` to understand the framework
-4. **Example Workflows**: Reference `solstice/workflows/`
+1. **Design Docs**: Check `/engine/design-docs/` for architecture decisions
+2. **TODO Tracking**: Check `/engine/todo/` for implementation status and pending work
+3. **Core Abstractions**: Start with `engine/core/` to understand the framework
+4. **Example Workflows**: Reference `engine/workflows/`
 
 ### When Adding Features
 
 1. **New Operator**: 
-   - Inherit from `solstice.core.operator.Operator`
+   - Inherit from `nurion.Operator`
    - Implement `process_split()` method
    - Optionally implement `checkpoint()` and `restore()` for fault tolerance
 
 2. **New Data Source**:
-   - Inherit from `solstice.operators.sources.source.SourceOperator`
+   - Inherit from `nurion.SourceOperator`
    - Implement `plan_splits()` to generate initial Splits
    - Register export in `__init__.py`
 
-3. **New API Endpoint** (Aether):
+3. **New API Endpoint** (Control Plane):
    - Routes go in `aether/api/routes/`
    - Schemas go in `aether/schemas/`
    - Service logic goes in `aether/services/`
@@ -392,29 +392,29 @@ WorkQueue is embedded; no external broker is required.
 
 | Purpose | File Path |
 |---------|-----------|
-| Solstice entry point | `solstice/solstice/main.py` |
-| Job definition | `solstice/solstice/core/job.py` |
-| Stage definition | `solstice/solstice/core/stage.py` |
-| Operator base class | `solstice/solstice/core/operator.py` |
-| Stage Master | `solstice/solstice/core/stage_master.py` |
-| Stage Worker | `solstice/solstice/core/stage_worker.py` |
-| Component Managers | `solstice/solstice/core/managers/` |
-| Ray Runner | `solstice/solstice/runtime/ray_runner.py` |
-| Autoscaler | `solstice/solstice/runtime/autoscaler.py` |
-| Queue data structures | `solstice/solstice/queue/backend.py` |
-| WorkQueue backend | `solstice/solstice/queue/workqueue.py` |
-| Built-in Sources | `solstice/solstice/operators/sources/` |
-| Built-in Sinks | `solstice/solstice/operators/sinks/` |
-| Transform operators | `solstice/solstice/operators/map.py`, `filter.py` |
-| LLM operators | `solstice/solstice/operators/llm/` |
-| HTTP operators | `solstice/solstice/operators/http/` |
-| WebUI app | `solstice/solstice/webui/app.py` |
-| WebUI Storage | `solstice/solstice/webui/storage/` |
-| WebUI Collectors | `solstice/solstice/webui/collectors/` |
-| WebUI API | `solstice/solstice/webui/api/` |
-| WebUI Templates | `solstice/solstice/webui/templates/` |
-| Aether App | `aether/aether/app.py` |
-| Aether Routes | `aether/aether/api/routes/` |
+| Nurion Engine entry point | `engine/engine/main.py` |
+| Job definition | `engine/engine/core/job.py` |
+| Stage definition | `engine/engine/core/stage.py` |
+| Operator base class | `engine/engine/core/operator.py` |
+| Stage Master | `engine/engine/core/stage_master.py` |
+| Stage Worker | `engine/engine/core/stage_worker.py` |
+| Component Managers | `engine/engine/core/managers/` |
+| Ray Runner | `engine/engine/engine/ray_runner.py` |
+| Autoscaler | `engine/engine/engine/autoscaler.py` |
+| Queue data structures | `engine/engine/queue/backend.py` |
+| WorkQueue backend | `engine/engine/queue/workqueue.py` |
+| Built-in Sources | `engine/engine/operators/sources/` |
+| Built-in Sinks | `engine/engine/operators/sinks/` |
+| Transform operators | `engine/engine/operators/map.py`, `filter.py` |
+| LLM operators | `engine/engine/operators/llm/` |
+| HTTP operators | `engine/engine/operators/http/` |
+| WebUI app | `engine/engine/webui/app.py` |
+| WebUI Storage | `engine/engine/webui/storage/` |
+| WebUI Collectors | `engine/engine/webui/collectors/` |
+| WebUI API | `engine/engine/webui/api/` |
+| WebUI Templates | `engine/engine/webui/templates/` |
+| Control Plane App | `aether/aether/app.py` |
+| Control Plane Routes | `aether/aether/api/routes/` |
 
 ## Common Task Examples
 
@@ -422,11 +422,14 @@ WorkQueue is embedded; no external broker is required.
 
 ```python
 import asyncio
-from solstice.core.job import Job, JobConfig
-from solstice.core.stage import Stage
-from solstice.operators.sources import LanceTableSourceConfig
-from solstice.operators.map import MapOperatorConfig
-from solstice.operators.sinks import FileSinkConfig
+from nurion import (
+    FileSinkConfig,
+    Job,
+    JobConfig,
+    LanceTableSourceConfig,
+    MapOperatorConfig,
+    Stage,
+)
 
 # Create job with configuration
 job = Job(
@@ -469,8 +472,7 @@ asyncio.run(main())
 from dataclasses import dataclass
 from typing import Optional, ClassVar, Type
 
-from solstice.core.operator import Operator, OperatorConfig, OperatorRuntime
-from solstice.core.models import Split, SplitPayload
+from nurion import Operator, OperatorConfig, OperatorRuntime, Split, SplitPayload
 
 
 @dataclass
@@ -508,7 +510,7 @@ MyOperatorConfig.operator_class = MyOperator
 
 ## WebUI - Debugging Interface
 
-Solstice includes a web-based debugging interface for monitoring and analyzing jobs.
+Nurion Engine includes a web-based debugging interface for monitoring and analyzing jobs.
 
 ### Key Features
 
@@ -534,7 +536,7 @@ Solstice includes a web-based debugging interface for monitoring and analyzing j
 
 **Multi-Job Routing:**
 ```
-http://localhost:8000/solstice/          ← Portal (all jobs)
+http://localhost:8000/engine/          ← Portal (all jobs)
 └── /jobs/{job_id}/                      ← Specific job
     ├── /stages/{stage_id}
     ├── /workers/{worker_id}
@@ -544,7 +546,7 @@ http://localhost:8000/solstice/          ← Portal (all jobs)
 ### Usage
 
 ```python
-from solstice.core.job import Job, JobConfig, WebUIConfig
+from nurion import Job, JobConfig, WebUIConfig
 
 job = Job(
     job_id="my_job",
@@ -561,28 +563,28 @@ job = Job(
 runner = job.create_ray_runner()
 await runner.run()
 
-# Access: http://localhost:8000/solstice/jobs/my_job/
+# Access: http://localhost:8000/engine/jobs/my_job/
 ```
 
 **History Server:**
 ```bash
-solstice history-server -s s3://bucket/solstice-history/ -p 8080
+nurion history-server -s s3://bucket/solstice-history/ -p 8080
 ```
 
 ### Adding WebUI Features
 
 1. **New API Endpoint**:
-   - Routes go in `solstice/webui/api/`
+   - Routes go in `engine/webui/api/`
    - Use mode-aware pattern (embedded vs history)
    - Return lightweight data for large datasets
 
 2. **New Collector**:
-   - Inherit from base patterns in `solstice/webui/collectors/`
+   - Inherit from base patterns in `engine/webui/collectors/`
    - Store to SlateDB for history
    - Update at appropriate intervals
 
 3. **New Template**:
-   - Extend `base.html` in `solstice/webui/templates/`
+   - Extend `base.html` in `engine/webui/templates/`
    - Use HTMX for dynamic updates
    - Use Alpine.js for interactivity
 
@@ -604,13 +606,13 @@ solstice history-server -s s3://bucket/solstice-history/ -p 8080
 
 ## Resources
 
-- **Design Documents**: `solstice/design-docs/` (architecture decisions, "how it should work")
-- **TODO Tracking**: `solstice/todo/` (implementation status, "what's done and pending")
-- **WebUI Design**: `solstice/design-docs/webui.md`
-- **WebUI TODO**: `solstice/todo/webui.md`
-- **WebUI Guide**: `solstice/webui/README.md`
+- **Design Documents**: `engine/design-docs/` (architecture decisions, "how it should work")
+- **TODO Tracking**: `engine/todo/` (implementation status, "what's done and pending")
+- **WebUI Design**: `engine/design-docs/webui.md`
+- **WebUI TODO**: `engine/todo/webui.md`
+- **WebUI Guide**: `engine/webui/README.md`
 - **README Files**: Root directory and each subproject's README.md
-- **Examples**: `solstice/workflows/`, `solstice/examples/`
+- **Examples**: `engine/workflows/`, `engine/examples/`
 
 ---
 

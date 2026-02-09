@@ -39,4 +39,4 @@ mvnw.cmd
 *.dylib
 
 # Test data
-solstice/tests/testdata/resources/
+engine/tests/testdata/resources/

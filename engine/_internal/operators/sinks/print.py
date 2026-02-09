@@ -1,0 +1,53 @@
+# Copyright 2025 nurion team
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Sink that prints records to stdout."""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Optional
+
+import json
+from _internal.core.models import Split, SplitPayload
+from _internal.core.operator import OperatorConfig, OperatorRuntime, operator
+from _internal.core.sink_operator import SinkOperator
+
+
+@dataclass
+class PrintSinkConfig(OperatorConfig):
+    """Configuration for PrintSink operator."""
+
+    pass  # No configuration needed for PrintSink
+
+
+@operator(PrintSinkConfig)
+class PrintSink(SinkOperator):
+    """Sink that prints records to stdout."""
+
+    def __init__(self, config: PrintSinkConfig, runtime: OperatorRuntime):
+        super().__init__(config, runtime)
+        self.logger = logging.getLogger(self.__class__.__name__)
+        self.count = 0
+
+    def process_split(
+        self, split: Split, batch: Optional[SplitPayload] = None
+    ) -> Optional[SplitPayload]:
+        if batch is None:
+            raise ValueError("PrintSink requires a batch")
+        self.logger.info(f"Printing {len(batch)} records")
+        for record in batch.to_records():
+            self.logger.info(json.dumps(record.to_dict()))
+        return None

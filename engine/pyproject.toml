@@ -1,0 +1,166 @@
+[project]
+name = "engine"
+version = "0.1.0"
+description = "Nurion engine: a Ray-based distributed streaming processing framework"
+authors = [
+    {name = "Nurion Contributors"}
+]
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "Apache-2.0"}
+
+dependencies = [
+    "nurion-workqueue",  # WorkQueue gRPC broker (built from lib/workqueue-rs/)
+    "nurion-raydp",      # Spark on Ray integration (built from lib/raydp/)
+    "ray[default]==2.48.0",
+    "pyarrow>=18.1.0",
+    "pandas>=2.0.0",
+    "click>=8.1.7",
+    "fsspec[s3]>=2024.6.0",
+    "pylance>=0.38.0",
+    "pyiceberg[sqlalchemy]>=0.10.0",
+    "sqlalchemy>=2.0.0",
+    "py-spy>=0.4.1",
+    "pyspark==3.5.6",
+    "grpcio>=1.76.0",           # gRPC for WorkQueue client (matches generated stubs)
+    "tenacity>=8.2.0",          # Retry library for transient failures
+    # Compute engine
+    "duckdb>=1.1.0",            # Embedded OLAP database for shuffle/aggregation
+    # Dedup
+    "xxhash>=3.4.0",            # Fast non-cryptographic hash for MinHash
+    # WebUI dependencies
+    "slatedb>=0.8.1",           # S3-backed KV store for history
+    "fastapi>=0.115.0",         # Web framework
+    "jinja2>=3.1.0",            # Template engine
+    "uvicorn>=0.34.0",          # ASGI server
+    "sse-starlette>=1.8.0",     # Server-Sent Events
+    "prometheus-client>=0.20.0", # Prometheus metrics export
+]
+
+[project.scripts]
+nurion = "_internal.main:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.4",
+    "pytest-asyncio>=0.24.0",
+    "pytest-timeout>=2.3.1",
+    "ruff>=0.14.0",
+    "mypy>=1.14.0",
+    "testcontainers[minio,postgres]>=4.10.0",
+    "minio>=7.2.0",
+    "requests>=2.32.0",
+    "uvicorn>=0.34.0",
+    "psycopg[binary]>=3.2.0",
+    "fastapi>=0.115.0",
+    "pydantic-settings>=2.11.0",
+    "alembic>=1.17.0",
+    "asyncpg>=0.30.0",
+    "lance-namespace>=0.0.19",
+    "boto3>=1.35.0",
+    "s3fs>=2024.6.0",
+    "kubernetes>=32.0.0",
+    "httpx>=0.27.0",
+]
+
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools-scm>=6.2", "maturin>=1.9"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+# Local development: editable sources for workqueue-py and raydp
+# CI uses `uv sync --no-sources` to skip these and install pre-built wheels instead
+[tool.uv.sources]
+nurion-workqueue = { path = "../lib/workqueue-rs", editable = true }
+nurion-raydp = { path = "../lib/raydp", editable = true }
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["_internal*", "nurion*", "workflows*"]
+
+[tool.setuptools.package-data]
+_internal = ["py.typed", "webui/templates/**/*", "webui/static/**/*"]
+nurion = ["py.typed"]
+
+[tool.black]
+line-length = 100
+target-version = ['py310', 'py311', 'py312', 'py313']
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = false  # Too many Ray/Arrow APIs return Any
+warn_unused_configs = true
+disallow_untyped_defs = false  # Gradually enable - many CLI/FastAPI routes need typing
+check_untyped_defs = false  # Gradually enable - many union-attr errors
+disallow_incomplete_defs = false  # Gradually enable
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = false  # Avoid noise during gradual typing
+show_error_codes = true
+exclude = [
+    "^tests/",  # Tests don't need strict typing
+]
+
+[[tool.mypy.overrides]]
+module = [
+    "ray.*",
+    "pyarrow.*",
+    "pandas.*",
+    "pyspark.*",
+    "slatedb.*",
+    "workqueue_py.*",
+    "requests.*",
+    "httpx.*",
+    "fsspec.*",
+    "lance.*",
+    "pyiceberg.*",
+    "grpc.*",
+    "boto3",
+    "boto3.*",
+    "botocore",
+    "botocore.*",
+    "raydp",
+    "raydp.*",
+    "vllm",
+    "vllm.*",
+    "sglang",
+    "sglang.*",
+    "PIL",
+    "PIL.*",
+]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "raydp.*"
+ignore_errors = true
+
+# Gradually enable strict checking for core modules
+# [[tool.mypy.overrides]]
+# module = "runtime.core.models"
+# disallow_untyped_defs = true
+# check_untyped_defs = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+asyncio_mode = "auto"
+addopts = "-m 'not benchmark'"
+filterwarnings = [
+    "ignore::pydantic.warnings.PydanticDeprecatedSince212",
+    "ignore:lance is not fork-safe:UserWarning",
+]
+markers = [
+    "integration: marks integration tests",
+    "distributed: marks distributed tests (multi-worker Ray pipelines)",
+    "stability: marks stability tests with deterministic fault injection",
+    "chaos: marks chaos engineering tests with random failures (may be flaky)",
+    "benchmark: marks performance benchmark tests (skipped by default in CI)",
+    "slow: marks slow tests (WorkQueue broker startup ~5s per test)",
+    "timeout: marks tests with timeout (requires pytest-timeout)",
+]

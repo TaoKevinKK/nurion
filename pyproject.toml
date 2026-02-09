@@ -7,8 +7,8 @@ dependencies = []
 
 [tool.uv.workspace]
 members = [
-    "aether",
-    "solstice",
+    "control",
+    "engine",
 ]
 
 [dependency-groups]

@@ -1,7 +1,7 @@
 # lib - Agent Notes
 
 ## Purpose
-Shared libraries used by Solstice and related tooling.
+Shared libraries used by the Nurion runtime and related tooling.
 
 ## Subprojects
 - `raydp/` Spark-on-Ray integration (Python and JVM)

@@ -1,0 +1,7 @@
+include LICENSE
+include README.md
+include pyproject.toml
+recursive-include _internal/webui/templates *.html
+recursive-include _internal/webui/static *.css *.js *.json
+
+

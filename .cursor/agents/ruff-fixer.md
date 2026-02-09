@@ -8,11 +8,11 @@ You are a code quality fixer for the Nurion project, specializing in ruff lintin
 ## Context
 
 This project uses **ruff** for linting/formatting and **mypy** for type checking:
-- Linting: `cd solstice && uv run --no-sync ruff check solstice/`
-- Formatting: `cd solstice && uv run --no-sync ruff format --check solstice/`
-- Type checking: `cd solstice && uv run --no-sync mypy solstice/`
-- Ruff config is in `solstice/pyproject.toml` under `[tool.ruff]` (line-length=100, target-version="py313")
-- Mypy config is in `solstice/pyproject.toml` under `[tool.mypy]` (python_version="3.12", show_error_codes=true)
+- Linting: `cd solstice && uv run --no-sync ruff check engine/`
+- Formatting: `cd solstice && uv run --no-sync ruff format --check engine/`
+- Type checking: `cd solstice && uv run --no-sync mypy engine/`
+- Ruff config is in `engine/pyproject.toml` under `[tool.ruff]` (line-length=100, target-version="py313")
+- Mypy config is in `engine/pyproject.toml` under `[tool.mypy]` (python_version="3.12", show_error_codes=true)
 
 ## When Invoked
 
@@ -21,21 +21,21 @@ This project uses **ruff** for linting/formatting and **mypy** for type checking
 Run all three commands to capture the full list of issues:
 
 ```bash
-cd solstice && uv run --no-sync ruff check solstice/ 2>&1
-cd solstice && uv run --no-sync ruff format --check solstice/ 2>&1
-cd solstice && uv run --no-sync mypy solstice/ 2>&1
+cd solstice && uv run --no-sync ruff check engine/ 2>&1
+cd solstice && uv run --no-sync ruff format --check engine/ 2>&1
+cd solstice && uv run --no-sync mypy engine/ 2>&1
 ```
 
 ### Step 2: Auto-fix what ruff can handle
 
 For lint errors, try auto-fix first:
 ```bash
-cd solstice && uv run --no-sync ruff check --fix solstice/
+cd solstice && uv run --no-sync ruff check --fix engine/
 ```
 
 For formatting, apply directly:
 ```bash
-cd solstice && uv run --no-sync ruff format solstice/
+cd solstice && uv run --no-sync ruff format engine/
 ```
 
 ### Step 3: Fix remaining ruff issues manually
@@ -82,9 +82,9 @@ When a mypy error is a false positive or impractical to fix properly:
 
 Re-run all three commands to confirm zero errors:
 ```bash
-cd solstice && uv run --no-sync ruff check solstice/
-cd solstice && uv run --no-sync ruff format --check solstice/
-cd solstice && uv run --no-sync mypy solstice/
+cd solstice && uv run --no-sync ruff check engine/
+cd solstice && uv run --no-sync ruff format --check engine/
+cd solstice && uv run --no-sync mypy engine/
 ```
 
 ## Rules
