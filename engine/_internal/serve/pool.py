@@ -49,9 +49,15 @@ class ModelPool:
         await pool.shutdown.remote()
     """
 
-    def __init__(self, config: ModelConfig, registry: ray.actor.ActorHandle) -> None:
+    def __init__(
+        self,
+        config: ModelConfig,
+        registry: ray.actor.ActorHandle,
+        detached: bool = False,
+    ) -> None:
         self._config = config
         self._registry = registry
+        self._detached = detached
         self._workers: dict[str, ray.actor.ActorHandle] = {}
         self._worker_ports: dict[str, int] = {}
         self._shutdown_event = asyncio.Event()
@@ -64,7 +70,7 @@ class ModelPool:
         self._autoscale_frozen = False
         self._last_idle_time = 0.0
 
-        logger.info(f"ModelPool created for model {config.model_id}")
+        logger.info(f"ModelPool created for model {config.model_id} (detached={detached})")
 
     # --- Worker lifecycle ---
 
@@ -73,12 +79,13 @@ class ModelPool:
         worker_id = f"{self._config.model_id}_worker_{port}"
         resources = self._config.get_worker_resources()
 
+        actor_options: dict[str, Any] = {"name": worker_id, **resources}
+        if self._detached:
+            actor_options["lifetime"] = "detached"
+
         worker = (
             ray.remote(InferenceWorker)
-            .options(
-                name=worker_id,
-                **resources,
-            )
+            .options(**actor_options)
             .remote(self._config, registry=self._registry, port=port, worker_id=worker_id)
         )
 
@@ -151,15 +158,28 @@ class ModelPool:
         return result
 
     async def wait_ready(self, timeout: float = 600.0) -> bool:
-        """Wait for at least one worker to be ready."""
+        """Wait for at least one worker to be ready.
+
+        Returns immediately with False if all workers have crashed.
+        """
         start = time.time()
         while time.time() - start < timeout:
+            all_failed = True
             for worker in self._workers.values():
                 try:
                     if await worker.is_ready.remote():
                         return True
+                    if not await worker.is_failed.remote():
+                        all_failed = False
                 except Exception:
-                    pass
+                    pass  # Actor dead — counts as failed
+
+            if all_failed and self._workers:
+                logger.error(
+                    f"All workers for {self._config.model_id} have failed, aborting wait_ready"
+                )
+                return False
+
             await asyncio.sleep(2.0)
         return False
 

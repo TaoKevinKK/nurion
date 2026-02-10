@@ -11,7 +11,7 @@ __path__ = extend_path(__path__, __name__)
 from _internal import __version__ as __version__
 from _internal.core.job import Job, JobConfig, WebUIConfig
 from _internal.core.models import Split, SplitPayload
-from _internal.core.operator import Operator, OperatorConfig, OperatorRuntime
+from _internal.core.operator import Operator, OperatorConfig, OperatorRuntime, operator
 from _internal.core.source_operator import SourceOperator
 from _internal.core.stage import Stage
 from _internal.operators.filter import FilterOperatorConfig
@@ -34,6 +34,8 @@ from _internal.operators.sources import (
     SparkSourceConfig,
     SparkSourceV2Config,
 )
+from _internal.serve import ModelConfig, ModelServiceManager
+from _internal.serve.client import ModelClient
 
 __all__ = [
     "__version__",
@@ -45,6 +47,7 @@ __all__ = [
     "Operator",
     "OperatorConfig",
     "OperatorRuntime",
+    "operator",
     "Split",
     "SplitPayload",
     "FileSourceConfig",
@@ -61,4 +64,7 @@ __all__ = [
     "MapBatchesOperatorConfig",
     "FlatMapOperatorConfig",
     "FilterOperatorConfig",
+    "ModelConfig",
+    "ModelServiceManager",
+    "ModelClient",
 ]

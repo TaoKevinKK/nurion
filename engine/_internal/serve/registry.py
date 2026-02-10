@@ -178,6 +178,10 @@ class ModelRegistry:
         """Get the HTTP URL. Only Ray method clients need to call."""
         return self._http_url
 
+    def list_models(self) -> list[str]:
+        """List all registered model IDs. Used by connect() for discovery."""
+        return list(self._endpoints.keys())
+
     async def stop(self) -> None:
         """Stop the HTTP server."""
         if self._runner:

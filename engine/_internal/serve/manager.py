@@ -17,6 +17,11 @@
 The ModelServiceManager is the main entry point for deploying and managing
 multiple model inference services. It provides a Python-first, imperative API
 for model lifecycle management.
+
+Two modes:
+- **Attached** (default): Actors are reference-counted and die with the job.
+- **Detached**: Actors use `lifetime="detached"` and survive job exit.
+  Use `ModelServiceManager.connect()` to reconnect from a new job.
 """
 
 from __future__ import annotations
@@ -37,72 +42,95 @@ logger = logging.getLogger(__name__)
 class ModelServiceManager:
     """Control plane for multi-model inference service.
 
-    The manager provides a unified interface to:
-    - Deploy and undeploy models
-    - Scale models (manually or automatically)
-    - Monitor model status
-    - Freeze/unfreeze autoscaling
-
-    All operations are imperative and return results synchronously
-    (or via async/await), making it easy to integrate into Python code.
-
-    Usage:
+    Usage (attached — actors die with job):
         manager = ModelServiceManager()
+        await manager.deploy_model(config)
+        # ... run pipeline ...
+        await manager.shutdown()
 
-        # Deploy models
-        await manager.deploy_model(ModelConfig(
-            model_id="decision",
-            model_source="Qwen/Qwen2.5-7B-Instruct",
-            min_workers=2,
-            max_workers=8,
-        ))
+    Usage (detached — actors survive job exit):
+        # Job 1: deploy models (slow, one-time)
+        manager = ModelServiceManager(detached=True)
+        await manager.deploy_model(config)
+        # Job exits, models keep running
 
-        await manager.deploy_model(ModelConfig(
-            model_id="generation",
-            model_source="Qwen/Qwen2.5-72B-Instruct",
-            tensor_parallel_size=8,
-            min_workers=1,
-            max_workers=4,
-        ))
+        # Job 2: reuse existing models (fast)
+        manager = ModelServiceManager.connect()
+        # manager.registry is ready to use
+        # ... run pipeline ...
+        # Don't call shutdown() — keep models alive for next job
 
-        # Scale manually
-        await manager.scale_model("decision", target=6)
-
-        # Freeze autoscaling
-        await manager.freeze_model("generation")
-
-        # Get status
-        status = await manager.get_model_status("decision")
-
-        # Undeploy
-        await manager.undeploy_model("decision")
+        # Job N: tear down when done
+        manager = ModelServiceManager.connect()
+        await manager.shutdown()
     """
 
     def __init__(
         self,
         autoscale_config: Optional[AutoscaleConfig] = None,
+        detached: bool = False,
     ) -> None:
-        """Initialize the manager.
+        """Initialize the manager and create a new registry actor.
 
         Args:
             autoscale_config: Default autoscaling config for all models
+            detached: If True, create detached actors that survive job exit
         """
         self._autoscale_config = autoscale_config or AutoscaleConfig()
+        self._detached = detached
 
         self._pools: dict[str, ray.actor.ActorHandle] = {}
         self._configs: dict[str, ModelConfig] = {}
 
         # Create registry actor
-        self._registry = (
-            ray.remote(ModelRegistry)
-            .options(
-                name=REGISTRY_ACTOR_NAME,
-            )
-            .remote()
-        )
+        actor_options: dict[str, Any] = {"name": REGISTRY_ACTOR_NAME}
+        if detached:
+            actor_options["lifetime"] = "detached"
+
+        self._registry = ray.remote(ModelRegistry).options(**actor_options).remote()
         ray.get(self._registry.start.remote())
 
-        logger.info("ModelServiceManager initialized")
+        mode = "detached" if detached else "attached"
+        logger.info(f"ModelServiceManager initialized (mode={mode})")
+
+    @classmethod
+    def connect(cls) -> "ModelServiceManager":
+        """Connect to an existing detached ModelServiceManager.
+
+        Looks up the registry and pool actors by their well-known names.
+        Raises RuntimeError if no detached serve layer is running.
+        """
+        instance = object.__new__(cls)
+        instance._autoscale_config = AutoscaleConfig()
+        instance._detached = True
+        instance._pools = {}
+        instance._configs = {}
+
+        # Look up existing registry
+        try:
+            instance._registry = ray.get_actor(REGISTRY_ACTOR_NAME)
+        except ValueError:
+            raise RuntimeError(
+                "No detached serve layer found. "
+                "Deploy models first with ModelServiceManager(detached=True)."
+            )
+
+        # Discover existing pools by querying registry for known models
+        try:
+            models = ray.get(instance._registry.list_models.remote())
+        except Exception:
+            models = []
+
+        for model_id in models:
+            try:
+                pool = ray.get_actor(get_pool_actor_name(model_id))
+                instance._pools[model_id] = pool
+                logger.info(f"Reconnected to pool for model {model_id}")
+            except ValueError:
+                logger.warning(f"Pool actor for {model_id} not found, skipping")
+
+        logger.info(f"Connected to detached serve layer: {len(instance._pools)} model(s) active")
+        return instance
 
     @property
     def registry(self) -> ray.actor.ActorHandle:
@@ -128,15 +156,11 @@ class ModelServiceManager:
             autoscale_config: Override autoscale config for this model
 
         Returns:
-            Dict with deployment result:
-            - model_id: Model identifier
-            - status: "ready" | "deploying"
-            - endpoints: List of endpoint URLs
-            - duration_s: Time taken
+            Dict with deployment result
 
         Raises:
             ValueError: If model already deployed
-            TimeoutError: If wait_ready times out
+            RuntimeError: If workers fail to start
         """
         model_id = config.model_id
 
@@ -155,13 +179,15 @@ class ModelServiceManager:
         if not ray.is_initialized():
             ray.init(address="auto")
 
-        # Create ModelPool actor — pass registry handle so pool holds a ref
+        # Create ModelPool actor
+        pool_options: dict[str, Any] = {"name": get_pool_actor_name(model_id)}
+        if self._detached:
+            pool_options["lifetime"] = "detached"
+
         pool = (
             ray.remote(ModelPool)
-            .options(
-                name=get_pool_actor_name(model_id),
-            )
-            .remote(config, self._registry)
+            .options(**pool_options)
+            .remote(config, self._registry, self._detached)
         )
 
         self._pools[model_id] = pool
@@ -179,7 +205,12 @@ class ModelServiceManager:
             # Wait for at least one worker to be ready
             is_ready = await pool.wait_ready.remote(timeout=timeout)
             if not is_ready:
-                raise TimeoutError(f"Model {model_id} not ready after {timeout}s")
+                elapsed = time.time() - result["started_at"]
+                raise RuntimeError(
+                    f"Model {model_id} failed to start after {elapsed:.1f}s. "
+                    f"Check worker logs for details (e.g. model download errors, "
+                    f"GPU OOM, missing architectures)."
+                )
 
         result["status"] = "ready"
         result["completed_at"] = time.time()
@@ -197,19 +228,7 @@ class ModelServiceManager:
         return result
 
     async def undeploy_model(self, model_id: str) -> dict[str, Any]:
-        """Undeploy a model.
-
-        Stops autoscaling, shuts down the pool, and removes all state.
-
-        Args:
-            model_id: Model identifier
-
-        Returns:
-            Dict with undeploy result
-
-        Raises:
-            ValueError: If model not found
-        """
+        """Undeploy a model."""
         if model_id not in self._pools:
             raise ValueError(f"Model {model_id} not found")
 
@@ -220,25 +239,22 @@ class ModelServiceManager:
 
         logger.info(f"Undeploying model {model_id}")
 
-        # Shutdown pool (stops autoscaler + all workers)
         pool = self._pools[model_id]
         await pool.shutdown.remote()
 
-        # Kill the pool actor
         try:
             ray.kill(pool)
         except Exception:
             pass
 
         del self._pools[model_id]
-        del self._configs[model_id]
+        self._configs.pop(model_id, None)
 
         result["completed_at"] = time.time()
         result["duration_s"] = result["completed_at"] - result["started_at"]
         result["status"] = "undeployed"
 
         logger.info(f"Model {model_id} undeployed")
-
         return result
 
     async def scale_model(
@@ -248,43 +264,25 @@ class ModelServiceManager:
         min_workers: Optional[int] = None,
         max_workers: Optional[int] = None,
     ) -> dict[str, Any]:
-        """Scale a model.
-
-        Can either scale to a specific target or update min/max bounds.
-
-        Args:
-            model_id: Model identifier
-            target: Target number of workers (immediate scaling)
-            min_workers: Update minimum workers
-            max_workers: Update maximum workers
-
-        Returns:
-            Dict with scaling result
-
-        Raises:
-            ValueError: If model not found
-        """
+        """Scale a model."""
         if model_id not in self._pools:
             raise ValueError(f"Model {model_id} not found")
 
         pool = self._pools[model_id]
-        config = self._configs[model_id]
+        config = self._configs.get(model_id)
 
-        # Update config bounds
-        if min_workers is not None:
-            config.min_workers = min_workers
-        if max_workers is not None:
-            config.max_workers = max_workers
+        if config:
+            if min_workers is not None:
+                config.min_workers = min_workers
+            if max_workers is not None:
+                config.max_workers = max_workers
 
-        # Scale to target
         if target is not None:
             return await pool.scale_to.remote(target)
 
         return {
             "model_id": model_id,
             "status": "config_updated",
-            "min_workers": config.min_workers,
-            "max_workers": config.max_workers,
         }
 
     async def freeze_model(self, model_id: str) -> None:
@@ -302,28 +300,22 @@ class ModelServiceManager:
         ray.get(pool.unfreeze_autoscaler.remote())
 
     def list_models(self) -> list[str]:
-        """List all deployed model IDs.
-
-        Returns:
-            List of model identifiers
-        """
+        """List all deployed model IDs."""
         return list(self._pools.keys())
 
     async def shutdown(self) -> None:
         """Shutdown the manager and all deployed models.
 
-        Undeploys all models and kills the registry actor.
+        Kills all actors (including detached ones) and releases GPUs.
         """
         logger.info("Shutting down ModelServiceManager")
 
-        # Undeploy all models
         for model_id in list(self._pools.keys()):
             try:
                 await self.undeploy_model(model_id)
             except Exception as e:
                 logger.warning(f"Error undeploying {model_id}: {e}")
 
-        # Kill the registry actor
         try:
             ray.kill(self._registry)
             logger.info("ModelRegistry actor killed")
@@ -333,9 +325,7 @@ class ModelServiceManager:
         logger.info("ModelServiceManager shutdown complete")
 
     async def __aenter__(self) -> "ModelServiceManager":
-        """Async context manager entry."""
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        """Async context manager exit."""
         await self.shutdown()

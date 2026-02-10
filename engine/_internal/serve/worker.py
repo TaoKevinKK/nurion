@@ -154,6 +154,39 @@ class InferenceWorker:
             response = await client.get(url)
         response.raise_for_status()
 
+    @staticmethod
+    def _build_subprocess_env() -> dict[str, str]:
+        """Build environment for the inference server subprocess.
+
+        Ensures NVIDIA shared libraries installed via pip (cudnn, nccl,
+        cusparselt, etc.) are visible to the subprocess via LD_LIBRARY_PATH.
+        Without this, torch/vllm fail with 'libcudnn.so.9: cannot open'.
+        """
+        import importlib
+        import pathlib
+
+        env = os.environ.copy()
+
+        # Discover all nvidia pip package lib dirs in current Python env
+        nvidia_lib_dirs: list[str] = []
+        try:
+            nvidia_spec = importlib.util.find_spec("nvidia")
+            if nvidia_spec and nvidia_spec.submodule_search_locations:
+                for nvidia_root in nvidia_spec.submodule_search_locations:
+                    for lib_dir in pathlib.Path(nvidia_root).glob("*/lib"):
+                        if lib_dir.is_dir():
+                            nvidia_lib_dirs.append(str(lib_dir))
+        except Exception:
+            pass
+
+        if nvidia_lib_dirs:
+            existing = env.get("LD_LIBRARY_PATH", "")
+            new_paths = ":".join(nvidia_lib_dirs)
+            env["LD_LIBRARY_PATH"] = f"{new_paths}:{existing}" if existing else new_paths
+            logger.info(f"Added {len(nvidia_lib_dirs)} NVIDIA lib dirs to LD_LIBRARY_PATH")
+
+        return env
+
     def _start_server_process(self) -> None:
         """Start the vLLM/SGLang HTTP server subprocess."""
         self._state = WorkerState.LOADING
@@ -163,12 +196,15 @@ class InferenceWorker:
         else:
             cmd = self._build_sglang_command()
 
+        env = self._build_subprocess_env()
+
         logger.info(f"Starting inference server: {' '.join(cmd)}")
 
         self._process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            env=env,
             preexec_fn=self._child_preexec,
         )
 
@@ -226,6 +262,13 @@ class InferenceWorker:
             if isinstance(value, bool):
                 if value:
                     cmd.append(f"--{arg_name}")
+                else:
+                    cmd.append(f"--no-{arg_name}")
+            elif isinstance(value, (dict, list)):
+                # vLLM expects JSON strings for complex types
+                import json as _json
+
+                cmd.extend([f"--{arg_name}", _json.dumps(value)])
             else:
                 cmd.extend([f"--{arg_name}", str(value)])
 
@@ -261,7 +304,7 @@ class InferenceWorker:
         """Wait for the server to be ready by polling the health endpoint."""
         health_url = f"{self._endpoint}/health"
         start_time = time.time()
-        timeout = 600.0  # 10 minutes for model loading
+        timeout = 1800.0  # 30 minutes for large model loading from network storage
 
         client = self._get_http_client()
         while not self._shutdown_event.is_set():
@@ -386,6 +429,22 @@ class InferenceWorker:
         """Check if the worker is ready to serve requests."""
         return self._is_ready
 
+    def is_failed(self) -> bool:
+        """Check if the worker subprocess has crashed.
+
+        Returns True when the vLLM/SGLang process exited before becoming
+        ready. Used by ModelPool.wait_ready() to fail fast instead of
+        blocking until the full timeout.
+        """
+        if self._state == WorkerState.STOPPED and not self._is_ready:
+            return True
+        # Also check if the process exited even if _monitor_server hasn't
+        # processed the EOF yet (race window).
+        if self._process is not None and self._process.poll() is not None:
+            if not self._is_ready:
+                return True
+        return False
+
     async def start(self) -> None:
         """Start background tasks (must be called after actor creation)."""
         self._ensure_background_tasks()
@@ -463,3 +522,26 @@ class InferenceWorker:
         self._state = WorkerState.STOPPED
         self._is_ready = False
         logger.info(f"Worker {self._worker_id} shutdown complete")
+
+    def _force_kill_process(self) -> None:
+        """Force-kill the server subprocess and its entire process group.
+
+        Used by __del__ to ensure GPU memory is released even when the actor
+        is killed abruptly by Ray (e.g., job exit without graceful shutdown).
+        """
+        if self._process is None:
+            return
+        try:
+            pgid = os.getpgid(self._process.pid)
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        try:
+            self._process.kill()
+        except Exception:
+            pass
+        self._process = None
+
+    def __del__(self) -> None:
+        """Emergency cleanup — ensures vLLM subprocess is killed."""
+        self._force_kill_process()
