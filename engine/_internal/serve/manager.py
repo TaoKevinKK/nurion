@@ -34,7 +34,7 @@ import ray
 
 from _internal.serve.config import AutoscaleConfig, ModelConfig
 from _internal.serve.pool import ModelPool, get_pool_actor_name
-from _internal.serve.registry import REGISTRY_ACTOR_NAME, ModelRegistry
+from _internal.serve.registry import REGISTRY_ACTOR_NAME, SERVE_NAMESPACE, ModelRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,7 @@ class ModelServiceManager:
         actor_options: dict[str, Any] = {"name": REGISTRY_ACTOR_NAME}
         if detached:
             actor_options["lifetime"] = "detached"
+            actor_options["namespace"] = SERVE_NAMESPACE
 
         self._registry = ray.remote(ModelRegistry).options(**actor_options).remote()
         ray.get(self._registry.start.remote())
@@ -106,9 +107,9 @@ class ModelServiceManager:
         instance._pools = {}
         instance._configs = {}
 
-        # Look up existing registry
+        # Look up existing registry in the well-known namespace
         try:
-            instance._registry = ray.get_actor(REGISTRY_ACTOR_NAME)
+            instance._registry = ray.get_actor(REGISTRY_ACTOR_NAME, namespace=SERVE_NAMESPACE)
         except ValueError:
             raise RuntimeError(
                 "No detached serve layer found. "
@@ -123,7 +124,7 @@ class ModelServiceManager:
 
         for model_id in models:
             try:
-                pool = ray.get_actor(get_pool_actor_name(model_id))
+                pool = ray.get_actor(get_pool_actor_name(model_id), namespace=SERVE_NAMESPACE)
                 instance._pools[model_id] = pool
                 logger.info(f"Reconnected to pool for model {model_id}")
             except ValueError:
@@ -183,6 +184,7 @@ class ModelServiceManager:
         pool_options: dict[str, Any] = {"name": get_pool_actor_name(model_id)}
         if self._detached:
             pool_options["lifetime"] = "detached"
+            pool_options["namespace"] = SERVE_NAMESPACE
 
         pool = (
             ray.remote(ModelPool)
@@ -306,21 +308,33 @@ class ModelServiceManager:
     async def shutdown(self) -> None:
         """Shutdown the manager and all deployed models.
 
-        Kills all actors (including detached ones) and releases GPUs.
+        Kills ALL actors in the nurion_serve namespace (including orphans
+        from previous deployments), not just what the registry tracks.
         """
         logger.info("Shutting down ModelServiceManager")
 
+        # First, graceful shutdown of known pools
         for model_id in list(self._pools.keys()):
             try:
                 await self.undeploy_model(model_id)
             except Exception as e:
                 logger.warning(f"Error undeploying {model_id}: {e}")
 
-        try:
-            ray.kill(self._registry)
-            logger.info("ModelRegistry actor killed")
-        except Exception as e:
-            logger.warning(f"Error killing registry: {e}")
+        # Then, kill ALL remaining actors in the serve namespace
+        # (catches orphans from previous failed deployments)
+        killed = 0
+        for actor_info in ray.util.list_named_actors(all_namespaces=True):
+            if actor_info.get("namespace") != SERVE_NAMESPACE:
+                continue
+            try:
+                handle = ray.get_actor(actor_info["name"], namespace=SERVE_NAMESPACE)
+                ray.kill(handle)
+                killed += 1
+            except Exception:
+                pass
+
+        if killed:
+            logger.info(f"Killed {killed} remaining actor(s) in {SERVE_NAMESPACE}")
 
         logger.info("ModelServiceManager shutdown complete")
 

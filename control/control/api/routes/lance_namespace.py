@@ -148,28 +148,24 @@ async def describe_namespace(
             },
         )
 
-    namespace = await lance_table_service.get_namespace_by_name(id, db)
-    if not namespace:
+    ns = await lance_table_service.get_namespace_by_name(id, db)
+    if not ns:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"Namespace '{id}' not found"
         )
 
     tables_in_namespace = await lance_table_service.get_tables_by_namespace(id, db)
     return DescribeNamespaceResponse(
-        namespace=namespace.name,
+        namespace=ns.name,
         properties={
-            "id": _stringify_value(namespace.id),
-            "namespace": _stringify_value(namespace.name),
-            "description": _stringify_value(namespace.description or ""),
+            "id": _stringify_value(ns.id),
+            "namespace": _stringify_value(ns.name),
+            "description": _stringify_value(ns.description or ""),
             "table_count": _stringify_value(len(tables_in_namespace)),
-            "delimiter": _stringify_value(namespace.delimiter),
-            "created_at": _stringify_value(
-                namespace.created_at.isoformat() if namespace.created_at else ""
-            ),
-            "updated_at": _stringify_value(
-                namespace.updated_at.isoformat() if namespace.updated_at else ""
-            ),
-            **_stringify_properties(namespace.properties),
+            "delimiter": _stringify_value(ns.delimiter),
+            "created_at": _stringify_value(ns.created_at.isoformat() if ns.created_at else ""),
+            "updated_at": _stringify_value(ns.updated_at.isoformat() if ns.updated_at else ""),
+            **_stringify_properties(ns.properties),
         },
     )
 
@@ -412,7 +408,7 @@ async def describe_table(
     response = DescribeTableResponse(
         version=version,
         location=table_info.lance_path,
-        table_schema=table_info.lance_schema or {},
+        table_schema=table_info.lance_schema or {},  # type: ignore[call-arg]
         properties={
             "name": table_info.name,
             "created_at": table_info.created_at.isoformat() if table_info.created_at else "",
@@ -523,7 +519,7 @@ async def list_table_indices_endpoint(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Table '{id}' not found")
 
     indices = await lance_table_service.list_table_indices(table_info.name, db)
-    return ListTableIndicesResponse(indices=indices)
+    return ListTableIndicesResponse(indices=indices)  # type: ignore[arg-type]
 
 
 @router.get("/table/{id}/tags/list", response_model=ListTableTagsResponse)

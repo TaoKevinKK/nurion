@@ -41,6 +41,7 @@ async def _resolve_session(db: AsyncSession | None) -> AsyncSession:
     if db is None:
         async for session in get_session():
             return session
+        raise RuntimeError("get_session() yielded no sessions")
     return db
 
 

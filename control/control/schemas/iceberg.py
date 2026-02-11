@@ -155,7 +155,7 @@ class CommitTableRequest(ApiModel):
 
     # Optional fields that pyiceberg may send
     name: str | None = None
-    schema: dict[str, Any] | None = None
+    schema: dict[str, Any] | None = None  # type: ignore[assignment]
     partition_spec: dict[str, Any] | None = None
     write_order: dict[str, Any] | None = None
     properties: dict[str, str] | None = None

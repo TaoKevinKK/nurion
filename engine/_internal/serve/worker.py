@@ -162,7 +162,7 @@ class InferenceWorker:
         cusparselt, etc.) are visible to the subprocess via LD_LIBRARY_PATH.
         Without this, torch/vllm fail with 'libcudnn.so.9: cannot open'.
         """
-        import importlib
+        import importlib.util
         import pathlib
 
         env = os.environ.copy()
@@ -248,6 +248,9 @@ class InferenceWorker:
             str(config.gpu_memory_utilization),
             "--dtype",
             config.dtype,
+            # Allow per-request chat template override (e.g., HunyuanOCR
+            # needs passthrough template to preserve special Unicode tokens)
+            "--trust-request-chat-template",
         ]
 
         if config.trust_remote_code:
@@ -503,41 +506,56 @@ class InferenceWorker:
             await self._http_client.aclose()
             self._http_client = None
 
-        # Stop the server process
-        if self._process is not None:
-            try:
-                # Send SIGTERM to process group
-                os.killpg(os.getpgid(self._process.pid), signal.SIGTERM)
-
-                # Wait for graceful shutdown
-                try:
-                    self._process.wait(timeout=30)
-                except subprocess.TimeoutExpired:
-                    # Force kill
-                    os.killpg(os.getpgid(self._process.pid), signal.SIGKILL)
-                    self._process.wait(timeout=5)
-            except Exception as e:
-                logger.warning(f"Error stopping server process: {e}")
+        # Stop the server process (force-kills all descendants including TP workers)
+        self._force_kill_process()
 
         self._state = WorkerState.STOPPED
         self._is_ready = False
         logger.info(f"Worker {self._worker_id} shutdown complete")
 
     def _force_kill_process(self) -> None:
-        """Force-kill the server subprocess and its entire process group.
+        """Force-kill the server subprocess and ALL descendant processes.
 
-        Used by __del__ to ensure GPU memory is released even when the actor
-        is killed abruptly by Ray (e.g., job exit without graceful shutdown).
+        vLLM with TP>1 spawns grandchild processes (Worker_TP0..N) that may
+        not be in the same process group. We use /proc to find all descendants
+        recursively, then SIGKILL them bottom-up.
         """
-        if self._process is None:
+        proc = getattr(self, "_process", None)
+        if proc is None:
             return
+
+        pid = proc.pid
+
+        # Collect all descendant PIDs recursively via /proc
+        def _get_descendants(parent_pid: int) -> list[int]:
+            descendants: list[int] = []
+            try:
+                children_path = f"/proc/{parent_pid}/task/{parent_pid}/children"
+                with open(children_path) as f:
+                    child_pids = [int(p) for p in f.read().split()]
+                for cpid in child_pids:
+                    descendants.extend(_get_descendants(cpid))
+                    descendants.append(cpid)
+            except (FileNotFoundError, ValueError, PermissionError):
+                pass
+            return descendants
+
+        # Kill descendants bottom-up (children first), then the root
+        all_pids = _get_descendants(pid) + [pid]
+        for p in all_pids:
+            try:
+                os.kill(p, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+
+        # Also try process group kill as fallback
         try:
-            pgid = os.getpgid(self._process.pid)
-            os.killpg(pgid, signal.SIGKILL)
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):
             pass
+
         try:
-            self._process.kill()
+            proc.wait(timeout=5)
         except Exception:
             pass
         self._process = None

@@ -129,6 +129,10 @@ module = [
     "sglang.*",
     "PIL",
     "PIL.*",
+    "prometheus_client",
+    "prometheus_client.*",
+    "xxhash",
+    "duckdb",
 ]
 ignore_missing_imports = true
 

@@ -30,6 +30,7 @@ from typing import Any, Optional
 import ray
 
 from _internal.serve.config import AutoscaleConfig, ModelConfig
+from _internal.serve.registry import SERVE_NAMESPACE
 from _internal.serve.worker import InferenceWorker
 from _internal.utils.network import find_free_port
 
@@ -82,6 +83,7 @@ class ModelPool:
         actor_options: dict[str, Any] = {"name": worker_id, **resources}
         if self._detached:
             actor_options["lifetime"] = "detached"
+            actor_options["namespace"] = SERVE_NAMESPACE
 
         worker = (
             ray.remote(InferenceWorker)
@@ -204,12 +206,14 @@ class ModelPool:
 
         ready_count = sum(1 for w in workers_status if w.get("is_ready"))
         total_pending = sum(w.get("pending", 0) for w in workers_status)
+        total_running = sum(w.get("running", 0) for w in workers_status)
 
         return {
             "model_id": self._config.model_id,
             "total_workers": len(self._workers),
             "ready_workers": ready_count,
             "total_pending": total_pending,
+            "total_running": total_running,
             "endpoints": [w.get("endpoint", "") for w in workers_status],
             "last_scale_time": self._last_scale_time,
             "autoscale_frozen": self._autoscale_frozen,
@@ -262,26 +266,34 @@ class ModelPool:
                 ready = status["ready_workers"]
                 total = status["total_workers"]
                 pending = status["total_pending"]
+                running = status["total_running"]
+                # Use total inflight (pending + running) as the load signal.
+                # With vLLM continuous batching + chunked prefill, requests
+                # move from "waiting" to "running" almost immediately, so
+                # looking at pending alone misses overloaded workers whose
+                # GPU is saturated but whose waiting queue is near-empty.
+                inflight = pending + running
                 now = time.time()
 
                 # Cooldown
                 if now - self._last_scale_time < cfg.cooldown_seconds:
                     continue
 
-                # Scale up
-                threshold = cfg.scale_up_pending_threshold * max(ready, 1)
-                if pending > threshold:
+                # Scale up: total inflight exceeds threshold per ready worker
+                threshold = cfg.scale_up_threshold * max(ready, 1)
+                if inflight > threshold:
                     target = min(total + cfg.max_scale_step, self._config.max_workers)
                     if target > total:
                         logger.info(
                             f"Autoscale UP {self._config.model_id}: "
-                            f"{total} -> {target} (pending={pending})"
+                            f"{total} -> {target} "
+                            f"(inflight={inflight}, pending={pending}, running={running})"
                         )
                         await self.scale_to(target)
                     continue
 
-                # Scale down
-                if pending == 0:
+                # Scale down: no requests at all for a sustained period
+                if inflight == 0:
                     if self._last_idle_time == 0:
                         self._last_idle_time = now
                     elif now - self._last_idle_time > cfg.scale_down_idle_seconds:

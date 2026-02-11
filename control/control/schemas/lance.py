@@ -110,7 +110,7 @@ class DescribeTableResponse(ApiModel):
     storage_options: dict[str, Any] | None = None
 
     @property
-    def schema(self) -> dict[str, Any]:
+    def schema(self) -> dict[str, Any]:  # type: ignore[override]
         return self.table_schema
 
 

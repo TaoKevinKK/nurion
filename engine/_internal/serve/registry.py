@@ -34,6 +34,7 @@ from _internal.utils.network import find_free_port, get_node_ip
 logger = logging.getLogger(__name__)
 
 REGISTRY_ACTOR_NAME = "nurion_model_registry"
+SERVE_NAMESPACE = "nurion_serve"
 
 
 class ModelRegistry:

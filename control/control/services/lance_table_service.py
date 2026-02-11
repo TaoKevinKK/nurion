@@ -34,8 +34,9 @@ logger = logging.getLogger(__name__)
 
 async def _resolve_session(db: AsyncSession | None) -> AsyncSession:
     if db is None:
-        async with get_session() as session:
+        async for session in get_session():
             return session
+        raise RuntimeError("get_session() yielded no sessions")
     return db
 
 
@@ -118,14 +119,14 @@ async def get_available_namespaces(db: AsyncSession | None = None) -> list[str]:
 async def delete_namespace(namespace_id: int, db: AsyncSession | None = None) -> bool:
     session = await _resolve_session(db)
 
-    stmt = select(func.count(LanceTable.id)).where(LanceTable.namespace_id == namespace_id)
-    result = await session.execute(stmt)
+    count_stmt = select(func.count(LanceTable.id)).where(LanceTable.namespace_id == namespace_id)
+    result = await session.execute(count_stmt)
     table_count = result.scalar()
     if table_count and table_count > 0:
         raise ValueError(f"Cannot delete namespace: it contains {table_count} tables")
 
-    stmt = select(LanceNamespace).where(LanceNamespace.id == namespace_id)
-    result = await session.execute(stmt)
+    ns_stmt = select(LanceNamespace).where(LanceNamespace.id == namespace_id)
+    result = await session.execute(ns_stmt)
     namespace = result.scalar_one_or_none()
     if not namespace:
         return False

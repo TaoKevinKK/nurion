@@ -301,13 +301,14 @@ jobs:
       uses: tj-actions/changed-files@v45
       with:
         files: |
+          control/**
           engine/**
           lib/**
           uv.lock
 
-    - name: Skip if no Engine/lib changes
+    - name: Skip if no relevant changes
       if: steps.changed-files.outputs.any_changed == 'false' && github.event_name == 'pull_request'
-      run: echo "No Engine/lib files changed, skipping..."
+      run: echo "No control/engine/lib files changed, skipping..."
 
     - name: Download pre-built wheels
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
@@ -330,18 +331,20 @@ jobs:
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: uv python install 3.12
     
-    - name: Install dependencies
+    - name: Check control
+      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
+      run: |
+        cd control
+        uv sync --dev --python 3.12
+        uv run --no-sync mypy control/
+
+    - name: Check engine
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
         cd engine
         # CI mode: use pre-built wheels via --find-links, skip editable sources
         uv sync --dev --python 3.12 --no-sources --find-links /tmp/wheels/
-    
-    - name: Run mypy
-      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
-      run: |
-        cd engine
-        uv run --no-sync mypy _internal/
+        uv run --no-sync mypy _internal/ nurion/
 
   # ============================================================================
   # Aether tests (Python 3.12, no Rust/Java dependencies)

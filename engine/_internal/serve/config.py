@@ -164,7 +164,11 @@ class AutoscaleConfig:
     Attributes:
         enabled: Whether autoscaling is enabled
         check_interval_seconds: How often to check for scaling decisions
-        scale_up_pending_threshold: Scale up when pending > threshold * ready_workers
+        scale_up_threshold: Scale up when total inflight (pending + running)
+            exceeds threshold * ready_workers.  Uses both pending (waiting in
+            queue) and running (in-flight in engine) so that models with
+            aggressive continuous batching (e.g. chunked prefill) still
+            trigger scale-up even when the waiting queue is near-empty.
         scale_down_idle_seconds: Scale down after idle for this many seconds
         cooldown_seconds: Cooldown period between scaling operations
         max_scale_step: Maximum workers to add/remove per scaling decision
@@ -172,7 +176,7 @@ class AutoscaleConfig:
 
     enabled: bool = True
     check_interval_seconds: float = 5.0
-    scale_up_pending_threshold: int = 10
+    scale_up_threshold: int = 10
     scale_down_idle_seconds: float = 60.0
     cooldown_seconds: float = 30.0
     max_scale_step: int = 2
