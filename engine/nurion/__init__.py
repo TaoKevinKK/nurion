@@ -34,7 +34,7 @@ from _internal.operators.sources import (
     SparkSourceConfig,
     SparkSourceV2Config,
 )
-from _internal.serve import ModelConfig, ModelServiceManager
+from _internal.serve import ModelConfig, ModelServiceManager, create_manager
 from _internal.serve.client import ModelClient
 
 __all__ = [
@@ -66,5 +66,6 @@ __all__ = [
     "FilterOperatorConfig",
     "ModelConfig",
     "ModelServiceManager",
+    "create_manager",
     "ModelClient",
 ]

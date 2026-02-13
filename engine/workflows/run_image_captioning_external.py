@@ -82,12 +82,12 @@ async def start_inference_server(
     """Start vLLM inference server via _internal.serve.
 
     Returns:
-        ModelServiceManager instance. Caller MUST hold this reference —
+        Manager actor handle. Caller MUST hold this reference —
         it keeps the registry actor alive (non-detached, reference-counted).
     """
     from _internal.serve import (
         ModelConfig,
-        ModelServiceManager,
+        create_manager,
     )
 
     logger = logging.getLogger(__name__)
@@ -108,7 +108,6 @@ async def start_inference_server(
         trust_remote_code=True,
         min_workers=min_workers,
         max_workers=max_workers,
-        worker_resources={"num_gpus": tensor_parallel_size},
         extra_engine_kwargs={
             "kv_cache_dtype": "fp8_e4m3",
             "enable_chunked_prefill": True,
@@ -116,8 +115,8 @@ async def start_inference_server(
         },
     )
 
-    manager = ModelServiceManager()
-    result = await manager.deploy_model(config, wait_ready=True)
+    manager = create_manager()
+    result = await manager.deploy_model.remote(config, wait_ready=True)
 
     logger.info(f"Inference server ready: {result}")
 
@@ -237,14 +236,14 @@ async def main_async(args: argparse.Namespace) -> None:
         input_path=args.input,
         output_path=args.output,
         model_id=args.model_id,
-        registry=manager.registry,
+        registry=ray.get(manager.get_registry.remote()),
         image_field=args.image_field,
         split_size=args.split_size,
     )
 
     # manager stays alive until here, keeping registry + pools alive
     logger.info("Workflow done, shutting down serve layer...")
-    await manager.shutdown()
+    await manager.shutdown.remote()
 
 
 def main():

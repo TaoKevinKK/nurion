@@ -15,8 +15,9 @@
 # limitations under the License.
 #
 
-import pytest
 import sys
+
+import pytest
 import torch
 from raydp.torch import TorchEstimator
 

@@ -19,7 +19,6 @@ import atexit
 import logging
 from contextlib import ContextDecorator
 from threading import RLock
-from typing import Dict, Union, Optional
 
 import ray
 from pyspark.sql import SparkSession
@@ -38,7 +37,7 @@ class _SparkContext(ContextDecorator):
     def __init__(
         self,
         app_name: str,
-        configs: Dict[str, str],
+        configs: dict[str, str],
         logging_level: str = "warn",
     ):
         self._app_name = app_name
@@ -46,8 +45,8 @@ class _SparkContext(ContextDecorator):
 
         self._configs = configs
 
-        self._spark_cluster: Optional[SparkCluster] = None
-        self._spark_session: Optional[SparkSession] = None
+        self._spark_cluster: SparkCluster | None = None
+        self._spark_session: SparkSession | None = None
 
     def _get_or_create_spark_cluster(self) -> SparkCluster:
         if self._spark_cluster is not None:
@@ -100,15 +99,15 @@ _global_spark_context: _SparkContext = None
 
 def init_spark(
     app_name: str,
-    executor_cores: Optional[int] = None,
-    executor_memory: Optional[Union[str, int]] = None,
-    num_executors: Optional[int] = None,
-    configs: Optional[Dict[str, str]] = None,
+    executor_cores: int | None = None,
+    executor_memory: str | int | None = None,
+    num_executors: int | None = None,
+    configs: dict[str, str] | None = None,
     log_to_driver: bool = False,
     logging_level: str = "warn",
     dynamic_allocation: bool = False,
-    min_executors: Optional[int] = None,
-    max_executors: Optional[int] = None,
+    min_executors: int | None = None,
+    max_executors: int | None = None,
     auto_configure: bool = False,
 ) -> SparkSession:
     """
@@ -220,7 +219,8 @@ def start_connect_server() -> int:
             port = _global_spark_context.start_connect_server()
             if port < 0:
                 raise Exception(
-                    "The spark connect server start failed, can not find available port, please check the spark logs."
+                    "The spark connect server start failed, can not find available port, "
+                    "please check the spark logs."
                 )
             return port
         raise Exception("The spark environment has not inited, please call init_spark first.")

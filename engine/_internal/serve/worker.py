@@ -94,6 +94,7 @@ class InferenceWorker:
         self._process: Optional[subprocess.Popen] = None
         self._state = WorkerState.STARTING
         self._is_ready = False
+        self._node_id: Optional[str] = None
 
         # Registry (ActorHandle for ref counting, URL for HTTP)
         self._registry = registry
@@ -448,8 +449,13 @@ class InferenceWorker:
                 return True
         return False
 
+    def get_node_id(self) -> Optional[str]:
+        """Return the Ray node_id this worker is running on."""
+        return self._node_id
+
     async def start(self) -> None:
         """Start background tasks (must be called after actor creation)."""
+        self._node_id = ray.get_runtime_context().get_node_id()
         self._ensure_background_tasks()
 
     async def wait_ready(self, timeout: float = 600.0) -> bool:

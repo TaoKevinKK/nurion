@@ -18,12 +18,12 @@
 import math
 import sys
 
+import pyspark
+
 # https://spark.apache.org/docs/latest/api/python/migration_guide/koalas_to_pyspark.html
 # import databricks.koalas as ks
 import pyspark.pandas as ps
-import pyspark
 import pytest
-
 import raydp.utils as utils
 
 

@@ -19,8 +19,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any
 
 import grpc
 
@@ -49,11 +50,11 @@ class Message:
     queue: str
     payload: bytes
     created_at: float
-    metadata: Dict[str, str] = field(default_factory=dict)
-    claim_token: Optional[str] = None
+    metadata: dict[str, str] = field(default_factory=dict)
+    claim_token: str | None = None
 
     @classmethod
-    def from_proto(cls, proto: Any) -> "Message":
+    def from_proto(cls, proto: Any) -> Message:
         """Create Message from protobuf."""
         return cls(
             msg_id=proto.msg_id,
@@ -109,12 +110,12 @@ class WorkQueueClient:
         self.heartbeat_interval = heartbeat_interval_secs
         self.connect_timeout = connect_timeout_secs
 
-        self._channel: Optional[grpc.Channel] = None
-        self._stub: Optional[Any] = None
+        self._channel: grpc.Channel | None = None
+        self._stub: Any | None = None
         self._lease_id: str = ""
 
         # Heartbeat management
-        self._heartbeat_thread: Optional[threading.Thread] = None
+        self._heartbeat_thread: threading.Thread | None = None
         self._heartbeat_running = False
         self._heartbeat_lock = threading.Lock()
 
@@ -147,15 +148,11 @@ class WorkQueueClient:
         deadline = time.time() + self.connect_timeout
         while time.time() < deadline:
             if self._lease_id:
-                logger.info(
-                    f"Connected to {self.server_address}, lease_id={self._lease_id}"
-                )
+                logger.info(f"Connected to {self.server_address}, lease_id={self._lease_id}")
                 return
             time.sleep(0.1)
 
-        raise RuntimeError(
-            f"Failed to acquire lease from server within {self.connect_timeout}s"
-        )
+        raise RuntimeError(f"Failed to acquire lease from server within {self.connect_timeout}s")
 
     def stop(self) -> None:
         """Stop heartbeat and close connection."""
@@ -198,12 +195,12 @@ class WorkQueueClient:
                         if not pong.ok:
                             logger.warning("Lease invalidated by server")
                             self._lease_id = ""
-            except grpc.RpcError as e:
+            except grpc.RpcError:
                 if self._heartbeat_running:
                     reconnect_attempts += 1
                     # Only log first attempt as warning, rest as debug to reduce noise
                     if reconnect_attempts == 1:
-                        logger.warning(f"Heartbeat disconnected, reconnecting...")
+                        logger.warning("Heartbeat disconnected, reconnecting...")
                     elif reconnect_attempts % 10 == 0:
                         logger.debug(f"Heartbeat reconnect attempt {reconnect_attempts}")
                     time.sleep(1.0)
@@ -228,7 +225,7 @@ class WorkQueueClient:
         queue: str,
         batch_size: int = 1,
         timeout_ms: int = 5000,
-    ) -> List[Message]:
+    ) -> list[Message]:
         """Claim messages from a queue.
 
         Args:
@@ -260,18 +257,18 @@ class WorkQueueClient:
                     "Claim response missing claim_tokens or length mismatch "
                     f"(messages={len(messages)}, claim_tokens={len(response.claim_tokens)})"
                 )
-            for msg, token in zip(messages, response.claim_tokens):
+            for msg, token in zip(messages, response.claim_tokens, strict=True):
                 msg.claim_token = token
         return messages
 
     def ack(
         self,
         queue: str,
-        msg_ids: List[str],
-        claim_tokens: Optional[List[str]] = None,
-        state_namespace: Optional[str] = None,
-        state_puts: Optional[Dict[str, bytes]] = None,
-        state_deletes: Optional[List[str]] = None,
+        msg_ids: list[str],
+        claim_tokens: list[str] | None = None,
+        state_namespace: str | None = None,
+        state_puts: dict[str, bytes] | None = None,
+        state_deletes: list[str] | None = None,
     ) -> int:
         """Acknowledge messages as processed, optionally with atomic state updates.
 
@@ -295,7 +292,8 @@ class WorkQueueClient:
             if not claim_tokens or len(claim_tokens) != len(msg_ids):
                 raise ValueError(
                     "claim_tokens is required and must match msg_ids length "
-                    f"(msg_ids={len(msg_ids)}, claim_tokens={len(claim_tokens) if claim_tokens else 0})"
+                    f"(msg_ids={len(msg_ids)}, "
+                    f"claim_tokens={len(claim_tokens) if claim_tokens else 0})"
                 )
 
         request = pb2.AckRequest(
@@ -317,13 +315,13 @@ class WorkQueueClient:
     def nack(
         self,
         queue: str,
-        msg_ids: List[str],
-        claim_tokens: Optional[List[str]] = None,
+        msg_ids: list[str],
+        claim_tokens: list[str] | None = None,
         reason: str = "processing_failed",
         delay_ms: int = 0,
-        state_namespace: Optional[str] = None,
-        state_puts: Optional[Dict[str, bytes]] = None,
-        state_deletes: Optional[List[str]] = None,
+        state_namespace: str | None = None,
+        state_puts: dict[str, bytes] | None = None,
+        state_deletes: list[str] | None = None,
     ) -> int:
         """Return messages to queue for retry.
 
@@ -349,7 +347,8 @@ class WorkQueueClient:
             if not claim_tokens or len(claim_tokens) != len(msg_ids):
                 raise ValueError(
                     "claim_tokens is required and must match msg_ids length "
-                    f"(msg_ids={len(msg_ids)}, claim_tokens={len(claim_tokens) if claim_tokens else 0})"
+                    f"(msg_ids={len(msg_ids)}, "
+                    f"claim_tokens={len(claim_tokens) if claim_tokens else 0})"
                 )
 
         reason_enum = {
@@ -377,14 +376,14 @@ class WorkQueueClient:
     def ack_and_forward(
         self,
         upstream_queue: str,
-        upstream_msg_ids: List[str],
-        upstream_claim_tokens: Optional[List[str]],
+        upstream_msg_ids: list[str],
+        upstream_claim_tokens: list[str] | None,
         downstream_queue: str,
-        downstream_payloads: List[bytes],
-        state_namespace: Optional[str] = None,
-        state_puts: Optional[Dict[str, bytes]] = None,
-        state_deletes: Optional[List[str]] = None,
-    ) -> List[str]:
+        downstream_payloads: list[bytes],
+        state_namespace: str | None = None,
+        state_puts: dict[str, bytes] | None = None,
+        state_deletes: list[str] | None = None,
+    ) -> list[str]:
         """Atomically ack upstream messages, push to downstream, and update state.
 
         This is the key operation for exactly-once semantics between stages.
@@ -409,14 +408,12 @@ class WorkQueueClient:
         self._check_connected()
 
         if upstream_msg_ids:
-            if (
-                not upstream_claim_tokens
-                or len(upstream_claim_tokens) != len(upstream_msg_ids)
-            ):
+            if not upstream_claim_tokens or len(upstream_claim_tokens) != len(upstream_msg_ids):
                 raise ValueError(
                     "upstream_claim_tokens is required and must match upstream_msg_ids length "
                     f"(upstream_msg_ids={len(upstream_msg_ids)}, "
-                    f"upstream_claim_tokens={len(upstream_claim_tokens) if upstream_claim_tokens else 0})"
+                    f"upstream_claim_tokens="
+                    f"{len(upstream_claim_tokens) if upstream_claim_tokens else 0})"
                 )
 
         request = pb2.AckAndForwardRequest(
@@ -444,8 +441,8 @@ class WorkQueueClient:
     def state_get(
         self,
         namespace: str,
-        keys: List[str],
-    ) -> Dict[str, bytes]:
+        keys: list[str],
+    ) -> dict[str, bytes]:
         """Get state values by keys.
 
         Args:
@@ -471,8 +468,8 @@ class WorkQueueClient:
     def state_put(
         self,
         namespace: str,
-        puts: Optional[Dict[str, bytes]] = None,
-        deletes: Optional[List[str]] = None,
+        puts: dict[str, bytes] | None = None,
+        deletes: list[str] | None = None,
     ) -> tuple[int, int]:
         """Put/delete state values.
 
@@ -506,7 +503,7 @@ class WorkQueueClient:
         self,
         queue: str,
         payload: bytes,
-        metadata: Optional[Dict[str, str]] = None,
+        metadata: dict[str, str] | None = None,
     ) -> str:
         """Push a message to a queue.
 
@@ -532,7 +529,7 @@ class WorkQueueClient:
         response = self._stub.Push(request)
         return response.msg_id
 
-    def push_batch(self, queue: str, payloads: List[bytes]) -> List[str]:
+    def push_batch(self, queue: str, payloads: list[bytes]) -> list[str]:
         """Push multiple messages to a queue.
 
         Args:
@@ -599,7 +596,7 @@ class WorkQueueClient:
         response = self._stub.DeleteQueue(request)
         return response.deleted, response.messages_deleted
 
-    def get_stats(self, queue: Optional[str] = None) -> Dict[str, Any]:
+    def get_stats(self, queue: str | None = None) -> dict[str, Any]:
         """Get queue statistics.
 
         Args:
@@ -652,7 +649,7 @@ class WorkQueueClient:
         response = self._stub.MarkQueueFinished(request)
         return response.success
 
-    def is_queue_finished(self, queue: str) -> Dict[str, Any]:
+    def is_queue_finished(self, queue: str) -> dict[str, Any]:
         """Check if queue is finished and safe to exit.
 
         This provides an authoritative check for worker exit conditions,
@@ -684,7 +681,7 @@ class WorkQueueClient:
             "claimed_count": response.claimed_count,
         }
 
-    def __enter__(self) -> "WorkQueueClient":
+    def __enter__(self) -> WorkQueueClient:
         """Context manager entry."""
         self.start()
         return self

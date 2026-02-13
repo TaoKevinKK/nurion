@@ -14,7 +14,9 @@
 
 """Model Pool - Manages InferenceWorkers for a single model with autoscaling.
 
-Combines worker lifecycle management and autoscaling into one actor:
+Plain class owned by ModelServiceManager (Ray actor). Not a separate actor.
+The Manager's event loop runs autoscaling as an asyncio.Task.
+
 1. Worker lifecycle (spawn, stop, graceful shutdown)
 2. Scaling operations (scale_to, freeze/unfreeze)
 3. Autoscaling loop (background task that monitors and scales)
@@ -25,14 +27,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import ray
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from _internal.serve.config import AutoscaleConfig, ModelConfig
 from _internal.serve.registry import SERVE_NAMESPACE
 from _internal.serve.worker import InferenceWorker
 from _internal.utils.network import find_free_port
+
+if TYPE_CHECKING:
+    from _internal.serve.allocator import GPUAllocator
 
 logger = logging.getLogger(__name__)
 _SPAWN_WAIT_TIMEOUT_SECONDS = 120.0
@@ -41,14 +47,8 @@ _SPAWN_WAIT_TIMEOUT_SECONDS = 120.0
 class ModelPool:
     """Manages InferenceWorkers for a single model with built-in autoscaling.
 
-    Usage:
-        pool = ray.remote(ModelPool).options(
-            name=f"model_pool_{config.model_id}",
-        ).remote(config)
-
-        await pool.scale_to.remote(4)
-        await pool.start_autoscaler.remote()
-        await pool.shutdown.remote()
+    Plain class owned by ModelServiceManager. Not a Ray actor.
+    The Manager's event loop runs autoscaling as an asyncio.Task.
     """
 
     def __init__(
@@ -56,12 +56,15 @@ class ModelPool:
         config: ModelConfig,
         registry: ray.actor.ActorHandle,
         detached: bool = False,
+        allocator: Optional[GPUAllocator] = None,
     ) -> None:
         self._config = config
         self._registry = registry
         self._detached = detached
+        self._allocator = allocator
         self._workers: dict[str, ray.actor.ActorHandle] = {}
         self._worker_ports: dict[str, int] = {}
+        self._worker_nodes: dict[str, str] = {}  # worker_id -> node_id
         self._spawning_workers = 0
         self._shutdown_event = asyncio.Event()
         self._last_scale_time = 0.0
@@ -86,6 +89,17 @@ class ModelPool:
         if self._detached:
             actor_options["lifetime"] = "detached"
             actor_options["namespace"] = SERVE_NAMESPACE
+
+        # Best-fit node suggestion from allocator (direct call, no RPC)
+        if self._allocator is not None:
+            gpus = resources.get("num_gpus", 0)
+            if gpus > 0:
+                suggestions = self._allocator.suggest_nodes(float(gpus), 1)
+                node_id = suggestions[0] if suggestions else None
+                if node_id is not None:
+                    actor_options["scheduling_strategy"] = NodeAffinitySchedulingStrategy(
+                        node_id=node_id, soft=True
+                    )
 
         worker: Optional[ray.actor.ActorHandle] = None
         self._spawning_workers += 1
@@ -118,9 +132,16 @@ class ModelPool:
         self._workers[worker_id] = worker
         self._worker_ports[worker_id] = port
 
+        # Report actual placement back to allocator (direct call, no RPC)
+        actual_node = await worker.get_node_id.remote()
+        self._worker_nodes[worker_id] = actual_node
+        if self._allocator is not None:
+            gpus = resources.get("num_gpus", 0)
+            self._allocator.record_placement(worker_id, actual_node, float(gpus))
+
         logger.info(
             f"Spawned worker {worker_id} for {self._config.model_id} "
-            f"(port={port}, resources={resources})"
+            f"(port={port}, node={actual_node}, resources={resources})"
         )
         return worker_id, worker
 
@@ -138,6 +159,12 @@ class ModelPool:
 
         self._workers.pop(worker_id, None)
         self._worker_ports.pop(worker_id, None)
+        self._worker_nodes.pop(worker_id, None)
+
+        # Direct call to allocator, no RPC
+        if self._allocator is not None:
+            self._allocator.record_removal(worker_id)
+
         logger.info(f"Stopped worker {worker_id}")
 
     # --- Public API ---
@@ -169,8 +196,14 @@ class ModelPool:
                     logger.warning(f"Failed to spawn worker for {self._config.model_id}: {msg}")
 
         elif target < current:
-            # Stop workers (pick any, could be smarter with metrics)
-            workers_to_stop = list(self._workers.keys())[: current - target]
+            count = current - target
+            if self._allocator is not None:
+                workers_to_stop = self._allocator.suggest_workers_to_stop(
+                    list(self._workers.keys()), count
+                )
+            else:
+                workers_to_stop = list(self._workers.keys())[:count]
+
             for worker_id in workers_to_stop:
                 await self._stop_worker(worker_id, graceful=True)
                 result["stopped"].append(worker_id)
@@ -186,6 +219,10 @@ class ModelPool:
             f"{result['current_workers']} in {result['duration_s']:.1f}s"
         )
         return result
+
+    def stop_workers_by_ids(self, worker_ids: list[str]) -> list[str]:
+        """Return the subset of worker_ids that belong to this pool."""
+        return [wid for wid in worker_ids if wid in self._workers]
 
     async def wait_ready(self, timeout: float = 600.0) -> bool:
         """Wait for at least one worker to be ready.
@@ -354,8 +391,3 @@ class ModelPool:
         await asyncio.gather(*tasks, return_exceptions=True)
 
         logger.info(f"ModelPool for {self._config.model_id} shutdown complete")
-
-
-def get_pool_actor_name(model_id: str) -> str:
-    """Get the named actor name for a model pool."""
-    return f"nurion_model_pool_{model_id}"

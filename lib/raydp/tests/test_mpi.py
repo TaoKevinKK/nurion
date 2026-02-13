@@ -15,13 +15,13 @@
 # limitations under the License.
 #
 
-import sys
 import platform
+import sys
+
 import pytest
 import ray
 from ray.util import placement_group, remove_placement_group
-
-from raydp.mpi import create_mpi_job, MPIJobContext, WorkerContext
+from raydp.mpi import MPIJobContext, WorkerContext, create_mpi_job
 
 
 @pytest.mark.timeout(10)

@@ -18,9 +18,8 @@
 import glob
 import os
 import platform
-import pyspark
-from typing import Dict
 
+import pyspark
 import ray
 from pyspark.sql.session import SparkSession
 
@@ -59,7 +58,7 @@ class SparkCluster:
         self._setup_master(self._get_master_resources(self._configs))
         self._spark_session: SparkSession = None
 
-    def _setup_master(self, resources: Dict[str, float]):
+    def _setup_master(self, resources: dict[str, float]):
         spark_master_name = self._app_name + RAYDP_SPARK_MASTER_SUFFIX
 
         if resources:
@@ -79,13 +78,13 @@ class SparkCluster:
 
         ray.get(self._spark_master_handle.start_up.remote(resources))
 
-    def _get_master_resources(self, configs: Dict[str, str]) -> Dict[str, float]:
+    def _get_master_resources(self, configs: dict[str, str]) -> dict[str, float]:
         resources = {}
         spark_master_actor_resource_prefix = "spark.ray.master.actor.resource."
 
         def get_master_actor_resource(
-            key_prefix: str, resource: Dict[str, float]
-        ) -> Dict[str, float]:
+            key_prefix: str, resource: dict[str, float]
+        ) -> dict[str, float]:
             for key in configs:
                 if key.startswith(key_prefix):
                     resource_name = key[len(key_prefix) :]

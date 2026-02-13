@@ -1,0 +1,5 @@
+# Ruff configuration for the entire Nurion workspace
+extend-exclude = [
+    "lib/workqueue-rs/python/workqueue_py/workqueue_pb2.py",
+    "lib/workqueue-rs/python/workqueue_py/workqueue_pb2_grpc.py",
+]

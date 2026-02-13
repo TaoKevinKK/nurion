@@ -1,12 +1,16 @@
 """WorkQueue Python bindings - single-queue multi-consumer work queue."""
 
-from typing import Optional
-
 # Import Rust implementations
 from workqueue_py.workqueue_py import (  # type: ignore
     BrokerConfig as _BrokerConfig,
+)
+from workqueue_py.workqueue_py import (
     BrokerError as _BrokerError,
+)
+from workqueue_py.workqueue_py import (
     WorkQueueBroker as _WorkQueueBroker,
+)
+from workqueue_py.workqueue_py import (
     WorkQueueStorageReader as _WorkQueueStorageReader,
 )
 

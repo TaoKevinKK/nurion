@@ -101,6 +101,8 @@ warn_unused_ignores = false  # Avoid noise during gradual typing
 show_error_codes = true
 exclude = [
     "^tests/",  # Tests don't need strict typing
+    ".*workqueue_pb2\\.py$",  # Generated protobuf files
+    ".*workqueue_pb2_grpc\\.py$",  # Generated gRPC files
 ]
 
 [[tool.mypy.overrides]]
@@ -149,6 +151,7 @@ ignore_errors = true
 [tool.ruff]
 line-length = 100
 target-version = "py313"
+extend-exclude = ["**/workqueue_pb2.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

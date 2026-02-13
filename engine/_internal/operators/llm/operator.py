@@ -25,16 +25,21 @@ Two modes for endpoint discovery:
 from __future__ import annotations
 
 import asyncio
-import random
+import logging
 from dataclasses import dataclass
-from typing import Any, ClassVar, Literal, Optional, Type
+from typing import Any, ClassVar, Literal, Optional, Type, Union
 
-import httpx
 import pyarrow as pa
 import ray
 
 from _internal.core.models import Split, SplitPayload
 from _internal.core.operator import Operator, OperatorConfig, OperatorRuntime, operator
+from _internal.operators.llm.client import (
+    ChatCompletionsClient,
+    ContextLengthError,
+    ModelRoutingConfig,
+    RoutedChatCompletionsClient,
+)
 from _internal.operators.llm.utils import (
     build_multi_image_message,
     build_single_image_message,
@@ -42,26 +47,8 @@ from _internal.operators.llm.utils import (
     extract_messages,
     extract_prompts,
 )
-from _internal.serve.client import ModelClient
 
-
-class EndpointSelectPolicy:
-    """Policy for selecting endpoints from a list.
-
-    Each instance has a random offset so that different workers in a
-    distributed system don't all start from index 0.
-    """
-
-    def __init__(self, endpoints: list[str]) -> None:
-        self._endpoints = endpoints
-        self._offset = random.randint(0, max(len(endpoints) - 1, 0))
-        self._counter = 0
-
-    def next(self) -> str:
-        """Return next endpoint using round-robin with random start offset."""
-        idx = (self._offset + self._counter) % len(self._endpoints)
-        self._counter += 1
-        return self._endpoints[idx]
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -131,42 +118,37 @@ class ExternalLLMOperatorConfig(OperatorConfig):
     images_field: str = ""
     detail: Literal["auto", "low", "high"] = "auto"
 
+    # --- Length-based routing ---
+    model_routing: Optional[ModelRoutingConfig] = None
+
 
 @operator(ExternalLLMOperatorConfig)
 class ExternalLLMOperator(Operator):
     """Operator for calling external LLM services via OpenAI-compatible API.
 
     Async process_split with concurrent batch requests via asyncio.gather.
-    ModelClient handles endpoint discovery; the API call path is unified.
+    Uses ChatCompletionsClient (or RoutedChatCompletionsClient when model_routing
+    is configured) for endpoint discovery, retries, and error detection.
     """
 
     def __init__(self, config: ExternalLLMOperatorConfig, runtime: OperatorRuntime):
         super().__init__(config, runtime)
         self._config: ExternalLLMOperatorConfig = config
-        self._http_client: Optional[httpx.AsyncClient] = None
-        self._model_client: Optional[Any] = None
+        self._client: Optional[Union[ChatCompletionsClient, RoutedChatCompletionsClient]] = None
 
-    def _get_http_client(self) -> httpx.AsyncClient:
-        if self._http_client is None:
-            self._http_client = httpx.AsyncClient(timeout=self._config.timeout)
-        return self._http_client
-
-    def _get_model_client(self) -> ModelClient:
-        if self._model_client is None:
-            assert self._config.registry is not None, (
-                "registry must be set in config when use_model_client=True"
+    def _get_client(self) -> Union[ChatCompletionsClient, RoutedChatCompletionsClient]:
+        if self._client is None:
+            base = ChatCompletionsClient(
+                registry=self._config.registry if self._config.use_model_client else None,
+                base_url=self._config.base_url,
+                timeout=self._config.timeout,
+                max_retries=self._config.max_retries,
             )
-            self._model_client = ModelClient(
-                registry=self._config.registry,
-                cache_ttl_seconds=30.0,
-            )
-        return self._model_client
-
-    async def _get_endpoints(self) -> list[str]:
-        """Get endpoints — from ModelClient or base_url."""
-        if self._config.use_model_client:
-            return await self._get_model_client().get_endpoints(self._config.model)
-        return [self._config.base_url]
+            if self._config.model_routing is not None:
+                self._client = RoutedChatCompletionsClient(base, self._config.model_routing)
+            else:
+                self._client = base
+        return self._client
 
     async def process_split(
         self, split: Split, payload: Optional[SplitPayload] = None
@@ -177,26 +159,17 @@ class ExternalLLMOperator(Operator):
 
         table = payload.to_table()
 
-        # Extract messages
         if self._config.messages_field:
             messages_list = extract_messages(table, self._config.messages_field)
         else:
             messages_list = self._build_vision_messages(table)
 
-        # Get endpoints once per split, round-robin with random offset
-        endpoints = await self._get_endpoints()
-        selector = EndpointSelectPolicy(endpoints)
-
-        # Generate outputs in batches with asyncio.gather
-        outputs: list[str] = []
+        outputs = []
         for i in range(0, len(messages_list), self._config.batch_size):
             batch = messages_list[i : i + self._config.batch_size]
-            batch_results = await asyncio.gather(
-                *(self._generate_one(m, selector.next()) for m in batch)
-            )
+            batch_results = await asyncio.gather(*(self._generate_one(m) for m in batch))
             outputs.extend(batch_results)
 
-        # Add outputs to table
         output_array = pa.array(outputs, type=pa.string())
         new_table = table.append_column(self._config.output_field, output_array)
 
@@ -205,51 +178,30 @@ class ExternalLLMOperator(Operator):
             split_id=f"{split.split_id}_{self.worker_id}",
         )
 
-    async def _generate_one(self, messages: list[dict], endpoint: str) -> str:
-        """Generate response for a single message list with retries."""
-        url = f"{endpoint}/v1/chat/completions"
-        body = self._build_request_body(messages)
+    async def _generate_one(self, messages: list[dict], model: Optional[str] = None) -> str:
+        """Generate response for a single message list.
+
+        When model_routing is configured, the RoutedChatCompletionsClient
+        automatically picks the optimal model and handles context-length
+        fallback. ContextLengthError only reaches here when all routes
+        are exhausted.
+        """
+        body = self._build_request_body(messages, model=model)
+        effective_model = model or self._config.model
 
         try:
-            return await self._call_api(url, body)
+            return await self._get_client().generate(effective_model, body)
+        except ContextLengthError as e:
+            self.logger.error(f"Context length exceeded: {e}")
+            return "[ERROR: context length exceeded on largest model]"
         except Exception as e:
             self.logger.error(f"Failed to generate response: {e}")
-            if self._config.use_model_client:
-                self._get_model_client().invalidate_cache(self._config.model)
+            self._get_client().invalidate_cache(effective_model)
             return f"[ERROR: {str(e)}]"
 
-    async def _call_api(self, url: str, body: dict[str, Any]) -> str:
-        """POST to chat/completions endpoint with retries."""
-        client = self._get_http_client()
-        last_error: Optional[Exception] = None
-
-        for attempt in range(self._config.max_retries):
-            try:
-                response = await client.post(url, json=body)
-                response.raise_for_status()
-                return response.json()["choices"][0]["message"]["content"]
-            except (httpx.ConnectError, httpx.TimeoutException) as e:
-                last_error = e
-                self.logger.warning(
-                    f"Request failed (attempt {attempt + 1}/{self._config.max_retries}): {e}"
-                )
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code in (429, 500, 502, 503, 504):
-                    last_error = e
-                    self.logger.warning(
-                        f"Retryable HTTP {e.response.status_code} "
-                        f"(attempt {attempt + 1}/{self._config.max_retries})"
-                    )
-                else:
-                    raise
-            # Brief backoff before retry
-            await asyncio.sleep(0.5 * (attempt + 1))
-
-        raise RuntimeError(
-            f"All {self._config.max_retries} attempts failed for {url}: {last_error}"
-        )
-
-    def _build_request_body(self, messages: list[dict]) -> dict[str, Any]:
+    def _build_request_body(
+        self, messages: list[dict], model: Optional[str] = None
+    ) -> dict[str, Any]:
         """Build OpenAI-compatible request body."""
         body: dict[str, Any] = {
             "messages": messages,
@@ -258,8 +210,9 @@ class ExternalLLMOperator(Operator):
             "top_p": self._config.top_p,
         }
 
-        if self._config.model:
-            body["model"] = self._config.model
+        effective_model = model or self._config.model
+        if effective_model:
+            body["model"] = effective_model
         if self._config.top_k > 0:
             body["top_k"] = self._config.top_k
         if self._config.presence_penalty != 0.0:
@@ -292,12 +245,11 @@ class ExternalLLMOperator(Operator):
 
     def close(self) -> None:
         """Clean up resources."""
-        if self._http_client:
-            # Schedule async close if loop is running
+        if self._client is not None:
             try:
                 loop = asyncio.get_running_loop()
-                loop.create_task(self._http_client.aclose())
+                loop.create_task(self._client.close())
             except RuntimeError:
                 pass
-            self._http_client = None
+            self._client = None
         super().close()

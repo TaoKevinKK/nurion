@@ -104,7 +104,7 @@ def is_asf_licensed_file(file_path: Path) -> bool:
 def check_python_file(file_path: Path) -> tuple[bool, str]:
     """Check Python file for license header. Returns (is_valid, message)."""
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
+        with open(file_path, encoding="utf-8") as f:
             content = f.read()
     except Exception as e:
         return False, f"Error reading file: {e}"
@@ -116,7 +116,7 @@ def check_python_file(file_path: Path) -> tuple[bool, str]:
     # First check if file has any valid license header (ASF or nurion)
     if ASF_LICENSE_PATTERN.search(header_text):
         return True, "Has ASF license header"
-    
+
     if PYTHON_LICENSE_PATTERN.search(header_text):
         return True, "Has nurion license header"
 
@@ -130,7 +130,7 @@ def check_python_file(file_path: Path) -> tuple[bool, str]:
 def check_scala_java_file(file_path: Path) -> tuple[bool, str]:
     """Check Scala/Java file for license header. Returns (is_valid, message)."""
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
+        with open(file_path, encoding="utf-8") as f:
             content = f.read()
     except Exception as e:
         return False, f"Error reading file: {e}"
@@ -156,7 +156,7 @@ def check_scala_java_file(file_path: Path) -> tuple[bool, str]:
 def check_rust_file(file_path: Path) -> tuple[bool, str]:
     """Check Rust file for license header. Returns (is_valid, message)."""
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
+        with open(file_path, encoding="utf-8") as f:
             content = f.read()
     except Exception as e:
         return False, f"Error reading file: {e}"
@@ -222,4 +222,3 @@ if __name__ == "__main__":
     print(f"Checking license headers in: {root_dir}\n")
     violations = check_directory(root_dir)
     sys.exit(violations)
-

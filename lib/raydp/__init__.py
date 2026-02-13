@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-from raydp.context import init_spark, stop_spark, start_connect_server
+from raydp.context import init_spark, start_connect_server, stop_spark
 from raydp.utils import code_search_path
 
 __all__ = [

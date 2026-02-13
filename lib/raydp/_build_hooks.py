@@ -25,6 +25,7 @@ import os
 import subprocess
 import sys
 from shutil import copy2
+
 from setuptools.command.build_py import build_py as _build_py
 from setuptools.command.sdist import sdist as _sdist
 
@@ -45,9 +46,7 @@ class BuildWithJars(_build_py):
     def setup_jars(self):
         """Set up JAR files for packaging."""
         # Java directory is a subdirectory of the raydp package
-        CORE_DIR = os.path.abspath(
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "java")
-        )
+        CORE_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "java"))
 
         # Build JAR files using Maven
         self.build_jars(CORE_DIR)
@@ -96,7 +95,7 @@ class BuildWithJars(_build_py):
             subprocess.run(["mvn", "--version"], check=True, capture_output=True)
         except (subprocess.CalledProcessError, FileNotFoundError):
             print("Maven (mvn) could not be found. Please install Maven first.", file=sys.stderr)
-            raise RuntimeError("Maven not found")
+            raise RuntimeError("Maven not found") from None
 
         print(f"Building JAR files in {core_dir}")
 
@@ -118,7 +117,7 @@ class BuildWithJars(_build_py):
 
         except subprocess.CalledProcessError as e:
             print(f"Maven build failed with exit code {e.returncode}", file=sys.stderr)
-            raise RuntimeError(f"Maven build failed: {e}")
+            raise RuntimeError(f"Maven build failed: {e}") from e
         except Exception as e:
             print(f"Failed to run Maven build: {e}", file=sys.stderr)
             raise

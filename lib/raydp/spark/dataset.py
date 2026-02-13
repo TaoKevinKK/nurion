@@ -15,25 +15,24 @@
 # limitations under the License.
 import logging
 import uuid
-from typing import Callable, List, Optional, Union
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import pandas as pd
 import pyarrow as pa
 import pyspark.sql as sql
-from pyspark.sql import SparkSession
-from pyspark.sql.dataframe import DataFrame
-from pyspark.sql.types import StructType
-from pyspark.sql.pandas.types import from_arrow_type
-from pyspark.storagelevel import StorageLevel
 import ray
 import ray.cross_language
+from pyspark.sql import SparkSession
+from pyspark.sql.dataframe import DataFrame
+from pyspark.sql.pandas.types import from_arrow_type
+from pyspark.sql.types import StructType
+from pyspark.storagelevel import StorageLevel
+from ray._private.client_mode_hook import client_mode_wrap
 from ray.data import Dataset, from_arrow_refs
 from ray.types import ObjectRef
-from ray._private.client_mode_hook import client_mode_wrap
 
 from raydp.spark.ray_cluster_master import RAYDP_SPARK_MASTER_SUFFIX
-
 
 logger = logging.getLogger(__name__)
 
@@ -44,18 +43,18 @@ class PartitionObjectsOwner:
     actor_name: str
     # Function that set serialized parquet objects to actor owner state
     # and return result of .remote() calling
-    set_reference_as_state: Callable[[ray.actor.ActorHandle, List[ObjectRef]], ObjectRef]
+    set_reference_as_state: Callable[[ray.actor.ActorHandle, list[ObjectRef]], ObjectRef]
 
 
 def get_raydp_master_owner(
-    spark: Optional[SparkSession] = None,
+    spark: SparkSession | None = None,
 ) -> PartitionObjectsOwner:
     if spark is None:
         spark = SparkSession.getActiveSession()
     obj_holder_name = spark.sparkContext.appName + RAYDP_SPARK_MASTER_SUFFIX
 
     def raydp_master_set_reference_as_state(
-        raydp_master_actor: ray.actor.ActorHandle, objects: List[ObjectRef]
+        raydp_master_actor: ray.actor.ActorHandle, objects: list[ObjectRef]
     ) -> ObjectRef:
         return raydp_master_actor.add_objects.remote(uuid.uuid4(), objects)
 
@@ -65,8 +64,8 @@ def get_raydp_master_owner(
 @client_mode_wrap
 def _register_objects(records):
     worker = ray.worker.global_worker
-    blocks: List[ray.ObjectRef] = []
-    block_sizes: List[int] = []
+    blocks: list[ray.ObjectRef] = []
+    block_sizes: list[int] = []
     for obj_id, owner, num_record in records:
         object_ref = ray.ObjectRef(obj_id)
         # Register the ownership of the ObjectRef
@@ -81,7 +80,7 @@ def _register_objects(records):
 def _save_spark_df_to_object_store(
     df: sql.DataFrame,
     use_batch: bool = True,
-    owner: Union[PartitionObjectsOwner, None] = None,
+    owner: PartitionObjectsOwner | None = None,
 ):
     # call java function from python
     jvm = df.sql_ctx.sparkSession.sparkContext._jvm
@@ -109,8 +108,8 @@ def _save_spark_df_to_object_store(
 
 def spark_dataframe_to_ray_dataset(
     df: sql.DataFrame,
-    parallelism: Optional[int] = None,
-    owner: Union[PartitionObjectsOwner, None] = None,
+    parallelism: int | None = None,
+    owner: PartitionObjectsOwner | None = None,
 ):
     num_part = df.rdd.getNumPartitions()
     if parallelism is not None:
@@ -126,7 +125,7 @@ def spark_dataframe_to_ray_dataset(
 def from_spark_recoverable(
     df: sql.DataFrame,
     storage_level: StorageLevel = StorageLevel.MEMORY_AND_DISK,
-    parallelism: Optional[int] = None,
+    parallelism: int | None = None,
 ):
     num_part = df.rdd.getNumPartitions()
     if parallelism is not None:
@@ -151,8 +150,8 @@ def from_spark_recoverable(
 
 def _convert_by_udf(
     spark: sql.SparkSession,
-    blocks: List[ObjectRef],
-    locations: List[bytes],
+    blocks: list[ObjectRef],
+    locations: list[bytes],
     schema: StructType,
 ) -> DataFrame:
     holder_name = spark.sparkContext.appName + RAYDP_SPARK_MASTER_SUFFIX
@@ -189,7 +188,7 @@ def _convert_by_udf(
 
 
 def _convert_by_rdd(
-    spark: sql.SparkSession, blocks: Dataset, locations: List[bytes], schema: StructType
+    spark: sql.SparkSession, blocks: Dataset, locations: list[bytes], schema: StructType
 ) -> DataFrame:
     object_ids = [block.binary() for block in blocks]
     schema_str = schema.json()
@@ -209,7 +208,7 @@ def get_locations(blocks):
 
 
 def ray_dataset_to_spark_dataframe(
-    spark: sql.SparkSession, arrow_schema, blocks: List[ObjectRef], locations=None
+    spark: sql.SparkSession, arrow_schema, blocks: list[ObjectRef], locations=None
 ) -> DataFrame:
     locations = get_locations(blocks)
     if hasattr(arrow_schema, "base_schema"):

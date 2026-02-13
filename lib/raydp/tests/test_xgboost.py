@@ -16,15 +16,15 @@
 #
 
 import os
-import shutil
 import platform
-import pytest
-import pyspark
-import numpy as np
-from pyspark.sql.functions import rand
+import shutil
 
-from raydp.xgboost import XGBoostEstimator
+import numpy as np
+import pyspark
+import pytest
+from pyspark.sql.functions import rand
 from raydp.utils import random_split
+from raydp.xgboost import XGBoostEstimator
 
 
 @pytest.mark.parametrize("use_fs_directory", [True, False])

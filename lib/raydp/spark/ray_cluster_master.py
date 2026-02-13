@@ -24,7 +24,6 @@ from ray.util.scheduling_strategies import (
     PlacementGroupSchedulingStrategy,
 )
 
-
 from .ray_pyworker import PyWorker
 
 RAYDP_SPARK_MASTER_SUFFIX = "_SPARK_MASTER"
@@ -50,7 +49,10 @@ class RayDPSparkMaster:
             "org.apache.spark.deploy.raydp.RayAppMaster",
             # {
             #     "runtime_env": {
-            #         "java_executable": f"java -Dray.logging.level={self._logging_level} -cp {':'.join([p + '/*' for p in code_search_path()])}",
+            #         "java_executable": (
+            #             f"java -Dray.logging.level={self._logging_level} -cp "
+            #             f"{':'.join([p + '/*' for p in code_search_path()])}"
+            #         ),
             #     },
             # },
         )
@@ -71,7 +73,8 @@ class RayDPSparkMaster:
 
     def create_pyworker(self, worker_id: str, node_id: str, env_vars: str) -> str:
         self._logger.info(
-            f"Create a PyWorker with node_id: {node_id}, env_vars: {env_vars}, runtime_env: {ray.get_runtime_context().namespace}"
+            f"Create a PyWorker with node_id: {node_id}, env_vars: {env_vars}, "
+            f"runtime_env: {ray.get_runtime_context().namespace}"
         )
         envs = json.loads(env_vars)
         pg_name = f"raydp-executor-{self._app_name}-{worker_id}-pg"

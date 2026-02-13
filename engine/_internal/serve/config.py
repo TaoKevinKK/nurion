@@ -122,14 +122,22 @@ class ModelConfig:
             raise ValueError("tensor_parallel_size must be >= 1")
 
     def get_worker_resources(self) -> dict[str, Any]:
-        """Get Ray worker resource requirements.
+        """Return Ray resource dict for worker scheduling.
 
-        Returns worker_resources if specified, otherwise defaults to
-        {"num_gpus": tensor_parallel_size}.
+        Auto-infers num_gpus:
+        - If worker_resources is explicitly set, use it as-is.
+        - TP > 1: num_gpus = tensor_parallel_size (need dedicated GPUs).
+        - TP = 1 and gpu_memory_utilization < 0.5: num_gpus = 0.5
+          (allows two workers to share one physical GPU).
+        - TP = 1 otherwise: num_gpus = 1.
         """
-        if self.worker_resources:
+        if self.worker_resources is not None:
             return self.worker_resources
-        return {"num_gpus": self.tensor_parallel_size}
+        if self.tensor_parallel_size > 1:
+            return {"num_gpus": self.tensor_parallel_size}
+        if self.gpu_memory_utilization < 0.5:
+            return {"num_gpus": 0.5}
+        return {"num_gpus": 1}
 
     def to_engine_kwargs(self) -> dict[str, Any]:
         """Convert config to vLLM/SGLang engine kwargs."""

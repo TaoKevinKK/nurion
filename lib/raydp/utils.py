@@ -15,15 +15,14 @@
 # limitations under the License.
 #
 
-import os
 import atexit
+import glob
 import logging
 import math
-import glob
+import os
 import re
 import signal
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
 
 import ray
 
@@ -128,8 +127,8 @@ def parse_memory_size(memory_size: str) -> int:
 
 
 def divide_blocks(
-    blocks: List[int], world_size: int, shuffle: bool = False, shuffle_seed: int = None
-) -> Dict[int, List[int]]:
+    blocks: list[int], world_size: int, shuffle: bool = False, shuffle_seed: int = None
+) -> dict[int, list[int]]:
     """
     Divide the blocks into world_size partitions, and return the divided block indexes for the
     given work_rank
@@ -170,7 +169,7 @@ def divide_blocks(
     if shuffle:
         np.random.shuffle(global_indexes)
 
-    def select(index: int, current_size: int, selected: List[Tuple[int, int]]) -> int:
+    def select(index: int, current_size: int, selected: list[tuple[int, int]]) -> int:
         block_size = blocks[index]
         tmp = current_size + block_size
         if tmp < num_samples_per_rank:
@@ -203,7 +202,7 @@ def divide_blocks(
     return results
 
 
-def code_search_path() -> List[str]:
+def code_search_path() -> list[str]:
     import pyspark
 
     raydp_cp = os.path.abspath(os.path.join(os.path.abspath(__file__), "../jars/"))
@@ -213,7 +212,7 @@ def code_search_path() -> List[str]:
     return [raydp_cp, spark_jars_dir]
 
 
-def code_search_jars() -> List[str]:
+def code_search_jars() -> list[str]:
     paths = code_search_path()
     jars = []
     for path in paths:
@@ -286,7 +285,7 @@ def auto_infer_executor_config(
 
     head_cpus = 0
     head_memory_gb = 0
-    worker_nodes: List[Dict[str, int]] = []
+    worker_nodes: list[dict[str, int]] = []
 
     for node in nodes:
         if not node.get("Alive", False):
@@ -342,9 +341,7 @@ def auto_infer_executor_config(
         # Driver on head: use half of head memory
         driver_memory_gb = max(head_memory_gb // 2, min_driver_memory_gb)
 
-        logger.info(
-            f"Cluster: {num_workers} workers, head={head_cpus}CPU/{head_memory_gb}GB"
-        )
+        logger.info(f"Cluster: {num_workers} workers, head={head_cpus}CPU/{head_memory_gb}GB")
 
     logger.info(
         f"Auto-configured: {num_executors} executors, {executor_cores} cores each, "

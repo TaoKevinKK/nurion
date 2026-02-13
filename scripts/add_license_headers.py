@@ -15,7 +15,6 @@
 
 """Script to add Apache 2.0 license headers to source files."""
 
-import os
 import sys
 from pathlib import Path
 
@@ -106,7 +105,7 @@ def should_process_file(file_path: Path) -> bool:
 def add_license_to_python(file_path: Path) -> bool:
     """Add license header to Python file. Returns True if modified."""
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
+        with open(file_path, encoding="utf-8") as f:
             content = f.read()
     except Exception as e:
         print(f"Error reading {file_path}: {e}", file=sys.stderr)
@@ -164,7 +163,7 @@ def add_license_to_python(file_path: Path) -> bool:
 def add_license_to_scala_java(file_path: Path) -> bool:
     """Add license header to Scala/Java file. Returns True if modified."""
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
+        with open(file_path, encoding="utf-8") as f:
             content = f.read()
     except Exception as e:
         print(f"Error reading {file_path}: {e}", file=sys.stderr)
@@ -228,4 +227,3 @@ if __name__ == "__main__":
     print(f"Adding license headers to files in: {root_dir}")
     modified = process_directory(root_dir)
     sys.exit(0 if modified >= 0 else 1)
-

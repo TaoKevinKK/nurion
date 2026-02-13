@@ -17,6 +17,9 @@
 Uses FakeInferenceWorker (no GPU, no vLLM) to verify that the autoscaler
 correctly scales workers up/down based on inflight request metrics
 (pending + running), not just pending queue depth.
+
+ModelPool is a plain class owned by ModelServiceManager. In tests we
+instantiate it directly (not as a Ray actor).
 """
 
 from __future__ import annotations
@@ -62,8 +65,10 @@ class FakeInferenceWorker:
         self._is_ready = False
         self._registry_url: Optional[str] = None
         self._http_client: Optional[httpx.AsyncClient] = None
+        self._node_id: Optional[str] = None
 
     async def start(self) -> None:
+        self._node_id = ray.get_runtime_context().get_node_id()
         self._registry_url = ray.get(self._registry.get_http_url.remote())
         self._http_client = httpx.AsyncClient(timeout=5.0)
         await self._http_client.post(
@@ -75,6 +80,9 @@ class FakeInferenceWorker:
             },
         )
         self._is_ready = True
+
+    def get_node_id(self) -> Optional[str]:
+        return self._node_id
 
     def is_ready(self) -> bool:
         return self._is_ready
@@ -119,6 +127,15 @@ class _TestableModelPool(ModelPool):
 
         self._workers[worker_id] = worker
         self._worker_ports[worker_id] = port
+
+        # Track node placement (mirrors real pool.py logic)
+        actual_node = await worker.get_node_id.remote()
+        self._worker_nodes[worker_id] = actual_node
+        if self._allocator is not None:
+            resources = self._config.get_worker_resources()
+            gpus = resources.get("num_gpus", 0)
+            self._allocator.record_placement(worker_id, actual_node, float(gpus))
+
         return worker_id, worker
 
 
@@ -181,26 +198,23 @@ async def registry(ray_cluster):
 
 @pytest.fixture
 async def pool_env(registry):
-    """TestableModelPool scaled to *min_workers* with autoscaler NOT started.
+    """TestableModelPool (plain object) scaled to *min_workers*.
 
-    Returns ``(pool_handle, http_url, model_config)``.
+    Returns ``(pool, http_url, model_config)``.
     """
     registry_actor, http_url = registry
     config = _make_model_config()
 
-    pool = (
-        ray.remote(_TestableModelPool)
-        .options(name="test_pool", num_cpus=0)
-        .remote(config, registry_actor, False)
-    )
+    # Pool is a plain class — instantiate directly, no ray.remote()
+    pool = _TestableModelPool(config, registry_actor, detached=False)
 
-    await pool.scale_to.remote(config.min_workers)
-    ready = await pool.wait_ready.remote(timeout=10.0)
+    await pool.scale_to(config.min_workers)
+    ready = await pool.wait_ready(timeout=10.0)
     assert ready, "FakeInferenceWorker failed to become ready"
 
     yield pool, http_url, config
 
-    await pool.shutdown.remote()
+    await pool.shutdown()
 
 
 # ---------------------------------------------------------------------------
@@ -215,29 +229,21 @@ class TestModelPoolAutoscaling:
     # -- scale-up ----------------------------------------------------------
 
     async def test_scale_up_on_high_running(self, pool_env) -> None:
-        """Scale up when *running* is high even if *pending* ≈ 0.
-
-        This is the primary scenario the bug-fix addresses: vLLM's chunked
-        prefill moves requests from waiting → running almost immediately, so
-        pending stays near zero while GPU is saturated.
-        """
+        """Scale up when *running* is high even if *pending* ≈ 0."""
         pool, http_url, _ = pool_env
 
-        status = await pool.get_status.remote()
+        status = await pool.get_status()
         assert status["total_workers"] == 2
         endpoints = status["endpoints"]
 
-        # Simulate: GPU saturated, waiting queue near-empty
         for ep in endpoints:
             await _set_metrics(http_url, ep, pending=0, running=20)
 
-        ray.get(pool.start_autoscaler.remote(_make_autoscale_config()))
+        pool.start_autoscaler(_make_autoscale_config())
 
-        # Wait: cooldown (1 s) + check (0.5 s) + spawn time + buffer
         await asyncio.sleep(3.0)
 
-        # inflight = 40 > threshold = 5 × 2 = 10 → scale up
-        status = await pool.get_status.remote()
+        status = await pool.get_status()
         assert status["total_workers"] > 2, (
             f"Expected scale-up from running load, still at {status['total_workers']}"
         )
@@ -246,53 +252,52 @@ class TestModelPoolAutoscaling:
         """Traditional overload: high pending, low running → still scales up."""
         pool, http_url, _ = pool_env
 
-        status = await pool.get_status.remote()
+        status = await pool.get_status()
         endpoints = status["endpoints"]
 
         for ep in endpoints:
             await _set_metrics(http_url, ep, pending=15, running=0)
 
-        ray.get(pool.start_autoscaler.remote(_make_autoscale_config()))
+        pool.start_autoscaler(_make_autoscale_config())
         await asyncio.sleep(3.0)
 
-        status = await pool.get_status.remote()
+        status = await pool.get_status()
         assert status["total_workers"] > 2
 
     async def test_no_scale_up_below_threshold(self, pool_env) -> None:
         """No scale-up when total inflight is below the threshold."""
         pool, http_url, _ = pool_env
 
-        status = await pool.get_status.remote()
+        status = await pool.get_status()
         endpoints = status["endpoints"]
 
-        # total inflight = 2 × (1 + 1) = 4 < threshold = 5 × 2 = 10
         for ep in endpoints:
             await _set_metrics(http_url, ep, pending=1, running=1)
 
-        ray.get(pool.start_autoscaler.remote(_make_autoscale_config()))
+        pool.start_autoscaler(_make_autoscale_config())
         await asyncio.sleep(3.0)
 
-        status = await pool.get_status.remote()
+        status = await pool.get_status()
         assert status["total_workers"] == 2
 
     async def test_respects_max_workers(self, pool_env) -> None:
         """Autoscaler never exceeds *max_workers*."""
         pool, http_url, config = pool_env
 
-        await pool.scale_to.remote(config.max_workers)
+        await pool.scale_to(config.max_workers)
         await asyncio.sleep(0.5)
 
-        status = await pool.get_status.remote()
+        status = await pool.get_status()
         assert status["total_workers"] == config.max_workers
         endpoints = status["endpoints"]
 
         for ep in endpoints:
             await _set_metrics(http_url, ep, pending=100, running=100)
 
-        ray.get(pool.start_autoscaler.remote(_make_autoscale_config()))
+        pool.start_autoscaler(_make_autoscale_config())
         await asyncio.sleep(3.0)
 
-        status = await pool.get_status.remote()
+        status = await pool.get_status()
         assert status["total_workers"] == config.max_workers
 
     # -- scale-down --------------------------------------------------------
@@ -301,24 +306,21 @@ class TestModelPoolAutoscaling:
         """Scale down after sustained zero-inflight period."""
         pool, http_url, config = pool_env
 
-        # Start above min so there is room to scale down
-        await pool.scale_to.remote(3)
+        await pool.scale_to(3)
         await asyncio.sleep(0.5)
 
-        status = await pool.get_status.remote()
+        status = await pool.get_status()
         assert status["total_workers"] == 3
         endpoints = status["endpoints"]
 
-        # All workers idle (inflight = 0)
         for ep in endpoints:
             await _set_metrics(http_url, ep, pending=0, running=0)
 
-        ray.get(pool.start_autoscaler.remote(_make_autoscale_config()))
+        pool.start_autoscaler(_make_autoscale_config())
 
-        # Wait: cooldown (1 s) + idle detection start + idle_seconds (2 s) + buffer
         await asyncio.sleep(5.0)
 
-        status = await pool.get_status.remote()
+        status = await pool.get_status()
         assert status["total_workers"] < 3, (
             f"Expected scale-down, still at {status['total_workers']}"
         )
@@ -328,20 +330,19 @@ class TestModelPoolAutoscaling:
         """Workers with *running* > 0 (but pending = 0) should NOT be idle."""
         pool, http_url, config = pool_env
 
-        await pool.scale_to.remote(3)
+        await pool.scale_to(3)
         await asyncio.sleep(0.5)
 
-        status = await pool.get_status.remote()
+        status = await pool.get_status()
         endpoints = status["endpoints"]
 
-        # pending = 0 but running > 0 → not idle
         for ep in endpoints:
             await _set_metrics(http_url, ep, pending=0, running=1)
 
-        ray.get(pool.start_autoscaler.remote(_make_autoscale_config()))
+        pool.start_autoscaler(_make_autoscale_config())
         await asyncio.sleep(5.0)
 
-        status = await pool.get_status.remote()
+        status = await pool.get_status()
         assert status["total_workers"] == 3, (
             "Should NOT scale down while workers have running requests"
         )
@@ -352,10 +353,9 @@ class TestModelPoolAutoscaling:
         """No scaling during cooldown period."""
         pool, http_url, _ = pool_env
 
-        # Very long cooldown — longer than the test sleeps
-        ray.get(pool.start_autoscaler.remote(_make_autoscale_config(cooldown_seconds=60.0)))
+        pool.start_autoscaler(_make_autoscale_config(cooldown_seconds=60.0))
 
-        status = await pool.get_status.remote()
+        status = await pool.get_status()
         endpoints = status["endpoints"]
 
         for ep in endpoints:
@@ -363,17 +363,17 @@ class TestModelPoolAutoscaling:
 
         await asyncio.sleep(3.0)
 
-        status = await pool.get_status.remote()
+        status = await pool.get_status()
         assert status["total_workers"] == 2
 
     async def test_frozen_autoscaler_does_not_scale(self, pool_env) -> None:
         """Frozen autoscaler makes no decisions regardless of load."""
         pool, http_url, _ = pool_env
 
-        ray.get(pool.start_autoscaler.remote(_make_autoscale_config()))
-        ray.get(pool.freeze_autoscaler.remote())
+        pool.start_autoscaler(_make_autoscale_config())
+        pool.freeze_autoscaler()
 
-        status = await pool.get_status.remote()
+        status = await pool.get_status()
         endpoints = status["endpoints"]
 
         for ep in endpoints:
@@ -381,7 +381,7 @@ class TestModelPoolAutoscaling:
 
         await asyncio.sleep(3.0)
 
-        status = await pool.get_status.remote()
+        status = await pool.get_status()
         assert status["total_workers"] == 2
 
     # -- status API --------------------------------------------------------
@@ -390,12 +390,12 @@ class TestModelPoolAutoscaling:
         """``get_status`` returns *total_running* alongside *total_pending*."""
         pool, http_url, _ = pool_env
 
-        status = await pool.get_status.remote()
+        status = await pool.get_status()
         endpoints = status["endpoints"]
 
         await _set_metrics(http_url, endpoints[0], pending=3, running=7)
         await _set_metrics(http_url, endpoints[1], pending=5, running=10)
 
-        status = await pool.get_status.remote()
+        status = await pool.get_status()
         assert status["total_pending"] == 8
         assert status["total_running"] == 17

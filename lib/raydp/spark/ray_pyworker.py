@@ -54,8 +54,8 @@ class PyWorker:
 
     def start(self):
         import time
-        # Most of the code is copied from PySpark's daemon.py
 
+        # Most of the code is copied from PySpark's daemon.py
         from pyspark.serializers import (
             UTF8Deserializer,
             write_int,
@@ -68,7 +68,7 @@ class PyWorker:
             try:
                 logger.info("Waiting for connection")
                 ready_fds = select.select([0, self.listen_sock], [], [], 1)[0]
-            except select.error as ex:
+            except OSError as ex:
                 logger.error(f"select error: {ex}")
                 if ex[0] == EINTR:
                     continue
@@ -98,10 +98,10 @@ class PyWorker:
                         outfile = os.fdopen(os.dup(sock.fileno()), "wb", buffer_size)
                         client_secret = UTF8Deserializer().loads(infile)
                         if os.environ["PYTHON_WORKER_FACTORY_SECRET"] == client_secret:
-                            write_with_length("ok".encode("utf-8"), outfile)
+                            write_with_length(b"ok", outfile)
                             outfile.flush()
                         else:
-                            write_with_length("err".encode("utf-8"), outfile)
+                            write_with_length(b"err", outfile)
                             outfile.flush()
                             sock.close()
                             return 1

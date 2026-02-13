@@ -15,16 +15,14 @@
 # limitations under the License.
 #
 
-import pyspark
-import pytest
 import os
 import shutil
 
+import pyspark
+import pytest
 import tensorflow as tf
 import tensorflow.keras as keras
-
 from pyspark.sql.functions import rand
-
 from raydp.tf import TFEstimator
 from raydp.utils import random_split
 

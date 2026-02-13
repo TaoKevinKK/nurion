@@ -26,9 +26,7 @@ import os
 from setuptools import setup
 
 # Load _build_hooks directly without triggering raydp/__init__.py
-_build_hooks_path = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "_build_hooks.py"
-)
+_build_hooks_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_build_hooks.py")
 spec = importlib.util.spec_from_file_location("_build_hooks", _build_hooks_path)
 _build_hooks = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(_build_hooks)
