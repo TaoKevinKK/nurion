@@ -84,9 +84,7 @@ class TestQueueFaultRecovery:
         validator = DataValidator()
 
         source_data = generate_test_data_with_checksum(NUM_RECORDS)
-        expected_count = validator.calculate_filter_expected_count(
-            NUM_RECORDS, FILTER_MODULO, FILTER_REMAINDER
-        )
+        validator.calculate_filter_expected_count(NUM_RECORDS, FILTER_MODULO, FILTER_REMAINDER)
 
         job = create_test_pipeline(
             num_records=NUM_RECORDS,

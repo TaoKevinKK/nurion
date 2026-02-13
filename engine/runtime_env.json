@@ -46,6 +46,7 @@
   "env_vars": {
     "RAY_DEDUP_LOGS": "0",
     "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+    "AWS_DEFAULT_REGION": "ap-southeast-2",
     "HF_HOME": "/fsx/huggingface_cache",
     "VLLM_CACHE_ROOT": "/fsx/huggingface_cache/vllm",
     "LD_LIBRARY_PATH": "/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.11/site-packages/nvidia/cusparselt/lib:/usr/local/lib/python3.11/site-packages/nvidia/nccl/lib:/usr/local/lib/python3.11/site-packages/nvidia/nvshmem/lib:/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_nvrtc/lib:/usr/local/lib/python3.11/site-packages/nvidia/nvjitlink/lib"

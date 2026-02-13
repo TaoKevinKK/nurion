@@ -278,8 +278,8 @@ jobs:
         cd engine
         # CI mode: use pre-built wheels via --find-links, skip editable sources
         uv sync --dev --python 3.12 --no-sources --find-links /tmp/wheels/
-        uv run --no-sync ruff check _internal/
-        uv run --no-sync ruff format --check _internal/
+        uv run --no-sync ruff check .
+        uv run --no-sync ruff format --check .
     
   # ============================================================================
   # Engine type checks

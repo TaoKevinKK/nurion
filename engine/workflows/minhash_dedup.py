@@ -330,9 +330,7 @@ async def run_dedup_pipeline(
         union_job = create_union_job(job_id, config, uf_manager)
         union_runner = union_job.create_ray_runner()
         try:
-            union_status = await union_runner.run(
-                timeout=config.get("union_timeout", 3600)
-            )
+            union_status = await union_runner.run(timeout=config.get("union_timeout", 3600))
             logger.info(f"Union job completed: {union_status}")
         finally:
             await union_runner.stop()
@@ -349,9 +347,7 @@ async def run_dedup_pipeline(
         filter_job = create_filter_job(job_id, config, cluster_table)
         filter_runner = filter_job.create_ray_runner()
         try:
-            filter_status = await filter_runner.run(
-                timeout=config.get("filter_timeout", 3600)
-            )
+            filter_status = await filter_runner.run(timeout=config.get("filter_timeout", 3600))
             logger.info(f"Filter job completed: {filter_status}")
         finally:
             await filter_runner.stop()

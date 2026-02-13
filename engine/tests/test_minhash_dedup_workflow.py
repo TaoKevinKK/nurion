@@ -251,14 +251,14 @@ class TestMinHashDedupWorkflowExecution:
     @pytest.mark.parametrize("num_shards", [1, 2, 3, 5])
     def test_multi_shard_execution(self, ray_cluster, num_shards):
         """Test workflow with different shard counts.
-        
+
         Validates that multi-shard mode produces identical results across
         all shard configurations (1, 2, 3, 5). All configurations should match
         the datasketch ground truth (100% recall, 0 failures).
-        
+
         Args:
             num_shards: Number of Union-Find service shards to test
-        
+
         Verification:
         1. Output matches expected count (9920 docs)
         2. All truth pairs detected (80/80, 100% recall)
@@ -316,9 +316,7 @@ class TestMinHashDedupWorkflowExecution:
                 "filter_parallelism": 1,
             }
 
-            result = asyncio.run(
-                run_dedup_pipeline("test_minhash_exec", config)
-            )
+            result = asyncio.run(run_dedup_pipeline("test_minhash_exec", config))
 
             # Verify pipeline completed (run_dedup_pipeline returns a result dict)
             assert "job_id" in result, f"Pipeline failed: {result}"
@@ -388,20 +386,20 @@ class TestMinHashDedupWorkflowExecution:
             total_pairs = metadata["num_truth_pairs"]
             recall = detected_pairs / total_pairs * 100 if total_pairs > 0 else 0
 
-            logger.info(
-                f"\nRecall: {recall:.1f}% ({detected_pairs}/{total_pairs} pairs detected)"
-            )
+            logger.info(f"\nRecall: {recall:.1f}% ({detected_pairs}/{total_pairs} pairs detected)")
 
             # Check if ground truth is set
             ground_truth_set = EXPECTED_RESULTS["output_count"] is not None
-            
+
             if GENERATE_MODE or not ground_truth_set:
                 # Ground truth generation mode: print results without enforcing
                 logger.warning(
                     "\n" + "=" * 60 + "\n"
                     "GROUND TRUTH GENERATION MODE\n"
                     "Copy these values to EXPECTED_RESULTS in test_minhash_dedup_workflow.py:\n"
-                    + "=" * 60 + "\n"
+                    + "="
+                    * 60
+                    + "\n"
                     "EXPECTED_RESULTS = {\n"
                     f'    "seed": {EXPECTED_RESULTS["seed"]},\n'
                     f'    "output_count": {result_count},\n'
@@ -410,8 +408,7 @@ class TestMinHashDedupWorkflowExecution:
                     f'    "wrong_kept": {wrong_kept},\n'
                     f'    "both_kept": {len(both_kept)},\n'
                     f'    "neither_kept": {neither_kept},\n'
-                    "}\n"
-                    + "=" * 60
+                    "}\n" + "=" * 60
                 )
                 if not ground_truth_set:
                     logger.warning(

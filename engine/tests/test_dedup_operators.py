@@ -225,11 +225,7 @@ class TestMinHashEncoderOperator:
                 doc2_hashes[bucket_id] = band_hash
 
         # Similar docs should share at least some band hashes
-        shared = sum(
-            1
-            for bid in doc1_hashes
-            if doc1_hashes[bid] == doc2_hashes.get(bid)
-        )
+        shared = sum(1 for bid in doc1_hashes if doc1_hashes[bid] == doc2_hashes.get(bid))
         assert shared > 0, "Similar docs should share at least one band hash"
 
         op.close()
@@ -395,7 +391,7 @@ class TestUFShard:
         # We test by checking the result counts
         pairs = []
         for i in range(20):
-            pairs.append((f"key_{i}", f"key_{i+100}"))
+            pairs.append((f"key_{i}", f"key_{i + 100}"))
 
         result = shard.batch_union(pairs)
         # Some should be local, some cross-shard
@@ -451,11 +447,13 @@ class TestUFShard:
         shard = UFShard(shard_id=0, num_shards=1)
         # First doc registers band_hash=100
         # Second doc with same band_hash=100 gets union'd with first
-        result = shard.batch_match_and_union([
-            (100, "doc_a"),
-            (100, "doc_b"),
-            (200, "doc_c"),
-        ])
+        result = shard.batch_match_and_union(
+            [
+                (100, "doc_a"),
+                (100, "doc_b"),
+                (200, "doc_c"),
+            ]
+        )
         assert result["new_hashes"] == 2  # 100 and 200
         assert result["matches"] == 1  # doc_a & doc_b matched on hash 100
 
@@ -500,14 +498,18 @@ class TestUFShard:
         # doc_a and doc_b share band 100
         # doc_b and doc_c share band 200
         # => all three should be in the same cluster
-        shard.batch_match_and_union([
-            (100, "doc_a"),
-            (200, "doc_b"),
-        ])
-        shard.batch_match_and_union([
-            (100, "doc_b"),  # matches doc_a on band 100
-            (200, "doc_c"),  # matches doc_b on band 200
-        ])
+        shard.batch_match_and_union(
+            [
+                (100, "doc_a"),
+                (200, "doc_b"),
+            ]
+        )
+        shard.batch_match_and_union(
+            [
+                (100, "doc_b"),  # matches doc_a on band 100
+                (200, "doc_c"),  # matches doc_b on band 200
+            ]
+        )
 
         roots = shard.batch_find(["doc_a", "doc_b", "doc_c"])
         assert roots[0] == roots[1] == roots[2]
@@ -533,11 +535,13 @@ class TestUFShard:
         shard = UFShard(shard_id=0, num_shards=1)
 
         # Build some state: UF + band_hash_index + cross_shard_edges
-        shard.batch_match_and_union([
-            (100, "doc_a"),
-            (100, "doc_b"),  # match
-            (200, "doc_c"),
-        ])
+        shard.batch_match_and_union(
+            [
+                (100, "doc_a"),
+                (100, "doc_b"),  # match
+                (200, "doc_c"),
+            ]
+        )
 
         # Checkpoint
         tables = shard.checkpoint()

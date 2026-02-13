@@ -300,7 +300,6 @@ class StageWorker:
         check_fault(FAULT_BEFORE_PROCESS)
         process_start = time.time()
         result = self._operator.process_split(split, merged_payload)
-        processing_ms = max(0.0, (time.time() - process_start) * 1000.0)
         check_fault(FAULT_AFTER_PROCESS)
 
         input_rows = merged_table.num_rows if merged_table is not None else 0
@@ -325,6 +324,9 @@ class StageWorker:
                         metadata={"source_stage": self.stage_id},
                     )
                     output_bytes_list.append(out_msg.to_bytes())
+
+        # For async operators, include await time in processing latency.
+        processing_ms = max(0.0, (time.time() - process_start) * 1000.0)
 
         # Build WebUI event
         event_puts = self._build_event_puts(

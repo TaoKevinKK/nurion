@@ -35,6 +35,7 @@ from _internal.serve.worker import InferenceWorker
 from _internal.utils.network import find_free_port
 
 logger = logging.getLogger(__name__)
+_SPAWN_WAIT_TIMEOUT_SECONDS = 120.0
 
 
 class ModelPool:
@@ -61,6 +62,7 @@ class ModelPool:
         self._detached = detached
         self._workers: dict[str, ray.actor.ActorHandle] = {}
         self._worker_ports: dict[str, int] = {}
+        self._spawning_workers = 0
         self._shutdown_event = asyncio.Event()
         self._last_scale_time = 0.0
         self._registry_url: Optional[str] = None
@@ -85,14 +87,34 @@ class ModelPool:
             actor_options["lifetime"] = "detached"
             actor_options["namespace"] = SERVE_NAMESPACE
 
-        worker = (
-            ray.remote(InferenceWorker)
-            .options(**actor_options)
-            .remote(self._config, registry=self._registry, port=port, worker_id=worker_id)
-        )
+        worker: Optional[ray.actor.ActorHandle] = None
+        self._spawning_workers += 1
+        try:
+            worker = (
+                ray.remote(InferenceWorker)
+                .options(**actor_options)
+                .remote(self._config, registry=self._registry, port=port, worker_id=worker_id)
+            )
+            # Bound actor-creation wait so unschedulable resources fail fast.
+            await asyncio.wait_for(
+                worker.start.remote(),
+                timeout=_SPAWN_WAIT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError as exc:
+            if worker is not None:
+                try:
+                    ray.kill(worker)
+                except Exception:
+                    pass
+            raise RuntimeError(
+                f"Timed out spawning worker {worker_id} after "
+                f"{_SPAWN_WAIT_TIMEOUT_SECONDS:.0f}s. "
+                "Likely unschedulable resources or cluster capacity exhaustion."
+            ) from exc
+        finally:
+            self._spawning_workers = max(0, self._spawning_workers - 1)
 
-        await worker.start.remote()
-
+        assert worker is not None
         self._workers[worker_id] = worker
         self._worker_ports[worker_id] = port
 
@@ -132,6 +154,7 @@ class ModelPool:
             "started_at": time.time(),
             "spawned": [],
             "stopped": [],
+            "spawn_errors": [],
         }
 
         if target > current:
@@ -140,6 +163,10 @@ class ModelPool:
             for item in spawned:
                 if isinstance(item, tuple):
                     result["spawned"].append(item[0])
+                elif isinstance(item, Exception):
+                    msg = str(item)
+                    result["spawn_errors"].append(msg)
+                    logger.warning(f"Failed to spawn worker for {self._config.model_id}: {msg}")
 
         elif target < current:
             # Stop workers (pick any, could be smarter with metrics)
@@ -151,6 +178,7 @@ class ModelPool:
         result["completed_at"] = time.time()
         result["duration_s"] = result["completed_at"] - result["started_at"]
         result["current_workers"] = len(self._workers)
+        result["spawning_workers"] = self._spawning_workers
         self._last_scale_time = time.time()
 
         logger.info(
@@ -211,6 +239,7 @@ class ModelPool:
         return {
             "model_id": self._config.model_id,
             "total_workers": len(self._workers),
+            "spawning_workers": self._spawning_workers,
             "ready_workers": ready_count,
             "total_pending": total_pending,
             "total_running": total_running,

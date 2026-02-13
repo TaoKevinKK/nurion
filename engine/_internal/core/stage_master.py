@@ -433,11 +433,24 @@ class StageMaster:
     def get_output_queue_name(self) -> str:
         return self._output_queue_name
 
+    def get_backpressure_input_queue_name(self) -> Optional[str]:
+        """Get the queue used as input lag signal for backpressure."""
+        if self._source_manager and not self._source_manager.is_direct_producer:
+            return self._source_manager.planner_queue_name
+        return self.runtime.upstream_queue_name
+
+    def get_backpressure_output_queue_name(self) -> str:
+        """Get the queue used as output lag signal for backpressure."""
+        if self._sink_manager:
+            return self._sink_manager.commit_queue_name
+        return self._output_queue_name
+
     def get_status(self) -> StageStatus:
         output_size = 0
         if self._queue_client:
             try:
-                stats = self._queue_client.get_stats(self._output_queue_name)
+                output_queue_name = self.get_backpressure_output_queue_name()
+                stats = self._queue_client.get_stats(output_queue_name)
                 output_size = stats.get("pending_count", 0)
             except Exception:
                 pass

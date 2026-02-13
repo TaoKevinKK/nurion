@@ -153,9 +153,7 @@ def _make_autoscale_config(**overrides: Any) -> AutoscaleConfig:
     return AutoscaleConfig(**defaults)
 
 
-async def _set_metrics(
-    http_url: str, endpoint: str, pending: int, running: int
-) -> None:
+async def _set_metrics(http_url: str, endpoint: str, pending: int, running: int) -> None:
     """Update a worker's metrics in the registry via HTTP heartbeat."""
     async with httpx.AsyncClient(timeout=5.0) as client:
         await client.post(
@@ -355,11 +353,7 @@ class TestModelPoolAutoscaling:
         pool, http_url, _ = pool_env
 
         # Very long cooldown — longer than the test sleeps
-        ray.get(
-            pool.start_autoscaler.remote(
-                _make_autoscale_config(cooldown_seconds=60.0)
-            )
-        )
+        ray.get(pool.start_autoscaler.remote(_make_autoscale_config(cooldown_seconds=60.0)))
 
         status = await pool.get_status.remote()
         endpoints = status["endpoints"]

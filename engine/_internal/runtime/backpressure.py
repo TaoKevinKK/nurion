@@ -48,6 +48,11 @@ class JobBackpressureController:
 
     def should_pause(self, stage_id: str) -> bool:
         """Check downstream queues to decide if an upstream should pause."""
+        # Also pause when the stage itself is already lagging
+        # (e.g., source planner queue grows too large).
+        if self.is_backpressure_active(stage_id):
+            return True
+
         for downstream_id in self._downstream_stages(stage_id):
             if self.is_backpressure_active(downstream_id):
                 return True

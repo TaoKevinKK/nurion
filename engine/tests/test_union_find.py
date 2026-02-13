@@ -14,9 +14,6 @@
 
 """Tests for Union-Find data structure."""
 
-import pyarrow as pa
-import pytest
-
 from _internal.utils.union_find import UnionFind
 
 
@@ -101,7 +98,7 @@ class TestUnionFindBasic:
         uf = UnionFind()
         # Chain 1000 elements
         for i in range(999):
-            uf.union(f"doc_{i}", f"doc_{i+1}")
+            uf.union(f"doc_{i}", f"doc_{i + 1}")
         assert len(uf) == 1000
         assert uf.num_components == 1
         # All should have same root
@@ -149,7 +146,7 @@ class TestUnionFindSerialization:
     def test_roundtrip_preserves_structure(self):
         uf = UnionFind()
         for i in range(100):
-            uf.union(f"doc_{i}", f"doc_{i+1}")
+            uf.union(f"doc_{i}", f"doc_{i + 1}")
 
         table = uf.to_arrow()
         uf2 = UnionFind.from_arrow(table)

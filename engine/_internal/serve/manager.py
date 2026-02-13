@@ -308,33 +308,40 @@ class ModelServiceManager:
     async def shutdown(self) -> None:
         """Shutdown the manager and all deployed models.
 
-        Kills ALL actors in the nurion_serve namespace (including orphans
-        from previous deployments), not just what the registry tracks.
+        1. Gracefully undeploys known pools.
+        2. Kills the registry actor (works in both attached and detached mode).
+        3. In detached mode, sweeps nurion_serve namespace for orphan actors
+           from previous failed deployments.
         """
         logger.info("Shutting down ModelServiceManager")
 
-        # First, graceful shutdown of known pools
         for model_id in list(self._pools.keys()):
             try:
                 await self.undeploy_model(model_id)
             except Exception as e:
                 logger.warning(f"Error undeploying {model_id}: {e}")
 
-        # Then, kill ALL remaining actors in the serve namespace
-        # (catches orphans from previous failed deployments)
-        killed = 0
-        for actor_info in ray.util.list_named_actors(all_namespaces=True):
-            if actor_info.get("namespace") != SERVE_NAMESPACE:
-                continue
-            try:
-                handle = ray.get_actor(actor_info["name"], namespace=SERVE_NAMESPACE)
-                ray.kill(handle)
-                killed += 1
-            except Exception:
-                pass
+        # Kill registry explicitly; in attached mode it is not in SERVE_NAMESPACE.
+        try:
+            ray.kill(self._registry)
+            logger.info("ModelRegistry actor killed")
+        except Exception as e:
+            logger.warning(f"Error killing registry: {e}")
 
-        if killed:
-            logger.info(f"Killed {killed} remaining actor(s) in {SERVE_NAMESPACE}")
+        if self._detached:
+            killed = 0
+            for actor_info in ray.util.list_named_actors(all_namespaces=True):
+                if actor_info.get("namespace") != SERVE_NAMESPACE:
+                    continue
+                try:
+                    handle = ray.get_actor(actor_info["name"], namespace=SERVE_NAMESPACE)
+                    ray.kill(handle)
+                    killed += 1
+                except Exception:
+                    pass
+
+            if killed:
+                logger.info(f"Killed {killed} orphan actor(s) in {SERVE_NAMESPACE}")
 
         logger.info("ModelServiceManager shutdown complete")
 

@@ -277,7 +277,7 @@ class TestWorkQueueAckAndForward:
         client.create_queue(downstream)
 
         # Push to upstream
-        msg_id = client.push(upstream, b"input data")
+        client.push(upstream, b"input data")
 
         # Claim from upstream
         records = client.claim(upstream, batch_size=1, timeout_ms=1000)
