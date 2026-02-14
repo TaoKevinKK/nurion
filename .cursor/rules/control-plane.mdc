@@ -1,0 +1,25 @@
+---
+description: Control plane development patterns
+globs:
+  - control/**
+---
+
+# Control Plane Patterns
+
+## Architecture
+FastAPI + SQLAlchemy + AsyncPG + Alembic
+
+## Adding Features
+- Routes: `control/api/routes/`
+- Schemas: `control/schemas/` (Pydantic)
+- Logic: `control/services/`
+- Models: `control/models/` (SQLAlchemy)
+- Migrations: `alembic revision --autogenerate -m "description"`
+
+## Commands
+```bash
+cd control
+uv run uvicorn control.app:create_app --factory --reload
+uv run pytest tests/ -v --cov=control
+uv run ruff check .
+```

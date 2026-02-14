@@ -1,0 +1,28 @@
+---
+description: WorkQueue development constraints
+globs:
+  - lib/workqueue-rs/**
+  - engine/_internal/queue/**
+---
+
+# WorkQueue Rules
+
+## Critical: O(1) I/O on Hot Paths
+All hot-path operations (claim, ack, push, stats) MUST be O(1).
+Scans are only acceptable for background tasks (GC, recovery).
+
+## Key Schema
+```
+meta:{queue}                     -> QueueMeta (claim_seq, push_seq, counters)
+pending:{queue}:{seq}            -> msg_id
+msg:{queue}:{msg_id}             -> Message JSON
+claimed:{queue}:{msg_id}         -> ClaimInfo JSON
+acked:{queue}:{ts}:{msg_id}      -> ""
+state:{namespace}:{key}          -> value bytes
+```
+
+## Guidelines
+- Use direct key access, never scan in hot paths
+- Maintain counters instead of counting via scan
+- Batch operations with WriteBatch for atomicity
+- See `lib/workqueue-rs/AGENTS.md` for full constraints

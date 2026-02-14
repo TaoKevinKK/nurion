@@ -39,7 +39,7 @@ class ModelConfig:
     Attributes:
         model_id: Unique identifier for the model (e.g., "decision", "generation")
         model_source: Model path or HuggingFace ID (e.g., "Qwen/Qwen2.5-7B-Instruct")
-        backend: Inference backend ("vllm" or "sglang")
+        backend: Inference backend ("vllm", "sglang", or "fake" for testing)
         tensor_parallel_size: Number of GPUs per worker for tensor parallelism
 
         min_workers: Minimum number of workers to maintain
@@ -82,8 +82,9 @@ class ModelConfig:
     model_id: str
     model_source: str
 
-    # Backend selection
-    backend: Literal["vllm", "sglang"] = "vllm"
+    # Backend selection ("fake" starts a lightweight test server, no GPU needed)
+    backend: Literal["vllm", "sglang", "fake"] = "vllm"
+    fake_server_module: str = "_internal.serve.fake_server"
     tensor_parallel_size: int = 1
 
     # Scaling configuration

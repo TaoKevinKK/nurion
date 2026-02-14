@@ -1,0 +1,33 @@
+---
+description: Operator development patterns for Nurion Engine
+globs:
+  - engine/_internal/operators/**
+  - engine/_internal/core/operator.py
+  - engine/_internal/core/stage_worker.py
+---
+
+# Operator Development Patterns
+
+## Core Rules
+- Operators are config-driven, stateless containers
+- `Operator.__init__` only takes `OperatorConfig` + `OperatorRuntime`
+- Runtime context (job_id, stage_id, worker_id) lives in `OperatorRuntime`
+- No `set_*()` methods for injecting dependencies — everything comes from config
+- Stateful operators create their own state store lazily from config values
+
+## Adding a New Operator
+1. Create `@dataclass` config class inheriting `OperatorConfig`
+2. Create operator class inheriting `Operator`
+3. Implement `process_split(split, payload) -> Optional[SplitPayload]`
+4. Set `MyConfig.operator_class = MyOperator`
+5. Export in `nurion/__init__.py`
+
+## Adding a New Source
+1. Inherit `SourceOperator`
+2. Implement `plan_splits() -> list[Split]`
+3. Export in `nurion/__init__.py`
+
+## Anti-Patterns
+- No `_total_xxx_count` or stats counters as instance state
+- Minimize `self._` — only store long-lived state
+- No uncertain fallback chains (try A, if not B, if not C)

@@ -39,7 +39,7 @@ If the file does not exist, warn the user and stop.
 Use the following command pattern:
 
 ```bash
-cd solstice && ray job submit \
+cd engine && ray job submit \
     --address http://localhost:8265 \
     --runtime-env-json "$(cat runtime_env.json)" \
     --working-dir . \
@@ -47,7 +47,7 @@ cd solstice && ray job submit \
 ```
 
 Key points:
-- Always `cd solstice` first since `runtime_env.json` uses `"working_dir": "."` relative to the runtime dir
+- Always `cd engine` first since `runtime_env.json` uses `"working_dir": "."` relative to the runtime dir
 - The `--working-dir .` flag uploads the current directory (engine/) to the cluster
 - The `--runtime-env-json` flag passes dependencies and excludes
 - The script path is relative to the engine/ directory (e.g., `workflows/run_image_captioning.py`)
@@ -100,6 +100,6 @@ If submission fails:
 ## Important Notes
 
 - Never modify `runtime_env.json` without asking the user
-- The `--working-dir .` causes Ray to upload the solstice directory; large files should be in the `excludes` list
+- The `--working-dir .` causes Ray to upload the engine directory; large files should be in the `excludes` list
 - For Kubernetes deployments, ensure port-forward is active before submission
 - Background the job submission with `block_until_ms: 0` if it's expected to run for a long time

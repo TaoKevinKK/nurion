@@ -194,10 +194,16 @@ class InferenceWorker:
 
         if self._config.backend == "vllm":
             cmd = self._build_vllm_command()
-        else:
+        elif self._config.backend == "sglang":
             cmd = self._build_sglang_command()
+        else:
+            cmd = self._build_fake_command()
 
-        env = self._build_subprocess_env()
+        # Skip NVIDIA env setup for fake backend (no GPU needed)
+        if self._config.backend == "fake":
+            env = os.environ.copy()
+        else:
+            env = self._build_subprocess_env()
 
         logger.info(f"Starting inference server: {' '.join(cmd)}")
 
@@ -303,6 +309,21 @@ class InferenceWorker:
             cmd.extend(["--quantization", config.quantization])
 
         return cmd
+
+    def _build_fake_command(self) -> list[str]:
+        """Build fake server command for testing."""
+        config = self._config
+        return [
+            sys.executable,
+            "-m",
+            config.fake_server_module,
+            "--port",
+            str(self._port),
+            "--model-id",
+            config.model_id,
+            "--tp-size",
+            str(config.tensor_parallel_size),
+        ]
 
     async def _wait_for_ready(self) -> None:
         """Wait for the server to be ready by polling the health endpoint."""
@@ -478,6 +499,17 @@ class InferenceWorker:
                 return False
             await asyncio.sleep(1.0)
         return True
+
+    async def set_test_metrics(self, pending: int, running: int) -> None:
+        """Inject metrics into the fake server subprocess (fake backend only).
+
+        The next heartbeat cycle will pick up the updated values from /metrics.
+        """
+        client = self._get_http_client()
+        await client.post(
+            f"{self._endpoint}/internal/set_metrics",
+            json={"pending": pending, "running": running},
+        )
 
     async def shutdown(self) -> None:
         """Gracefully shutdown the worker."""

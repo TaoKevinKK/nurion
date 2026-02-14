@@ -1,0 +1,39 @@
+---
+description: Test conventions and fixtures for Nurion Engine tests
+globs:
+  - engine/tests/**
+---
+
+# Test Conventions
+
+## File Naming
+- Unit tests: `tests/<subdir>/test_<module>.py`
+- Integration tests: `tests/<subdir>/test_integration_<scope>.py`
+- Workflow tests: `tests/test_<name>_workflow.py`
+- Stability/chaos tests: `tests/test_stability_<scenario>.py`
+
+## Markers
+Use module-level `pytestmark = pytest.mark.<marker>` to tag entire files.
+
+| Marker | Meaning |
+|--------|---------|
+| `integration` | Requires external services (excluded by default) |
+| `distributed` | Multi-worker Ray pipelines |
+| `workflow` | End-to-end pipeline tests |
+| `slow` | Takes >30s |
+| `chaos` | Random failure injection (not in CI) |
+| `benchmark` | Performance benchmarks (excluded by default) |
+
+## Fixtures (conftest.py)
+- `ray_cluster` — function-scoped Ray local cluster, no GPUs
+- `ray_cluster_with_gpus` — function-scoped, 16 fake GPUs (for serve tests)
+
+## Commands
+```bash
+cd engine
+uv run pytest tests/ -v --tb=short -m "not integration"   # unit
+uv run pytest tests/ -v --tb=short -m "integration"        # integration
+```
+
+## WorkQueue in Tests
+Use `workqueue_db_path="memory://"` for in-memory queue (no persistence).

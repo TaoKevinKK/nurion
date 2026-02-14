@@ -571,6 +571,50 @@ def ray_cluster():
     time.sleep(3.0)
 
 
+@pytest.fixture(scope="function")
+def ray_cluster_with_gpus():
+    """Initialize Ray cluster with fake GPUs for serve integration tests.
+
+    Function-scoped to ensure complete isolation between tests.
+    Each test gets a fresh Ray cluster to avoid resource conflicts.
+
+    - num_cpus=8
+    - num_gpus=16  (logical GPUs, no real hardware required)
+    - Excludes large files from runtime environment
+    """
+    # Shutdown any existing cluster first
+    if ray.is_initialized():
+        ray.shutdown()
+        time.sleep(1.0)
+
+    ray.init(
+        num_cpus=8,
+        num_gpus=16,
+        runtime_env={"excludes": RAY_RUNTIME_EXCLUDES},
+        ignore_reinit_error=True,
+    )
+
+    yield
+
+    # Kill all actors before shutdown
+    try:
+        for actor_info in ray.state.actors().values():
+            if actor_info.get("State") == "ALIVE":
+                try:
+                    actor = ray.get_actor(actor_info.get("Name", ""))
+                    ray.kill(actor)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    ray.shutdown()
+
+    # Wait for Ray to fully shutdown before next test
+    # Background threads may still be active
+    time.sleep(3.0)
+
+
 @pytest_asyncio.fixture
 async def payload_store(ray_cluster, request):
     """Create a unique RaySplitPayloadStore for each test to avoid name collisions."""

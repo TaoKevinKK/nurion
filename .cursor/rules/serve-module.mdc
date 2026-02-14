@@ -1,0 +1,25 @@
+---
+description: Model serving module patterns
+globs:
+  - engine/_internal/serve/**
+  - engine/tests/serve/**
+---
+
+# Serve Module (Model Serving)
+
+## Architecture
+- **ModelServiceManager**: Control plane Ray actor, deploys/manages models
+- **ModelPool**: Manages worker pool for a single model (scale up/down)
+- **GPUAllocator**: GPU bin-packing for anti-fragmentation scheduling
+- **InferenceWorker**: Ray actor running vLLM/SGLang server
+- **ModelClient**: Client-side load balancing
+- **ModelRegistry**: Service discovery via Ray Named Actors
+
+## Key Config
+- `ModelConfig`: model_id, model_source, tensor_parallel_size, min/max_workers, worker_resources
+- `AutoscaleConfig`: enabled, scale_up/down_threshold, cooldown
+
+## Testing
+- Use `ray_cluster_with_gpus` fixture (16 fake GPUs)
+- Monkeypatch `InferenceWorker` with fakes for unit tests
+- Mark integration tests with `@pytest.mark.integration`

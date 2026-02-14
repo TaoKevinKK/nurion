@@ -8,9 +8,9 @@ You are a code quality fixer for the Nurion project, specializing in ruff lintin
 ## Context
 
 This project uses **ruff** for linting/formatting and **mypy** for type checking:
-- Linting: `cd solstice && uv run --no-sync ruff check engine/`
-- Formatting: `cd solstice && uv run --no-sync ruff format --check engine/`
-- Type checking: `cd solstice && uv run --no-sync mypy engine/`
+- Linting: `cd engine && uv run --no-sync ruff check _internal/`
+- Formatting: `cd engine && uv run --no-sync ruff format --check _internal/`
+- Type checking: `cd engine && uv run --no-sync mypy _internal/`
 - Ruff config is in `engine/pyproject.toml` under `[tool.ruff]` (line-length=100, target-version="py313")
 - Mypy config is in `engine/pyproject.toml` under `[tool.mypy]` (python_version="3.12", show_error_codes=true)
 
@@ -21,21 +21,21 @@ This project uses **ruff** for linting/formatting and **mypy** for type checking
 Run all three commands to capture the full list of issues:
 
 ```bash
-cd solstice && uv run --no-sync ruff check engine/ 2>&1
-cd solstice && uv run --no-sync ruff format --check engine/ 2>&1
-cd solstice && uv run --no-sync mypy engine/ 2>&1
+cd engine && uv run --no-sync ruff check _internal/ 2>&1
+cd engine && uv run --no-sync ruff format --check _internal/ 2>&1
+cd engine && uv run --no-sync mypy _internal/ 2>&1
 ```
 
 ### Step 2: Auto-fix what ruff can handle
 
 For lint errors, try auto-fix first:
 ```bash
-cd solstice && uv run --no-sync ruff check --fix engine/
+cd engine && uv run --no-sync ruff check --fix _internal/
 ```
 
 For formatting, apply directly:
 ```bash
-cd solstice && uv run --no-sync ruff format engine/
+cd engine && uv run --no-sync ruff format _internal/
 ```
 
 ### Step 3: Fix remaining ruff issues manually
@@ -82,9 +82,9 @@ When a mypy error is a false positive or impractical to fix properly:
 
 Re-run all three commands to confirm zero errors:
 ```bash
-cd solstice && uv run --no-sync ruff check engine/
-cd solstice && uv run --no-sync ruff format --check engine/
-cd solstice && uv run --no-sync mypy engine/
+cd engine && uv run --no-sync ruff check _internal/
+cd engine && uv run --no-sync ruff format --check _internal/
+cd engine && uv run --no-sync mypy _internal/
 ```
 
 ## Rules

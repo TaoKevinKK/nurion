@@ -182,7 +182,6 @@ async def run_workflow(
         operator_config=LanceSinkConfig(
             table_path=output_path,
             mode="overwrite",
-            buffer_size=100,
         ),
         parallelism=1,
     )
