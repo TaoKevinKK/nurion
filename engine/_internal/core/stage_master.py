@@ -43,7 +43,7 @@ from _internal.core.split_payload_store import SplitPayloadStore
 from _internal.core.stage_worker import StageWorker
 from _internal.queue import WorkQueueQueueClient
 from _internal.utils.logging import create_ray_logger
-from _internal.webui.state.schema import encode_json, job_namespace, stage_key
+from _internal.webui.state.schema import encode_json, job_namespace, stage_key, worker_key
 
 if TYPE_CHECKING:
     from _internal.core.stage import Stage, StageRuntime
@@ -244,6 +244,7 @@ class StageMaster:
                 raise RuntimeError(
                     f"Stage {self.stage_id}: Failed to spawn minimum required workers"
                 )
+            self._write_worker_state(worker_id, "RUNNING")
 
         self._write_stage_state(status="RUNNING")
 
@@ -290,6 +291,11 @@ class StageMaster:
 
                 completed, failed = await self._worker_manager.wait_for_completion(timeout=1.0)
                 self._worker_manager.cleanup_workers(completed + failed)
+
+                for wid in completed:
+                    self._write_worker_state(wid, "COMPLETED")
+                for wid in failed:
+                    self._write_worker_state(wid, "FAILED")
 
                 if failed:
                     self._recovery_manager.record_failures(
@@ -359,6 +365,29 @@ class StageMaster:
             return provider.should_pause(self.stage_id)
         except Exception:
             return False
+
+    def _write_worker_state(self, worker_id: str, status: str, **extra: Any) -> None:
+        """Write worker lifecycle metadata into WorkQueue state."""
+        if not self._queue_client:
+            return
+        data: Dict[str, Any] = {
+            "worker_id": worker_id,
+            "stage_id": self.stage_id,
+            "status": status,
+            "timestamp": time.time(),
+        }
+        if status == "RUNNING":
+            data["start_time"] = time.time()
+        if status in ("COMPLETED", "FAILED", "STOPPED"):
+            data["end_time"] = time.time()
+        data.update(extra)
+        try:
+            self._queue_client.state_put(
+                job_namespace(self.job_id),
+                puts={worker_key(self.stage_id, worker_id): encode_json(data)},
+            )
+        except Exception as e:
+            self.logger.debug(f"Failed to write worker state: {e}")
 
     def _write_stage_state(self, status: str) -> None:
         """Write stage status into WorkQueue state."""
@@ -480,6 +509,7 @@ class StageMaster:
         removed = 0
         for worker_id in worker_ids:
             if await self._worker_manager.stop_worker(worker_id):
+                self._write_worker_state(worker_id, "STOPPED")
                 removed += 1
         self.logger.info(
             f"Scaled down {self.stage_id}: removed {removed}/{count} workers "
@@ -500,6 +530,7 @@ class StageMaster:
             try:
                 worker_id = await self._worker_manager.spawn_worker(is_min_worker=False)
                 if worker_id:
+                    self._write_worker_state(worker_id, "RUNNING")
                     added += 1
             except Exception as e:
                 self.logger.warning(f"Failed to spawn worker: {e}")

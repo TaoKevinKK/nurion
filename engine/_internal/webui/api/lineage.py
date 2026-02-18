@@ -12,79 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Lineage API - split lineage and data flow.
+"""Lineage API - split lineage and trace.
 
-4 core endpoints:
-- GET /jobs/{job_id}/lineage/overview - stage-level aggregated stats
-- GET /jobs/{job_id}/lineage/stages/{stage_id}/splits - paginated splits list
-- GET /jobs/{job_id}/lineage/splits/{split_id} - single split details
-- GET /jobs/{job_id}/lineage/splits/{split_id}/trace - complete trace
+v2: 2 endpoints. Overview and stage splits endpoints removed
+    (see webui-api-v2.md for rationale).
 """
 
-from typing import Any, Dict, List
+from typing import Any, Dict
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Request
 
 router = APIRouter(tags=["lineage"])
-
-
-@router.get("/jobs/{job_id}/lineage/overview")
-async def get_lineage_overview(job_id: str, request: Request) -> Dict[str, Any]:
-    """Get stage-level lineage overview with aggregated statistics.
-
-    Returns:
-        - stages: list of {stage_id, splits_count, total_output_rows, total_output_bytes}
-        - edges: list of {from_stage, to_stage, splits_count, total_rows, total_bytes,
-                         min/max rows, min/max bytes, min/max/avg processing_ms}
-        - dag_edges: original DAG structure
-    """
-    if request.app.state.storage:
-        result: Dict[str, Any] = request.app.state.storage.get_lineage_overview(job_id)
-        return result
-
-    return {"stages": [], "edges": [], "dag_edges": {}}
-
-
-@router.get("/jobs/{job_id}/lineage/stages/{stage_id}/splits")
-async def list_stage_splits(
-    job_id: str,
-    stage_id: str,
-    request: Request,
-    limit: int = Query(100, ge=10, le=1000),
-    offset: int = Query(0, ge=0),
-) -> List[Dict[str, Any]]:
-    """List splits for a stage with pagination.
-
-    Returns:
-        List of split lineage records (sorted by timestamp, newest first)
-    """
-    if request.app.state.storage:
-        result: List[Dict[str, Any]] = request.app.state.storage.list_splits_by_stage(
-            job_id, stage_id, limit, offset
-        )
-        return result
-
-    return []
-
-
-@router.get("/jobs/{job_id}/lineage/splits/{split_id}/trace")
-async def get_split_trace(
-    job_id: str,
-    split_id: str,
-    request: Request,
-) -> Dict[str, Any]:
-    """Get complete lineage trace for a split (both upstream and downstream).
-
-    Returns:
-        - splits: list of split details ordered by stage
-        - edges: list of {source, target} relationships
-        - root_split_id: the starting split
-    """
-    if request.app.state.storage:
-        result: Dict[str, Any] = request.app.state.storage.get_split_trace(job_id, split_id)
-        return result
-
-    return {"splits": [], "edges": [], "root_split_id": split_id}
 
 
 @router.get("/jobs/{job_id}/lineage/splits/{split_id}")
@@ -93,11 +31,7 @@ async def get_split_lineage(
     split_id: str,
     request: Request,
 ) -> Dict[str, Any]:
-    """Get single split's lineage details.
-
-    Returns:
-        Full lineage record including timing, sizes, parent IDs, etc.
-    """
+    """Get single split's lineage details (O(1) lookup)."""
     if request.app.state.storage:
         lineage: Dict[str, Any] | None = request.app.state.storage.get_split_lineage(
             job_id, split_id
@@ -106,3 +40,17 @@ async def get_split_lineage(
             return lineage
 
     raise HTTPException(status_code=404, detail=f"Split {split_id} not found")
+
+
+@router.get("/jobs/{job_id}/lineage/splits/{split_id}/trace")
+async def get_split_trace(
+    job_id: str,
+    split_id: str,
+    request: Request,
+) -> Dict[str, Any]:
+    """Get complete lineage trace for a split (O(depth) walk)."""
+    if request.app.state.storage:
+        result: Dict[str, Any] = request.app.state.storage.get_split_trace(job_id, split_id)
+        return result
+
+    return {"splits": [], "edges": [], "root_split_id": split_id}

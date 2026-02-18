@@ -66,6 +66,26 @@ def parse_event_key(key: str) -> Optional[Tuple[str, int, str]]:
     return stage_id, ts_ns, msg_id
 
 
+def worker_key(stage_id: str, worker_id: str) -> str:
+    return f"worker:{stage_id}:{worker_id}"
+
+
+def serve_namespace() -> str:
+    return "serve"
+
+
+def serve_model_key(model_id: str) -> str:
+    return f"model:{model_id}"
+
+
+def serve_worker_key(model_id: str, worker_id: str) -> str:
+    return f"worker:{model_id}:{worker_id}"
+
+
+def serve_event_key(model_id: str, ts_ns: int, worker_id: str) -> str:
+    return f"event:{model_id}:{ts_ns}:{worker_id}"
+
+
 def encode_json(data: Dict[str, Any]) -> bytes:
     return json.dumps(data, separators=(",", ":"), sort_keys=False).encode("utf-8")
 

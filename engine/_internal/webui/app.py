@@ -187,12 +187,18 @@ def create_webui_app(
         import time as time_module
 
         now = time_module.time()
-        worker_data = storage.get_worker_history(job_id, worker_id) or {
-            "worker_id": worker_id,
-            "stage_id": "",
-            "status": "UNKNOWN",
-        }
-        worker_events = storage.list_worker_events(job_id, worker_id=worker_id, limit=50)
+        # Read from persistent worker metadata
+        workers = storage.list_workers(job_id, worker_id=worker_id, limit=1)
+        worker_data = (
+            workers[0]
+            if workers
+            else {
+                "worker_id": worker_id,
+                "stage_id": "",
+                "status": "UNKNOWN",
+            }
+        )
+        worker_events = storage.list_events(job_id, worker_id=worker_id, limit=50)
 
         # Live debugging: query Ray actor info
         try:
@@ -266,13 +272,15 @@ def create_webui_app(
     from _internal.webui.api.stages import router as stages_router
     from _internal.webui.api.workers import router as workers_router
     from _internal.webui.api.lineage import router as lineage_router
-    from _internal.webui.api.exceptions import router as exceptions_router
+    from _internal.webui.api.events import router as events_router
+    from _internal.webui.api.serve import router as serve_router
 
     app.include_router(jobs_router, prefix="/api")
     app.include_router(stages_router, prefix="/api")
     app.include_router(workers_router, prefix="/api")
     app.include_router(lineage_router, prefix="/api")
-    app.include_router(exceptions_router, prefix="/api")
+    app.include_router(events_router, prefix="/api")
+    app.include_router(serve_router, prefix="/api")
 
     @app.get("/health")
     async def health():

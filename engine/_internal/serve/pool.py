@@ -36,8 +36,10 @@ from _internal.serve.config import AutoscaleConfig, ModelConfig
 from _internal.serve.registry import SERVE_NAMESPACE
 from _internal.serve.worker import InferenceWorker
 from _internal.utils.network import find_free_port
+from _internal.webui.state.schema import encode_json, serve_namespace, serve_worker_key
 
 if TYPE_CHECKING:
+    from _internal.queue import WorkQueueQueueClient
     from _internal.serve.allocator import GPUAllocator
 
 logger = logging.getLogger(__name__)
@@ -57,11 +59,13 @@ class ModelPool:
         registry: ray.actor.ActorHandle,
         detached: bool = False,
         allocator: Optional[GPUAllocator] = None,
+        state_writer: Optional["WorkQueueQueueClient"] = None,
     ) -> None:
         self._config = config
         self._registry = registry
         self._detached = detached
         self._allocator = allocator
+        self._state_writer = state_writer
         self._workers: dict[str, ray.actor.ActorHandle] = {}
         self._worker_ports: dict[str, int] = {}
         self._worker_nodes: dict[str, str] = {}  # worker_id -> node_id
@@ -77,6 +81,28 @@ class ModelPool:
         self._last_idle_time = 0.0
 
         logger.info(f"ModelPool created for model {config.model_id} (detached={detached})")
+
+    # --- State persistence ---
+
+    def _write_serve_worker_state(self, worker_id: str, status: str) -> None:
+        """Write serve worker lifecycle metadata into WorkQueue state."""
+        if self._state_writer is None:
+            return
+        data = {
+            "worker_id": worker_id,
+            "model_id": self._config.model_id,
+            "status": status,
+            "timestamp": time.time(),
+            "backend": self._config.backend,
+            "tp_size": self._config.tensor_parallel_size,
+        }
+        try:
+            self._state_writer.state_put(
+                serve_namespace(),
+                puts={serve_worker_key(self._config.model_id, worker_id): encode_json(data)},
+            )
+        except Exception as e:
+            logger.debug(f"Failed to write serve worker state: {e}")
 
     # --- Worker lifecycle ---
 
@@ -139,6 +165,7 @@ class ModelPool:
             gpus = resources.get("num_gpus", 0)
             self._allocator.record_placement(worker_id, actual_node, float(gpus))
 
+        self._write_serve_worker_state(worker_id, "LOADING")
         logger.info(
             f"Spawned worker {worker_id} for {self._config.model_id} "
             f"(port={port}, node={actual_node}, resources={resources})"
@@ -165,6 +192,7 @@ class ModelPool:
         if self._allocator is not None:
             self._allocator.record_removal(worker_id)
 
+        self._write_serve_worker_state(worker_id, "STOPPED")
         logger.info(f"Stopped worker {worker_id}")
 
     # --- Public API ---
@@ -232,9 +260,10 @@ class ModelPool:
         start = time.time()
         while time.time() - start < timeout:
             all_failed = True
-            for worker in self._workers.values():
+            for wid, worker in self._workers.items():
                 try:
                     if await worker.is_ready.remote():
+                        self._write_serve_worker_state(wid, "READY")
                         return True
                     if not await worker.is_failed.remote():
                         all_failed = False

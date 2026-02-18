@@ -12,85 +12,40 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Workers API - worker status, logs, and debugging.
+"""Workers API - worker list, logs, and stacktrace.
 
-Architecture:
-- JobRunner writes metadata to WorkQueue state (gRPC)
-- WebUI reads directly from WorkQueue storage (pyO3)
-
-Note: Logs and stacktrace endpoints require running workers (Ray actors).
-They use Ray State API to find actors, not cross-process state.
+v2: 3 endpoints. Worker detail and metrics endpoints removed.
+    list_workers now reads from persistent worker metadata (not event scanning).
+    Supports ?stage_id= and ?worker_id= filters.
 """
 
 import subprocess
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import PlainTextResponse
 
 router = APIRouter(tags=["workers"])
 
 
 @router.get("/jobs/{job_id}/workers")
-async def list_workers(job_id: str, request: Request) -> List[Dict[str, Any]]:
-    """List all workers for a job."""
-    storage = request.app.state.storage
-    return storage.list_workers(job_id, limit=1000)
-
-
-@router.get("/jobs/{job_id}/workers/{worker_id}")
-async def get_worker_detail(
+async def list_workers(
     job_id: str,
-    worker_id: str,
     request: Request,
-) -> Dict[str, Any]:
-    """Get worker state (latest Counter/Gauge values)."""
+    stage_id: Optional[str] = Query(None),
+    worker_id: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+) -> List[Dict[str, Any]]:
+    """List workers from persistent metadata."""
     storage = request.app.state.storage
-    history = storage.get_worker_history(job_id, worker_id)
-    if history:
-        return history
-    raise HTTPException(status_code=404, detail=f"Worker {worker_id} not found")
-
-
-@router.get("/jobs/{job_id}/workers/{worker_id}/metrics")
-async def get_worker_metrics(
-    job_id: str,
-    worker_id: str,
-    request: Request,
-    start_time: float = Query(0, description="Start timestamp (Unix seconds)"),
-    end_time: float = Query(0, description="End timestamp (Unix seconds)"),
-) -> Dict[str, Any]:
-    """Get time-series samples and calculated rates for a worker.
-
-    Returns raw Counter/Gauge samples for charting, plus rate() calculations.
-    """
-    import time as time_module
-
-    now = time_module.time()
-
-    if end_time == 0:
-        end_time = now
-    if start_time == 0:
-        start_time = end_time - 300
-
-    storage = request.app.state.storage
-    time_range = end_time - start_time
-
-    samples = storage.get_metrics_samples(job_id, worker_id, start_time, end_time)
-    rates = {
-        "input_records_per_sec": storage.rate(job_id, worker_id, "input_records", time_range),
-        "output_records_per_sec": storage.rate(job_id, worker_id, "output_records", time_range),
-        "splits_per_sec": storage.rate(job_id, worker_id, "processed_count", time_range),
-    }
-
-    return {
-        "job_id": job_id,
-        "worker_id": worker_id,
-        "start_time": start_time,
-        "end_time": end_time,
-        "samples": samples,
-        "rates": rates,
-    }
+    return storage.list_workers(
+        job_id,
+        stage_id=stage_id,
+        worker_id=worker_id,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/jobs/{job_id}/workers/{worker_id}/logs")
@@ -103,17 +58,8 @@ async def get_worker_logs(
     """Get worker logs.
 
     Requires the job to be running (worker must be a live Ray actor).
-
-    Args:
-        job_id: Job identifier
-        worker_id: Worker identifier
-        tail: Number of lines to return from the end
-
-    Returns:
-        Plain text log content
     """
     try:
-        # Find the actor using Ray State API
         from ray.util.state import list_actors, get_log
 
         actors = list_actors(filters=[("name", "=", worker_id)])
@@ -128,7 +74,6 @@ async def get_worker_logs(
         if not actor_id:
             return PlainTextResponse("Could not determine actor ID")
 
-        # Get logs using actor_id
         try:
             logs = get_log(actor_id=actor_id, tail=tail)
             if logs:
@@ -136,7 +81,6 @@ async def get_worker_logs(
                     return PlainTextResponse("\n".join(logs))
                 return PlainTextResponse(str(logs))
         except Exception as e:
-            # Fallback: try reading from log files via Ray Dashboard API
             node_id = actor.get("node_id")
             pid = actor.get("pid")
 
@@ -176,16 +120,8 @@ async def get_worker_stacktrace(
     """Get worker stacktrace using py-spy.
 
     Requires the job to be running (worker must be a live Ray actor).
-
-    Args:
-        job_id: Job identifier
-        worker_id: Worker identifier
-
-    Returns:
-        Plain text stacktrace
     """
     try:
-        # Find the actor using Ray State API
         from ray.util.state import list_actors
 
         actors = list_actors(filters=[("name", "=", worker_id)])
@@ -200,7 +136,6 @@ async def get_worker_stacktrace(
         if not pid:
             return PlainTextResponse("Could not determine worker PID")
 
-        # Use py-spy to dump stacktrace
         try:
             result = subprocess.run(
                 ["py-spy", "dump", "--pid", str(pid)],

@@ -252,12 +252,26 @@ class StageWorker:
                         f"Payload missing for key {message.payload_key}, "
                         f"nacking {len(records)} records"
                     )
+                    ts_ns = time.time_ns()
+                    nack_puts: Dict[str, bytes] = {}
+                    for mid in msg_ids:
+                        nack_puts[event_key(self.stage_id, ts_ns, mid)] = encode_json(
+                            {
+                                "event_type": "nack",
+                                "timestamp": time.time(),
+                                "worker_id": self.worker_id,
+                                "stage_id": self.stage_id,
+                                "reason": "payload_missing",
+                            }
+                        )
+                        ts_ns += 1
                     self.queue_client.nack(
                         self.upstream_queue_name,
                         msg_ids,
                         claim_tokens=claim_tokens,
                         reason="payload_missing",
                         state_namespace=job_namespace(self.job_id),
+                        state_puts=nack_puts,
                     )
                     return
                 tables.append(payload.data)

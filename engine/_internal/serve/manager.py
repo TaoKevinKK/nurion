@@ -37,6 +37,7 @@ from _internal.serve.allocator import GPUAllocator
 from _internal.serve.config import AutoscaleConfig, ModelConfig
 from _internal.serve.pool import ModelPool
 from _internal.serve.registry import REGISTRY_ACTOR_NAME, SERVE_NAMESPACE, ModelRegistry
+from _internal.webui.state.schema import encode_json, serve_model_key, serve_namespace
 
 logger = logging.getLogger(__name__)
 
@@ -77,12 +78,14 @@ class ModelServiceManager:
         self,
         autoscale_config: Optional[AutoscaleConfig] = None,
         detached: bool = False,
+        broker_endpoint: Optional[str] = None,
     ) -> None:
         """Initialize the manager, allocator, and registry.
 
         Args:
             autoscale_config: Default autoscaling config for all models
             detached: Whether this manager is running in detached mode
+            broker_endpoint: Optional WorkQueue broker URL for state persistence
         """
         self._autoscale_config = autoscale_config or AutoscaleConfig()
         self._detached = detached
@@ -91,6 +94,17 @@ class ModelServiceManager:
         self._configs: dict[str, ModelConfig] = {}
         self._allocator = GPUAllocator()
         self._allocator.refresh_nodes()
+
+        # Optional state writer for serve monitoring
+        self._state_writer: Optional[Any] = None
+        if broker_endpoint:
+            from _internal.queue import WorkQueueQueueClient
+
+            self._state_writer = WorkQueueQueueClient(
+                broker_endpoint,
+                worker_id="serve-manager",
+            )
+            self._state_writer.start()
 
         # Create registry actor (still a separate actor for HTTP endpoint)
         actor_options: dict[str, Any] = {"name": REGISTRY_ACTOR_NAME}
@@ -125,6 +139,25 @@ class ModelServiceManager:
     def get_registry(self) -> ray.actor.ActorHandle:
         """Get the registry actor handle."""
         return self._registry
+
+    def _write_model_state(self, model_id: str, status: str) -> None:
+        """Write model lifecycle metadata into WorkQueue state."""
+        if self._state_writer is None:
+            return
+        import time
+
+        data = {
+            "model_id": model_id,
+            "status": status,
+            "timestamp": time.time(),
+        }
+        try:
+            self._state_writer.state_put(
+                serve_namespace(),
+                puts={serve_model_key(model_id): encode_json(data)},
+            )
+        except Exception as e:
+            logger.debug(f"Failed to write model state: {e}")
 
     # --- Deployment ---
 
@@ -188,6 +221,7 @@ class ModelServiceManager:
             registry=self._registry,
             detached=self._detached,
             allocator=self._allocator,
+            state_writer=self._state_writer,
         )
         self._pools[model_id] = pool
         self._configs[model_id] = config
@@ -210,6 +244,7 @@ class ModelServiceManager:
                     f"GPU OOM, missing architectures)."
                 )
 
+        self._write_model_state(model_id, "DEPLOYED")
         result["status"] = "ready"
         result["completed_at"] = time.time()
         result["duration_s"] = result["completed_at"] - result["started_at"]
@@ -354,6 +389,7 @@ class ModelServiceManager:
         del self._pools[model_id]
         self._configs.pop(model_id, None)
 
+        self._write_model_state(model_id, "UNDEPLOYED")
         result["completed_at"] = time.time()
         result["duration_s"] = result["completed_at"] - result["started_at"]
         result["status"] = "undeployed"
@@ -457,12 +493,14 @@ class ModelServiceManager:
 def create_manager(
     autoscale_config: Optional[AutoscaleConfig] = None,
     detached: bool = False,
+    broker_endpoint: Optional[str] = None,
 ) -> ray.actor.ActorHandle:
     """Create a new ModelServiceManager actor.
 
     Args:
         autoscale_config: Default autoscaling config for all models
         detached: If True, create detached actor that survives job exit
+        broker_endpoint: Optional WorkQueue broker URL for state persistence
 
     Returns:
         Actor handle for the ModelServiceManager
@@ -471,4 +509,8 @@ def create_manager(
     if detached:
         options["lifetime"] = "detached"
         options["namespace"] = SERVE_NAMESPACE
-    return ray.remote(ModelServiceManager).options(**options).remote(autoscale_config, detached)
+    return (
+        ray.remote(ModelServiceManager)
+        .options(**options)
+        .remote(autoscale_config, detached, broker_endpoint)
+    )

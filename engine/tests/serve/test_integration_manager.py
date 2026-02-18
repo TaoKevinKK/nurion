@@ -556,35 +556,40 @@ class TestMultiModelCompaction:
         """Mixed TP values: compaction picks cheapest eviction plan.
 
         Scenario (16 GPUs total):
-        - model_tp2: TP=2, 4 workers = 8 GPUs
-        - model_tp1: TP=1, 8 workers = 8 GPUs
-        - Spawn model_tp4 (TP=4) via compaction → evicts fewest workers
-          (2 TP=2 workers rather than 4 TP=1 workers)
+        - model_tp4: TP=4, 3 workers = 12 GPUs
+        - model_tp1: TP=1, 4 workers = 4 GPUs
+        - Spawn new_tp4 (TP=4) via compaction → needs 4 GPUs
+        - Cheapest plan: evict 1 TP=4 worker (frees 4 GPUs, 1 eviction)
+          rather than 4 TP=1 workers (frees 4 GPUs, 4 evictions)
         """
         mgr = manager_for_compaction
 
-        config_tp2 = _make_config("model_tp2", tp=2, min_workers=4, max_workers=4)
-        config_tp1 = _make_config("model_tp1", tp=1, min_workers=8, max_workers=8)
-        await mgr.deploy_model([config_tp2, config_tp1], wait_ready=True, timeout=60.0)
-        await _wait_all_workers_ready(mgr, "model_tp2")
+        # Deploy sequentially: 7 total workers avoids GPU scheduling race
+        config_tp4 = _make_config("model_tp4", tp=4, min_workers=3, max_workers=3)
+        await mgr.deploy_model(config_tp4, wait_ready=True, timeout=60.0)
+        await _wait_all_workers_ready(mgr, "model_tp4")
+
+        config_tp1 = _make_config("model_tp1", tp=1, min_workers=4, max_workers=4)
+        await mgr.deploy_model(config_tp1, wait_ready=True, timeout=60.0)
         await _wait_all_workers_ready(mgr, "model_tp1")
 
-        assert await _pool_worker_count(mgr, "model_tp2") == 4
-        assert await _pool_worker_count(mgr, "model_tp1") == 8
+        assert await _pool_worker_count(mgr, "model_tp4") == 3
+        assert await _pool_worker_count(mgr, "model_tp1") == 4
 
-        config_tp4 = _make_config("model_tp4", tp=4, min_workers=1, max_workers=2)
-        _create_empty_pool(mgr, config_tp4)
+        config_new = _make_config("new_tp4", tp=4, min_workers=1, max_workers=2)
+        _create_empty_pool(mgr, config_new)
 
-        worker_id, _ = await mgr.spawn_with_compaction("model_tp4")
+        worker_id, _ = await mgr.spawn_with_compaction("new_tp4")
         assert worker_id is not None
 
-        tp2_count = await _pool_worker_count(mgr, "model_tp2")
-        tp1_count = await _pool_worker_count(mgr, "model_tp1")
         tp4_count = await _pool_worker_count(mgr, "model_tp4")
+        tp1_count = await _pool_worker_count(mgr, "model_tp1")
+        new_count = await _pool_worker_count(mgr, "new_tp4")
 
-        assert tp4_count == 1
-        total_evicted = (4 - tp2_count) + (8 - tp1_count)
-        assert total_evicted >= 1
+        assert new_count == 1
+        # Compaction should evict 1 TP=4 worker (cheapest), not 4 TP=1 workers
+        assert tp4_count == 2
+        assert tp1_count == 4
 
     async def test_compaction_unfreezes_autoscaler_after_spawn(
         self, manager_for_compaction

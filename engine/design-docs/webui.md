@@ -1,5 +1,7 @@
 # Nurion WebUI (WorkQueue-First)
 
+> **Note**: API design, schema extensions, and endpoint specification are documented in [webui-api-v2.md](webui-api-v2.md).
+
 ## Overview
 
 The WebUI is a lightweight debugging interface that reads job metadata directly from
