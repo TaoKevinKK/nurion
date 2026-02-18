@@ -64,6 +64,7 @@ EXCLUDE_DIRS = {
     ".ruff_cache",
     "solstice.egg-info",
     "aether.egg-info",
+    ".agents",
 }
 
 # Files to exclude from checking
