@@ -162,7 +162,7 @@ def _make_autoscale_config(**overrides: Any) -> AutoscaleConfig:
         "enabled": True,
         "check_interval_seconds": 0.5,
         "scale_up_threshold": 5,
-        "scale_down_idle_seconds": 2.0,
+        "scale_down_idle_seconds": 0.5,
         "cooldown_seconds": 1.0,
         "max_scale_step": 1,
     }
@@ -218,6 +218,30 @@ async def pool_env(registry):
 
 
 # ---------------------------------------------------------------------------
+# Polling helpers
+# ---------------------------------------------------------------------------
+
+
+async def _wait_for_worker_count(
+    pool: Any,
+    predicate,
+    timeout: float = 15.0,
+    interval: float = 0.1,
+) -> int:
+    """Poll pool.get_status() until predicate(total_workers) is True."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        status = await pool.get_status()
+        count = status["total_workers"]
+        if predicate(count):
+            return count
+        await asyncio.sleep(interval)
+    status = await pool.get_status()
+    count = status["total_workers"]
+    raise TimeoutError(f"Worker count condition not met within {timeout}s, count={count}")
+
+
+# ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
@@ -241,7 +265,7 @@ class TestModelPoolAutoscaling:
 
         pool.start_autoscaler(_make_autoscale_config())
 
-        await asyncio.sleep(3.0)
+        await _wait_for_worker_count(pool, lambda n: n > 2)
 
         status = await pool.get_status()
         assert status["total_workers"] > 2, (
@@ -259,7 +283,7 @@ class TestModelPoolAutoscaling:
             await _set_metrics(http_url, ep, pending=15, running=0)
 
         pool.start_autoscaler(_make_autoscale_config())
-        await asyncio.sleep(3.0)
+        await _wait_for_worker_count(pool, lambda n: n > 2)
 
         status = await pool.get_status()
         assert status["total_workers"] > 2
@@ -275,7 +299,7 @@ class TestModelPoolAutoscaling:
             await _set_metrics(http_url, ep, pending=1, running=1)
 
         pool.start_autoscaler(_make_autoscale_config())
-        await asyncio.sleep(3.0)
+        await asyncio.sleep(0.5)  # confirm no scale-up (1 check cycle, threshold not reached)
 
         status = await pool.get_status()
         assert status["total_workers"] == 2
@@ -285,7 +309,7 @@ class TestModelPoolAutoscaling:
         pool, http_url, config = pool_env
 
         await pool.scale_to(config.max_workers)
-        await asyncio.sleep(0.5)
+        await _wait_for_worker_count(pool, lambda n: n == config.max_workers)
 
         status = await pool.get_status()
         assert status["total_workers"] == config.max_workers
@@ -295,7 +319,7 @@ class TestModelPoolAutoscaling:
             await _set_metrics(http_url, ep, pending=100, running=100)
 
         pool.start_autoscaler(_make_autoscale_config())
-        await asyncio.sleep(3.0)
+        await asyncio.sleep(0.5)  # confirm no scale beyond max_workers (1 check cycle)
 
         status = await pool.get_status()
         assert status["total_workers"] == config.max_workers
@@ -307,7 +331,7 @@ class TestModelPoolAutoscaling:
         pool, http_url, config = pool_env
 
         await pool.scale_to(3)
-        await asyncio.sleep(0.5)
+        await _wait_for_worker_count(pool, lambda n: n == 3)
 
         status = await pool.get_status()
         assert status["total_workers"] == 3
@@ -318,7 +342,7 @@ class TestModelPoolAutoscaling:
 
         pool.start_autoscaler(_make_autoscale_config())
 
-        await asyncio.sleep(5.0)
+        await _wait_for_worker_count(pool, lambda n: n < 3, timeout=15.0)
 
         status = await pool.get_status()
         assert status["total_workers"] < 3, (
@@ -331,7 +355,7 @@ class TestModelPoolAutoscaling:
         pool, http_url, config = pool_env
 
         await pool.scale_to(3)
-        await asyncio.sleep(0.5)
+        await _wait_for_worker_count(pool, lambda n: n == 3)
 
         status = await pool.get_status()
         endpoints = status["endpoints"]
@@ -340,7 +364,7 @@ class TestModelPoolAutoscaling:
             await _set_metrics(http_url, ep, pending=0, running=1)
 
         pool.start_autoscaler(_make_autoscale_config())
-        await asyncio.sleep(5.0)
+        await asyncio.sleep(1.5)  # must exceed scale_down_idle_seconds=0.5 to confirm no scale-down
 
         status = await pool.get_status()
         assert status["total_workers"] == 3, (
@@ -361,7 +385,7 @@ class TestModelPoolAutoscaling:
         for ep in endpoints:
             await _set_metrics(http_url, ep, pending=50, running=50)
 
-        await asyncio.sleep(3.0)
+        await asyncio.sleep(0.5)  # confirm cooldown blocks scaling (cooldown=60s, 1 check cycle)
 
         status = await pool.get_status()
         assert status["total_workers"] == 2
@@ -379,7 +403,7 @@ class TestModelPoolAutoscaling:
         for ep in endpoints:
             await _set_metrics(http_url, ep, pending=50, running=50)
 
-        await asyncio.sleep(3.0)
+        await asyncio.sleep(0.5)  # confirm frozen autoscaler makes no decisions (1 check cycle)
 
         status = await pool.get_status()
         assert status["total_workers"] == 2

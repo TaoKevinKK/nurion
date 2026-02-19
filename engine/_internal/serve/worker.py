@@ -500,17 +500,6 @@ class InferenceWorker:
             await asyncio.sleep(1.0)
         return True
 
-    async def set_test_metrics(self, pending: int, running: int) -> None:
-        """Inject metrics into the fake server subprocess (fake backend only).
-
-        The next heartbeat cycle will pick up the updated values from /metrics.
-        """
-        client = self._get_http_client()
-        await client.post(
-            f"{self._endpoint}/internal/set_metrics",
-            json={"pending": pending, "running": running},
-        )
-
     async def shutdown(self) -> None:
         """Gracefully shutdown the worker."""
         logger.info(f"Shutting down worker {self._worker_id}")
