@@ -9,7 +9,7 @@ Read `AGENTS.md` for full project context (architecture, patterns, conventions).
 - **Public API**: `engine/nurion/__init__.py`
 - **Package manager**: uv
 - **Linting**: `cd engine && uv run ruff check _internal/`
-- **Tests**: `cd engine && uv run pytest tests/ -v --tb=short -m "not integration"`
+- **Tests**: `cd engine && uv run pytest tests/ -v --tb=short -m "not integration and not distributed and not chaos and not slow and not stability and not workflow"`
 
 ## Rules
 

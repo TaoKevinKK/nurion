@@ -28,11 +28,13 @@ from _internal.operators.sinks import (
     PrintSinkConfig,
 )
 from _internal.operators.sources import (
+    AntiJoinSourceConfig,
     FileSourceConfig,
     IcebergSourceConfig,
     LanceTableSourceConfig,
     SparkSourceConfig,
     SparkSourceV2Config,
+    UnionSourceConfig,
 )
 from _internal.serve import ModelConfig, ModelServiceManager, create_manager
 from _internal.serve.client import ModelClient
@@ -50,11 +52,13 @@ __all__ = [
     "operator",
     "Split",
     "SplitPayload",
+    "AntiJoinSourceConfig",
     "FileSourceConfig",
     "IcebergSourceConfig",
     "LanceTableSourceConfig",
     "SparkSourceConfig",
     "SparkSourceV2Config",
+    "UnionSourceConfig",
     "FileSinkConfig",
     "LanceCommitPolicy",
     "LanceSinkCommitter",

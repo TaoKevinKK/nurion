@@ -219,6 +219,15 @@ class StageMaster:
 
         self._running = True
 
+        # Ensure the payload store actor is ready before prepare() writes to it.
+        # RaySplitPayloadStore is backed by a Ray actor; calling prepare() before
+        # the actor is fully initialised raises ActorUnavailableError.
+        if hasattr(self.payload_store, "wait_ready"):
+            self.payload_store.wait_ready()
+
+        # --- Pre-flight preparation (e.g., anti-join builds exclude key table) ---
+        self.stage.operator_config.prepare(self.payload_store)
+
         # --- Sink manager: create commit queue and start background loop ---
         if self._sink_manager:
             self._sink_manager.create_queue_and_start_loop(queue_client)

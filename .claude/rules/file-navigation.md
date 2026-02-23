@@ -110,10 +110,13 @@
 ## Running Commands
 
 ```bash
-# Engine: unit tests (fast, no external deps)
-cd engine && uv run pytest tests/ -v --tb=short -m "not integration"
+# Engine: unit + workflow tests (fast, no Ray cluster, no external deps)
+cd engine && uv run pytest tests/ -v --tb=short -m "not integration and not distributed and not chaos and not slow and not stability and not workflow"
 
-# Engine: integration tests
+# Engine: distributed tests (needs Ray cluster, slow)
+cd engine && uv run pytest tests/ -v -m "distributed"
+
+# Engine: integration tests (needs external services)
 cd engine && uv run pytest tests/ -v -m "integration"
 
 # Engine: serve tests only

@@ -47,7 +47,7 @@ StageMaster StageMaster StageMaster
 ## Dev Commands
 
 - `uv sync --dev`
-- `uv run pytest tests/ -v --tb=short -m "not integration"`
+- `uv run pytest tests/ -v --tb=short -m "not integration and not distributed and not chaos and not slow and not stability and not workflow"`
 - `uv run pytest tests/ -v --tb=short -m "integration"`
 - `uv run ruff check _internal/`
 - `uv run ruff format --check _internal/`

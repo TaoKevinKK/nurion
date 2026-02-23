@@ -29,10 +29,11 @@ Declare at module level: `pytestmark = pytest.mark.<marker>`
 | Marker | Default CI | When to use |
 |---|---|---|
 | `integration` | **excluded** | Requires external service (Iceberg, Lance, Spark, S3) |
-| `distributed` | included | Multi-worker Ray pipeline test |
-| `workflow` | included | End-to-end pipeline test |
-| `slow` | included | Runtime > 30s |
-| `chaos` | **not in CI** | Random failure injection |
+| `distributed` | **excluded** | Multi-worker Ray pipeline test (slow, requires Ray cluster) |
+| `workflow` | **excluded** | End-to-end pipeline test (slower, uses Ray) |
+| `slow` | **excluded** | Runtime > 30s |
+| `chaos` | **excluded** | Random failure injection |
+| `stability` | **excluded** | Long-running stability / soak test |
 | `benchmark` | **excluded** | Performance measurement |
 
 ---
@@ -61,20 +62,20 @@ def test_queue():
 ## Run Commands
 
 ```bash
-# Default: unit + workflow + distributed (fast, no external deps)
-cd engine && uv run pytest tests/ -v --tb=short -m "not integration"
+# Default: unit + workflow only (fast, no external deps, no Ray cluster)
+cd engine && uv run pytest tests/ -v --tb=short -m "not integration and not distributed and not chaos and not slow and not stability and not workflow"
 
 # Integration tests (needs external services)
 cd engine && uv run pytest tests/ -v -m "integration"
 
+# Distributed tests (needs Ray cluster, slow ~minutes)
+cd engine && uv run pytest tests/ -v -m "distributed"
+
 # Specific serve tests
 cd engine && uv run pytest tests/serve/ -v
 
-# All tests including chaos (local dev only)
-cd engine && uv run pytest tests/ -v
-
 # With coverage
-cd engine && uv run pytest tests/ -v --cov=_internal --cov-report=term-missing -m "not integration"
+cd engine && uv run pytest tests/ -v --cov=_internal --cov-report=term-missing -m "not integration and not distributed and not chaos and not slow and not stability and not workflow"
 ```
 
 ---

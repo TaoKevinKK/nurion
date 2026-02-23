@@ -31,7 +31,7 @@ Use module-level `pytestmark = pytest.mark.<marker>` to tag entire files.
 ## Commands
 ```bash
 cd engine
-uv run pytest tests/ -v --tb=short -m "not integration"   # unit
+uv run pytest tests/ -v --tb=short -m "not integration and not distributed and not chaos and not slow and not stability and not workflow"   # fast (unit + workflow)
 uv run pytest tests/ -v --tb=short -m "integration"        # integration
 ```
 

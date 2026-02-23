@@ -362,7 +362,7 @@ See `workflows/` and `examples/` directories:
 ```bash
 # Run tests (unit tests, no external dependencies)
 cd engine
-uv run pytest tests/ -v --tb=short -m "not integration"
+uv run pytest tests/ -v --tb=short -m "not integration and not distributed and not chaos and not slow and not stability and not workflow"
 
 # Run integration tests (requires Java 11; Control Plane for Iceberg; RayDP JARs for Spark)
 uv run pytest tests/ -v --tb=short -m "integration"

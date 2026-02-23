@@ -120,6 +120,7 @@ class StageWorker:
             stage_id=self.stage_id,
             worker_id=self.worker_id,
             broker_endpoint=self.broker_endpoint,
+            payload_store=self.payload_store,
         )
         self._operator = self.stage.operator_config.setup(runtime)
 
@@ -296,15 +297,19 @@ class StageWorker:
             merged_table = None
             merged_payload = None
 
-        # For source messages, use data_range from the first message
+        # For source messages, use data_range and original split_id from the
+        # first message.  Source operators (e.g. UnionSourceOperator) may encode
+        # routing information in the split_id produced by their SplitPlanner.
         first_message = QueueMessage.from_bytes(records[0].value)
         if not first_message.payload_key:
             data_range = first_message.metadata.get("data_range", {})
+            source_split_id = first_message.split_id or split_id
         else:
             data_range = {"merged_count": len(records)} if len(records) > 1 else {}
+            source_split_id = split_id
 
         split = Split(
-            split_id=split_id,
+            split_id=source_split_id,
             stage_id=self.stage_id,
             data_range=data_range,
             parent_split_ids=parent_split_ids,

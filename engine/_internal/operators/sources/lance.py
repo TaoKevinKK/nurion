@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Iterable, Iterator, Optional
 
 import lance
+import pyarrow as pa
 
 from _internal.core.models import Split, SplitPayload
 from _internal.core.operator import OperatorConfig, OperatorRuntime, operator
@@ -55,6 +56,20 @@ class LanceTableSourceConfig(OperatorConfig):
 
     max_rows: Optional[int] = None
     """Maximum total rows to read. None = no limit (read all rows)."""
+
+    def get_source_schema(self) -> pa.Schema:
+        """Return the Arrow schema of this Lance dataset.
+
+        Reads only dataset metadata — no data scan performed.
+        Respects the ``columns`` projection if set.
+        """
+        storage_options = _get_lance_storage_options(self.dataset_uri)
+        dataset = lance.dataset(self.dataset_uri, storage_options=storage_options)
+        schema = dataset.schema
+        if self.columns:
+            col_list = list(self.columns)
+            schema = pa.schema([schema.field(c) for c in col_list])
+        return schema
 
     def create_source(self) -> "LanceSplitPlanner":
         """Create a split planner for this Lance source."""
