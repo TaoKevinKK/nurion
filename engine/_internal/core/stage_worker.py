@@ -30,15 +30,17 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, NamedTuple, Optional
 
 import ray
 
 from _internal.core.models import (
+    DataQueueMessage,
     QueueEndpoint,
-    QueueMessage,
     RawOutputBytes,
+    SourceQueueMessage,
     make_split_id,
+    queue_message_from_bytes,
 )
 from _internal.core.operator import Operator, OperatorRuntime
 from _internal.core.split_payload_store import SplitPayloadStore
@@ -52,7 +54,22 @@ from _internal.utils.logging import create_ray_logger
 from _internal.webui.state.schema import encode_json, event_key, job_namespace, split_key
 
 if TYPE_CHECKING:
+    import pyarrow as pa
+
     from _internal.core.stage import Stage
+
+
+class _ParsedBatch(NamedTuple):
+    """Intermediate result of parsing claimed records."""
+
+    msg_ids: list[str]
+    claim_tokens: list[str]
+    records: list[WorkQueueRecord]
+    tables: "list[pa.Table]"
+    parent_split_ids: list[str]
+    consumed_payload_keys: list[str]
+    source_message: Optional[SourceQueueMessage]
+    source_stage: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -229,129 +246,28 @@ class StageWorker:
         assert self.upstream_queue_name is not None
         assert self._operator is not None
 
-        import pyarrow as pa
+        batch = self._parse_records(records)
+        if batch is None:
+            return  # already nacked
 
-        from _internal.core.models import Split, SplitPayload
+        split_id, split, merged_payload = self._merge_and_build_split(batch)
 
-        # Collect msg_ids, claim_tokens, and payloads
-        msg_ids: list[str] = []
-        claim_tokens: list[str] = []
-        tables: list[pa.Table] = []
-        parent_split_ids: list[str] = []
-
-        for record in records:
-            if not record.claim_token:
-                raise RuntimeError(f"Missing claim_token for message {record.msg_id}")
-            msg_ids.append(record.msg_id)
-            claim_tokens.append(record.claim_token)
-
-            message = QueueMessage.from_bytes(record.value)
-            if message.payload_key:
-                payload = self.payload_store.get(message.payload_key)
-                if payload is None:
-                    self.logger.error(
-                        f"Payload missing for key {message.payload_key}, "
-                        f"nacking {len(records)} records"
-                    )
-                    ts_ns = time.time_ns()
-                    nack_puts: Dict[str, bytes] = {}
-                    for mid in msg_ids:
-                        nack_puts[event_key(self.stage_id, ts_ns, mid)] = encode_json(
-                            {
-                                "event_type": "nack",
-                                "timestamp": time.time(),
-                                "worker_id": self.worker_id,
-                                "stage_id": self.stage_id,
-                                "reason": "payload_missing",
-                            }
-                        )
-                        ts_ns += 1
-                    self.queue_client.nack(
-                        self.upstream_queue_name,
-                        msg_ids,
-                        claim_tokens=claim_tokens,
-                        reason="payload_missing",
-                        state_namespace=job_namespace(self.job_id),
-                        state_puts=nack_puts,
-                    )
-                    return
-                tables.append(payload.data)
-                parent_split_ids.append(message.split_id)
-            else:
-                # Source message (no payload) -- only valid for single records
-                pass
-
-        # Build merged split + payload
-        split_id = make_split_id(self.job_id, self.stage_id, msg_ids[0])
-
-        if tables:
-            merged_table = (
-                tables[0]
-                if len(tables) == 1
-                else pa.concat_tables(tables, promote_options="default")
-            )
-            merged_payload: Optional[SplitPayload] = SplitPayload(
-                data=merged_table, split_id=split_id
-            )
-        else:
-            merged_table = None
-            merged_payload = None
-
-        # For source messages, use data_range and original split_id from the
-        # first message.  Source operators (e.g. UnionSourceOperator) may encode
-        # routing information in the split_id produced by their SplitPlanner.
-        first_message = QueueMessage.from_bytes(records[0].value)
-        if not first_message.payload_key:
-            data_range = first_message.metadata.get("data_range", {})
-            source_split_id = first_message.split_id or split_id
-        else:
-            data_range = {"merged_count": len(records)} if len(records) > 1 else {}
-            source_split_id = split_id
-
-        split = Split(
-            split_id=source_split_id,
-            stage_id=self.stage_id,
-            data_range=data_range,
-            parent_split_ids=parent_split_ids,
-        )
-
-        # Process
         check_fault(FAULT_BEFORE_PROCESS)
         process_start = time.time()
         result = self._operator.process_split(split, merged_payload)
         check_fault(FAULT_AFTER_PROCESS)
 
-        input_rows = merged_table.num_rows if merged_table is not None else 0
-        input_bytes = merged_table.nbytes if merged_table is not None else 0
-
-        # Build output
-        output_bytes_list: list[bytes] = []
-
-        if isinstance(result, RawOutputBytes):
-            if self.output_queue_name:
-                output_bytes_list = result.payloads
-        else:
-            output_payloads = await self._collect_outputs(result)
-            if output_payloads and self.output_queue_name:
-                for idx, out_payload in enumerate(output_payloads):
-                    out_id = split_id if len(output_payloads) == 1 else f"{split_id}_{idx}"
-                    self.payload_store.store(out_id, out_payload)
-                    out_msg = QueueMessage(
-                        message_id=out_id,
-                        split_id=out_id,
-                        payload_key=out_id,
-                        metadata={"source_stage": self.stage_id},
-                    )
-                    output_bytes_list.append(out_msg.to_bytes())
+        output_bytes_list = await self._serialize_outputs(result, split_id)
 
         # For async operators, include await time in processing latency.
         processing_ms = max(0.0, (time.time() - process_start) * 1000.0)
 
-        # Build WebUI event
+        input_rows = merged_payload.data.num_rows if merged_payload else 0
+        input_bytes = merged_payload.data.nbytes if merged_payload else 0
         event_puts = self._build_event_puts(
-            record=records[0],
+            records=batch.records,
             split_id=split_id,
-            message=first_message,
+            source_stage=batch.source_stage,
             processing_ms=processing_ms,
             input_rows=input_rows,
             input_bytes=input_bytes,
@@ -361,8 +277,8 @@ class StageWorker:
         if output_bytes_list and self.output_queue_name:
             self.queue_client.ack_and_forward(
                 upstream_queue=self.upstream_queue_name,
-                upstream_msg_ids=msg_ids,
-                upstream_claim_tokens=claim_tokens,
+                upstream_msg_ids=batch.msg_ids,
+                upstream_claim_tokens=batch.claim_tokens,
                 downstream_queue=self.output_queue_name,
                 downstream_payloads=output_bytes_list,
                 state_namespace=job_namespace(self.job_id),
@@ -371,14 +287,178 @@ class StageWorker:
         else:
             self.queue_client.ack(
                 self.upstream_queue_name,
-                msg_ids,
-                claim_tokens=claim_tokens,
+                batch.msg_ids,
+                claim_tokens=batch.claim_tokens,
                 state_namespace=job_namespace(self.job_id),
                 state_puts=event_puts,
             )
 
+        # Eagerly free input payloads now that ack succeeded.
+        for key in batch.consumed_payload_keys:
+            try:
+                self.payload_store.delete(key)
+            except Exception as e:
+                self.logger.warning(f"Failed to delete consumed payload {key}: {e}")
+
     # =========================================================================
-    # Helpers
+    # _process_and_ack helpers
+    # =========================================================================
+
+    def _parse_records(
+        self, records: list[WorkQueueRecord]
+    ) -> Optional[_ParsedBatch]:
+        """Parse claimed records, fetch payloads. Returns None if nacked."""
+        msg_ids: list[str] = []
+        claim_tokens: list[str] = []
+        tables: list = []  # pa.Table items
+        parent_split_ids: list[str] = []
+        consumed_payload_keys: list[str] = []
+        source_message: Optional[SourceQueueMessage] = None
+        source_stage: Optional[str] = None
+
+        for record in records:
+            if not record.claim_token:
+                raise RuntimeError(f"Missing claim_token for message {record.msg_id}")
+            msg_ids.append(record.msg_id)
+            claim_tokens.append(record.claim_token)
+
+            message = queue_message_from_bytes(record.value)
+            if source_stage is None:
+                source_stage = message.metadata.get("source_stage")
+            if isinstance(message, SourceQueueMessage):
+                source_message = message
+            else:
+                payload = self.payload_store.get(message.payload_key)
+                if payload is None:
+                    self.logger.error(
+                        f"Payload missing for key {message.payload_key}, "
+                        f"nacking {len(records)} records"
+                    )
+                    self._nack_all(msg_ids, claim_tokens, reason="payload_missing")
+                    return None
+                tables.append(payload.data)
+                parent_split_ids.append(message.split_id)
+                consumed_payload_keys.append(message.payload_key)
+
+        return _ParsedBatch(
+            msg_ids=msg_ids,
+            claim_tokens=claim_tokens,
+            records=records,
+            tables=tables,
+            parent_split_ids=parent_split_ids,
+            consumed_payload_keys=consumed_payload_keys,
+            source_message=source_message,
+            source_stage=source_stage,
+        )
+
+    def _nack_all(
+        self,
+        msg_ids: list[str],
+        claim_tokens: list[str],
+        reason: str,
+    ) -> None:
+        """Nack all messages with WebUI nack events."""
+        assert self.queue_client is not None
+        assert self.upstream_queue_name is not None
+
+        ts_ns = time.time_ns()
+        nack_puts: Dict[str, bytes] = {}
+        for mid in msg_ids:
+            nack_puts[event_key(self.stage_id, ts_ns, mid)] = encode_json(
+                {
+                    "event_type": "nack",
+                    "timestamp": time.time(),
+                    "worker_id": self.worker_id,
+                    "stage_id": self.stage_id,
+                    "reason": reason,
+                }
+            )
+            ts_ns += 1
+        self.queue_client.nack(
+            self.upstream_queue_name,
+            msg_ids,
+            claim_tokens=claim_tokens,
+            reason=reason,
+            state_namespace=job_namespace(self.job_id),
+            state_puts=nack_puts,
+        )
+
+    def _merge_and_build_split(
+        self, batch: _ParsedBatch
+    ) -> "tuple[str, Any, Any]":
+        """Merge Arrow tables and build Split + SplitPayload.
+
+        Returns (split_id, Split, Optional[SplitPayload]).
+        """
+        import pyarrow as pa
+
+        from _internal.core.models import Split, SplitPayload
+
+        split_id = make_split_id(self.job_id, self.stage_id, batch.msg_ids[0])
+
+        if batch.tables:
+            merged_table = (
+                batch.tables[0]
+                if len(batch.tables) == 1
+                else pa.concat_tables(batch.tables, promote_options="default")
+            )
+            merged_payload: Optional[SplitPayload] = SplitPayload(
+                data=merged_table, split_id=split_id
+            )
+        else:
+            merged_payload = None
+
+        if batch.source_message is not None:
+            data_range = batch.source_message.data_range
+            source_split_id = batch.source_message.split_id or split_id
+        else:
+            data_range = (
+                {"merged_count": len(batch.records)}
+                if len(batch.records) > 1
+                else {}
+            )
+            source_split_id = split_id
+
+        split = Split(
+            split_id=source_split_id,
+            stage_id=self.stage_id,
+            data_range=data_range,
+            parent_split_ids=batch.parent_split_ids,
+        )
+
+        return split_id, split, merged_payload
+
+    async def _serialize_outputs(
+        self, result: Any, split_id: str
+    ) -> list[bytes]:
+        """Collect process_split results and serialize to output messages."""
+        output_bytes_list: list[bytes] = []
+
+        if isinstance(result, RawOutputBytes):
+            if self.output_queue_name:
+                output_bytes_list = result.payloads
+        else:
+            output_payloads = await self._collect_outputs(result)
+            if output_payloads and self.output_queue_name:
+                for idx, out_payload in enumerate(output_payloads):
+                    out_id = (
+                        split_id
+                        if len(output_payloads) == 1
+                        else f"{split_id}_{idx}"
+                    )
+                    self.payload_store.store(out_id, out_payload)
+                    out_msg = DataQueueMessage(
+                        message_id=out_id,
+                        split_id=out_id,
+                        payload_key=out_id,
+                        metadata={"source_stage": self.stage_id},
+                    )
+                    output_bytes_list.append(out_msg.to_bytes())
+
+        return output_bytes_list
+
+    # =========================================================================
+    # General helpers
     # =========================================================================
 
     @staticmethod
@@ -416,39 +496,50 @@ class StageWorker:
 
     def _build_event_puts(
         self,
-        record: WorkQueueRecord,
+        records: list[WorkQueueRecord],
         split_id: str,
-        message: QueueMessage,
+        source_stage: Optional[str],
         processing_ms: float,
         input_rows: int,
         input_bytes: int,
     ) -> Dict[str, bytes]:
+        now = time.time()
         ts_ns = time.time_ns()
-        queue_wait_ms = max(0.0, (time.time() - record.created_at) * 1000.0)
+        puts: Dict[str, bytes] = {}
 
-        event = {
+        # One ack event per record (each has its own queue_wait_ms)
+        for i, record in enumerate(records):
+            queue_wait_ms = max(0.0, (now - record.created_at) * 1000.0)
+            event = {
+                "event_type": "ack",
+                "timestamp": now,
+                "worker_id": self.worker_id,
+                "processing_ms": processing_ms,
+                "queue_wait_ms": queue_wait_ms,
+                "input_rows": input_rows,
+                "input_bytes": input_bytes,
+            }
+            puts[event_key(self.stage_id, ts_ns + i, record.msg_id)] = encode_json(
+                event
+            )
+
+        # One split event (represents this merged processing unit)
+        split_event = {
             "event_type": "ack",
-            "timestamp": time.time(),
+            "timestamp": now,
+            "timestamp_ns": ts_ns,
             "worker_id": self.worker_id,
+            "stage_id": self.stage_id,
+            "split_id": split_id,
             "processing_ms": processing_ms,
-            "queue_wait_ms": queue_wait_ms,
             "input_rows": input_rows,
             "input_bytes": input_bytes,
         }
-        split_event = {
-            **event,
-            "timestamp_ns": ts_ns,
-            "stage_id": self.stage_id,
-            "split_id": split_id,
-        }
-        source_stage = message.metadata.get("source_stage")
         if source_stage:
             split_event["source_stage"] = source_stage
+        puts[split_key(split_id)] = encode_json(split_event)
 
-        return {
-            event_key(self.stage_id, ts_ns, record.msg_id): encode_json(event),
-            split_key(split_id): encode_json(split_event),
-        }
+        return puts
 
     def _should_exit(self) -> bool:
         return self._safe_to_exit

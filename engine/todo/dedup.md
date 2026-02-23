@@ -2,7 +2,7 @@
 
 Track implementation status of the Union-Find Service dedup architecture.
 
-> **Last Updated**: 2026-02-09 (v2: checkpoint + shuffle routing)
+> **Last Updated**: 2026-02-23 (doc cleanup: path fixes + stale item refresh)
 > **Design Doc**: `design-docs/minhash-dedup.md`
 
 ---
@@ -11,32 +11,32 @@ Track implementation status of the Union-Find Service dedup architecture.
 
 ### Union-Find Service (2026-02-09)
 
-- [x] **UnionFind data structure** - `utils/union_find.py`
+- [x] **UnionFind data structure** - `_internal/utils/union_find.py`
   - Union by rank + path compression
   - Arrow Table serialization (checkpoint/restore via PayloadStore)
   - String key support, batch operations, merge
-- [x] **UFShard actor** - `serve/union_find/shard.py`
+- [x] **UFShard actor** - `_internal/serve/union_find/shard.py`
   - Band hash index for cross-batch matching
   - Cross-shard edge tracking
   - Checkpoint/restore
-- [x] **UFClient** - `serve/union_find/client.py`
+- [x] **UFClient** - `_internal/serve/union_find/client.py`
   - Routes `batch_match_and_union()` by band_hash to correct shard
   - Routes `batch_find()` by doc_id to correct shard
-- [x] **UnionFindServiceManager** - `serve/union_find/manager.py`
+- [x] **UnionFindServiceManager** - `_internal/serve/union_find/manager.py`
   - Deploy/shutdown lifecycle
   - Cross-shard resolution
   - Cluster export
 
 ### Operators (2026-02-09)
 
-- [x] **MinHashEncoderOperator** - `operators/dedup/encoder.py`
+- [x] **MinHashEncoderOperator** - `_internal/operators/dedup/encoder.py`
   - xxhash64 (replaces SHA-256, ~50x faster)
   - numpy vectorized signature computation
   - No signature in output (only band_hash, ~25x less data)
-- [x] **BucketUnionOperator** - `operators/dedup/bucket_union.py`
+- [x] **BucketUnionOperator** - `_internal/operators/dedup/bucket_union.py`
   - Sends (band_hash, doc_id) to UFService
   - Stateless (no local matching)
-- [x] **DedupFilterOperator** - `operators/dedup/filter.py`
+- [x] **DedupFilterOperator** - `_internal/operators/dedup/filter.py`
   - Cluster table lookup or UFClient lookup mode
   - Keeps only representative documents
 
@@ -52,7 +52,7 @@ Track implementation status of the Union-Find Service dedup architecture.
 
 ### UFShard Checkpoint (2026-02-09)
 
-- [x] **Checkpoint via PayloadStore** - `serve/union_find/shard.py`, `manager.py`
+- [x] **Checkpoint via PayloadStore** - `_internal/serve/union_find/shard.py`, `_internal/serve/union_find/manager.py`
   - Shard receives PayloadStore handle at init, writes checkpoints directly
   - No data round-trip through manager (same pattern as StageWorker)
   - Auto-checkpoint every `checkpoint_interval` ops; auto-restore on startup
@@ -72,10 +72,10 @@ Track implementation status of the Union-Find Service dedup architecture.
   - Proper shuffle routing needed for general shuffle operators (GroupBy, Join, etc.)
   - Design TBD: should be a first-class concept in the queue/runner layer, not in StageWorker
 
-- [ ] **PayloadStore S3 backend**
-  - Required for large-scale checkpoint persistence
-  - Currently only Ray Object Store backend exists
-  - Need: streaming read/write for large payloads, TTL/cleanup
+- [ ] **PayloadStore S3 production hardening**
+  - `FsspecSplitPayloadStore` already supports `s3://` URIs
+  - Pending: large-payload throughput benchmark, recovery validation, TTL/cleanup policy
+  - Align with `todo/runtime-prod-hardening.md` durability/recovery items
 
 ### Medium Priority
 
@@ -119,12 +119,12 @@ The following components were removed in the Union-Find Service redesign:
 
 | Component | Old Location | Reason |
 |-----------|-------------|--------|
-| CandidatePairOperator | `operators/minhash/candidates.py` | O(n^2) pairwise comparison replaced by O(n) shard-side index |
-| CCInitOperator | `operators/connected_components.py` | CC label propagation replaced by Union-Find |
-| CCIterateOperator | `operators/connected_components.py` | Multi-round iteration replaced by one-pass Union-Find |
-| CCMessageOperator | `operators/connected_components.py` | No message generation needed |
-| DedupeByClusterOperator | `operators/connected_components.py` | Replaced by DedupFilterOperator |
-| CCIterateMaster | `operators/cc_master.py` | No iterative master needed |
+| CandidatePairOperator | legacy minhash candidates module (removed) | O(n^2) pairwise comparison replaced by O(n) shard-side index |
+| CCInitOperator | legacy connected-components module (removed) | CC label propagation replaced by Union-Find |
+| CCIterateOperator | legacy connected-components module (removed) | Multi-round iteration replaced by one-pass Union-Find |
+| CCMessageOperator | legacy connected-components module (removed) | No message generation needed |
+| DedupeByClusterOperator | legacy connected-components module (removed) | Replaced by DedupFilterOperator |
+| CCIterateMaster | legacy cc master module (removed) | No iterative master needed |
 | Old workflow (v1) | `workflows/minhash_dedup.py` | 7-stage pipeline replaced by 3-stage |
 
 See `todo/dedup-and-fault-tolerance-deprecated.md` for the old implementation status.

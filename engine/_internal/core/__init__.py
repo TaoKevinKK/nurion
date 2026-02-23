@@ -13,13 +13,16 @@ from _internal.core.source_operator import SourceOperator
 from _internal.core.sink_operator import SinkOperator
 from _internal.core.stage import Stage, StageRuntime
 from _internal.core.models import (
+    AnyQueueMessage,
+    DataQueueMessage,
     FailurePolicy,
     FailureTracker,
-    QueueEndpoint,
-    QueueMessage,
-    StageStatus,
     MessageType,
+    QueueEndpoint,
+    SourceQueueMessage,
+    StageStatus,
     make_split_id,
+    queue_message_from_bytes,
 )
 from _internal.core.stage_master import StageMaster
 from _internal.core.stage_worker import StageWorker, WorkerRuntime
@@ -45,9 +48,12 @@ __all__ = [
     "is_master_callable",
     # Queue
     "QueueEndpoint",
-    "QueueMessage",
+    "SourceQueueMessage",
+    "DataQueueMessage",
+    "AnyQueueMessage",
     "MessageType",
     "make_split_id",
+    "queue_message_from_bytes",
     # Status
     "StageStatus",
     # Failure handling

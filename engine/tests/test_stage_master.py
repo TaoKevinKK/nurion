@@ -20,15 +20,16 @@ Tests the new queue-based architecture with:
 - Queue broker/client integration
 """
 
+import asyncio
+
+import pyarrow as pa
 import pytest
 from dataclasses import dataclass
 from typing import List
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
-from _internal.core.stage_master import (
-    StageMaster,
-    QueueMessage,
-)
+from _internal.core.models import DataQueueMessage, QueueEndpoint, SplitPayload, queue_message_from_bytes
+from _internal.core.stage_master import StageMaster
 from _internal.core.operator import OperatorConfig, Operator, OperatorRuntime
 from _internal.core.stage import StageRuntime
 
@@ -154,16 +155,16 @@ def payload_store():
 
 
 # ============================================================================
-# QueueMessage Tests
+# DataQueueMessage Tests
 # ============================================================================
 
 
-class TestQueueMessage:
-    """Tests for QueueMessage serialization."""
+class TestDataQueueMessage:
+    """Tests for DataQueueMessage serialization."""
 
     def test_to_bytes_from_bytes(self):
         """Test message round-trip serialization."""
-        msg = QueueMessage(
+        msg = DataQueueMessage(
             message_id="msg_001",
             split_id="split_001",
             payload_key="abc123",
@@ -171,8 +172,9 @@ class TestQueueMessage:
         )
 
         data = msg.to_bytes()
-        restored = QueueMessage.from_bytes(data)
+        restored = queue_message_from_bytes(data)
 
+        assert isinstance(restored, DataQueueMessage)
         assert restored.message_id == msg.message_id
         assert restored.split_id == msg.split_id
         assert restored.payload_key == msg.payload_key
@@ -180,14 +182,14 @@ class TestQueueMessage:
 
     def test_empty_metadata(self):
         """Test message with empty metadata."""
-        msg = QueueMessage(
+        msg = DataQueueMessage(
             message_id="msg_001",
             split_id="split_001",
             payload_key="abc123",
         )
 
         data = msg.to_bytes()
-        restored = QueueMessage.from_bytes(data)
+        restored = queue_message_from_bytes(data)
 
         assert restored.metadata == {}
 
@@ -276,3 +278,216 @@ class TestStageMaster:
         assert isinstance(queue, WorkQueueQueueClient)
 
         await master.stop()
+
+
+# ============================================================================
+# Bug-regression: backpressure must not drop the current split (Bug #1)
+# ============================================================================
+
+
+class TestSourceManagerBackpressure:
+    """Regression tests for the backpressure-drops-split bug.
+
+    Previously, ``continue`` in the for-loop advanced the iterator to the next
+    split while the current one was silently discarded.  The fix uses an inner
+    ``while True`` loop that re-checks backpressure without advancing the
+    iterator.
+    """
+
+    @pytest.mark.asyncio
+    async def test_backpressure_does_not_drop_split(self, workqueue_backend):
+        """When backpressure fires, the paused split must still be produced."""
+        from _internal.core.managers.source_manager import SourceManager
+        from _internal.core.models import Split
+
+        NUM_SPLITS = 3
+
+        class _StubPlanner:
+            def plan_splits(self, stage_id):
+                for i in range(NUM_SPLITS):
+                    yield Split(split_id=f"s{i}", stage_id=stage_id, data_range={"idx": i})
+
+            def cleanup(self) -> None:
+                pass
+
+        # Returns True (pause) for the first 3 calls at idx=0, then False.
+        call_count = 0
+        running_flag = [True]
+
+        async def backpressure_fn():
+            nonlocal call_count
+            call_count += 1
+            return call_count <= 3
+
+        manager = SourceManager(_StubPlanner(), "job_bp", "stage_bp")
+        mock_worker_manager = MagicMock()
+        mock_worker_manager.notify_safe_to_exit = AsyncMock()
+
+        manager.start_split_production(
+            queue_client=workqueue_backend.client,
+            worker_manager=mock_worker_manager,
+            backpressure_fn=backpressure_fn,
+            running_fn=lambda: running_flag[0],
+        )
+
+        # _production_task completes once all splits are pushed + queue marked finished.
+        # _poll_queue_drained is a separate subtask and won't block this await.
+        await asyncio.wait_for(manager._production_task, timeout=5.0)
+
+        stats = workqueue_backend.client.get_stats(manager.planner_queue_name)
+        total_pushed = stats.get("pending_count", 0) + stats.get("claimed_count", 0)
+        assert total_pushed == NUM_SPLITS, (
+            f"Expected {NUM_SPLITS} splits after backpressure, got {total_pushed}. "
+            "A split was likely dropped by the old `continue` bug."
+        )
+
+        # Stop the floating _poll_queue_drained task.
+        running_flag[0] = False
+        await asyncio.sleep(0.15)
+        await manager.stop()
+
+
+# ============================================================================
+# Bug-regression: production task exception must surface in run-loop (Bug #2)
+# ============================================================================
+
+
+class TestSourceManagerProductionFailure:
+    """Regression tests for the production-task exception propagation bug.
+
+    Previously, a background task failure (e.g. schema mismatch inside
+    plan_splits) was only observable at stop()-time.  Now
+    raise_if_production_failed() re-raises immediately in the StageMaster
+    run-loop.
+    """
+
+    @pytest.mark.asyncio
+    async def test_raise_if_production_failed_re_raises_exception(self):
+        """raise_if_production_failed() re-raises a failed production task's exception."""
+        from _internal.core.managers.source_manager import SourceManager
+
+        class _StubPlanner:
+            def plan_splits(self, stage_id):
+                return iter([])
+
+        manager = SourceManager(_StubPlanner(), "job_fail", "stage_fail")
+
+        async def _fail():
+            raise ValueError("Schema mismatch detected")
+
+        task = asyncio.create_task(_fail())
+        try:
+            await task
+        except ValueError:
+            pass
+
+        manager._production_task = task
+
+        with pytest.raises(ValueError, match="Schema mismatch detected"):
+            manager.raise_if_production_failed()
+
+    @pytest.mark.asyncio
+    async def test_raise_if_production_failed_silent_while_running(self):
+        """raise_if_production_failed() does nothing while the task is still running."""
+        from _internal.core.managers.source_manager import SourceManager
+
+        class _StubPlanner:
+            def plan_splits(self, stage_id):
+                return iter([])
+
+        manager = SourceManager(_StubPlanner(), "job_run", "stage_run")
+
+        event = asyncio.Event()
+
+        async def _hang():
+            await event.wait()
+
+        task = asyncio.create_task(_hang())
+        manager._production_task = task
+
+        # Must not raise while task is in progress.
+        manager.raise_if_production_failed()
+
+        event.set()
+        await task
+
+    def test_raise_if_production_failed_silent_when_no_task(self):
+        """raise_if_production_failed() is a no-op when no task exists."""
+        from _internal.core.managers.source_manager import SourceManager
+
+        class _StubPlanner:
+            def plan_splits(self, stage_id):
+                return iter([])
+
+        manager = SourceManager(_StubPlanner(), "job_none", "stage_none")
+        assert manager._production_task is None
+        manager.raise_if_production_failed()  # must not raise
+
+
+# ============================================================================
+# Bug-regression: consumed input payloads must be deleted after ack (Bug #3)
+# ============================================================================
+
+
+class TestStageWorkerPayloadCleanup:
+    """Regression tests for the payload-store memory-leak bug.
+
+    Previously, StageWorker fetched input payloads but never deleted them,
+    causing unbounded growth in the payload store over long pipelines.
+    After a successful ack the worker must call payload_store.delete(key).
+    """
+
+    @pytest.mark.asyncio
+    async def test_payload_deleted_after_successful_ack(self, workqueue_backend):
+        """payload_store.delete(key) is called once per consumed payload after ack."""
+        from _internal.core.stage_worker import StageWorker, WorkerRuntime
+
+        # Access the underlying Python class directly to avoid Ray actor overhead.
+        WorkerClass = StageWorker.__ray_actor_class__
+
+        payload_key = "input_payload_abc"
+        mock_payload_store = MagicMock()
+        mock_payload_store.get.return_value = SplitPayload(
+            data=pa.table({"x": [1, 2, 3]}),
+            split_id="s1",
+        )
+        mock_payload_store.delete.return_value = True
+        mock_payload_store.store.return_value = payload_key
+
+        runtime = WorkerRuntime(
+            worker_id="w_cleanup",
+            job_id="job_cleanup",
+            stage_id="stage_cleanup",
+            broker_endpoint=QueueEndpoint(
+                host=workqueue_backend.host,
+                port=workqueue_backend.port,
+                storage_url="memory://",
+            ),
+            upstream_queue_name="cleanup_upstream",
+            output_queue_name=None,  # no downstream — ack-only path
+        )
+
+        worker = WorkerClass(runtime, MockStage(), mock_payload_store)
+        # Re-use the test backend's already-started client.
+        worker.queue_client = workqueue_backend.client
+
+        # Push a DataQueueMessage that references a payload.
+        workqueue_backend.client.create_queue("cleanup_upstream")
+        msg = DataQueueMessage(
+            message_id="msg_del_001",
+            split_id="s1",
+            payload_key=payload_key,
+            metadata={},
+        )
+        workqueue_backend.client.push("cleanup_upstream", msg.to_bytes())
+
+        records = workqueue_backend.client.claim(
+            "cleanup_upstream", batch_size=1, timeout_ms=1000
+        )
+        assert len(records) == 1, "Expected to claim 1 record"
+
+        await worker._process_and_ack(records)
+
+        # The input payload must have been fetched, then deleted.
+        mock_payload_store.get.assert_called_once_with(payload_key)
+        mock_payload_store.delete.assert_called_once_with(payload_key)

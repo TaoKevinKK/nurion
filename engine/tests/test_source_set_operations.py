@@ -827,3 +827,68 @@ class TestUnionPrepare:
             cfg.prepare(store)
             mock_a.assert_called_once_with(store)
             mock_b.assert_called_once_with(store)
+
+
+# =============================================================================
+# Bug-regression: DuckDB tables unregistered even when execute() raises (Bug #4)
+# =============================================================================
+
+
+class TestAntiJoinDuckDBCleanup:
+    """Regression test for the DuckDB register/unregister resource-leak bug.
+
+    Previously, ``conn.unregister()`` was only called on the happy path.  If
+    ``conn.execute()`` raised, the Arrow refs were never released.  The fix
+    wraps the execute call in ``try/finally``.
+    """
+
+    def test_unregister_called_on_execute_error(self):
+        """Both source_tbl and exclude_tbl are unregistered even when execute() raises."""
+        from unittest.mock import MagicMock
+        from _internal.operators.sources.anti_join import AntiJoinSourceOperator
+
+        table = pa.table({"id": [1, 2, 3]})
+        exclude_table = pa.table({"id": [1]})
+
+        # Build a minimal operator instance — bypass __init__ to avoid full setup.
+        op = AntiJoinSourceOperator.__new__(AntiJoinSourceOperator)
+
+        mock_conn = MagicMock()
+        mock_conn.execute.side_effect = RuntimeError("duckdb exploded")
+        op._duckdb_conn = mock_conn
+        op._join_keys = ["id"]
+
+        with pytest.raises(RuntimeError, match="duckdb exploded"):
+            op._apply_anti_join(table, exclude_table)
+
+        # Both tables must have been unregistered despite the error.
+        mock_conn.unregister.assert_any_call("source_tbl")
+        mock_conn.unregister.assert_any_call("exclude_tbl")
+        assert mock_conn.unregister.call_count == 2, (
+            "Expected exactly 2 unregister calls (source_tbl + exclude_tbl)"
+        )
+
+    def test_unregister_called_on_success(self):
+        """Both tables are unregistered on the normal (non-error) path too."""
+        from unittest.mock import MagicMock
+        from _internal.operators.sources.anti_join import AntiJoinSourceOperator
+
+        table = pa.table({"id": [1, 2, 3]})
+        exclude_table = pa.table({"id": [1]})
+
+        op = AntiJoinSourceOperator.__new__(AntiJoinSourceOperator)
+
+        mock_conn = MagicMock()
+        # Simulate a successful execute that returns an Arrow table.
+        mock_conn.execute.return_value.fetch_arrow_table.return_value = pa.table(
+            {"id": [2, 3]}
+        )
+        op._duckdb_conn = mock_conn
+        op._join_keys = ["id"]
+
+        result = op._apply_anti_join(table, exclude_table)
+
+        assert result is not None
+        mock_conn.unregister.assert_any_call("source_tbl")
+        mock_conn.unregister.assert_any_call("exclude_tbl")
+        assert mock_conn.unregister.call_count == 2

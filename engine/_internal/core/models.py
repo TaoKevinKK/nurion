@@ -18,7 +18,7 @@ This module contains shared data classes:
 - Split/SplitPayload: Data processing units
 - Record: Single record flowing through pipeline
 - FailurePolicy/FailureTracker: Worker fault tolerance
-- QueueMessage/MessageType: Inter-stage message format
+- SourceQueueMessage/DataQueueMessage/MessageType: Inter-stage message format
 - StageStatus: Stage runtime status
 - QueueEndpoint: Queue connection info
 """
@@ -105,7 +105,7 @@ class RawOutputBytes:
 
     Returned by sink operators that need to push raw data (e.g., fragment metadata)
     to a commit queue. StageWorker pushes these directly without going through
-    payload_store or QueueMessage wrapping.
+    payload_store or DataQueueMessage wrapping.
     """
 
     payloads: List[bytes]
@@ -400,28 +400,57 @@ class FailureTracker:
 class MessageType:
     """Message types for inter-stage communication."""
 
-    DATA = "data"  # Normal data message
+    SOURCE = "source"  # Source message: no payload, carries split routing metadata
+    DATA = "data"  # Transform output: references a SplitPayload in the store
     EOF = "eof"  # End-of-stream marker - no more messages after this
 
 
 @dataclass
-class QueueMessage:
-    """Message format for inter-stage communication.
+class SourceQueueMessage:
+    """Message pushed by SourceManager into the first-stage queue.
 
-    The actual data payload is stored in SplitPayloadStore,
-    only the reference key is passed through the queue.
-
-    Message types:
-    - DATA: Normal data message with payload
-    - EOF: End-of-stream marker, signals no more messages
+    Carries no payload — the worker will build the payload from storage
+    using ``data_range``.  ``payload_key`` is intentionally absent so that
+    ``isinstance`` checks replace fragile ``payload_key`` truthiness tests.
     """
 
     message_id: str
     split_id: str
-    payload_key: str  # Key to lookup SplitPayload in SplitPayloadStore
+    data_range: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
-    message_type: str = MessageType.DATA  # DATA or EOF
+    message_type: str = MessageType.SOURCE
+
+    def to_bytes(self) -> bytes:
+        return json.dumps(
+            {
+                "message_id": self.message_id,
+                "split_id": self.split_id,
+                "data_range": self.data_range,
+                "metadata": self.metadata,
+                "timestamp": self.timestamp,
+                "message_type": self.message_type,
+            }
+        ).encode()
+
+    def is_eof(self) -> bool:
+        return False
+
+
+@dataclass
+class DataQueueMessage:
+    """Message pushed by StageWorker between stages.
+
+    References a ``SplitPayload`` stored in ``SplitPayloadStore`` via
+    ``payload_key``.  Also used for the EOF sentinel (``message_type="eof"``).
+    """
+
+    message_id: str
+    split_id: str
+    payload_key: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    timestamp: float = field(default_factory=time.time)
+    message_type: str = MessageType.DATA
 
     def to_bytes(self) -> bytes:
         return json.dumps(
@@ -435,20 +464,12 @@ class QueueMessage:
             }
         ).encode()
 
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "QueueMessage":
-        d = json.loads(data.decode())
-        # Handle legacy messages without message_type
-        if "message_type" not in d:
-            d["message_type"] = MessageType.DATA
-        return cls(**d)
-
     def is_eof(self) -> bool:
         """Check if this is an end-of-stream marker."""
         return self.message_type == MessageType.EOF
 
     @classmethod
-    def create_eof(cls) -> "QueueMessage":
+    def create_eof(cls) -> "DataQueueMessage":
         """Create an EOF marker message."""
         return cls(
             message_id="eof",
@@ -457,6 +478,60 @@ class QueueMessage:
             message_type=MessageType.EOF,
             metadata={},
         )
+
+
+# Union type for type annotations that accept either message kind.
+AnyQueueMessage = Union[SourceQueueMessage, DataQueueMessage]
+
+def queue_message_from_bytes(data: bytes) -> AnyQueueMessage:
+    """Deserialize a queue message, dispatching to the correct concrete type.
+
+    Handles three wire formats:
+    - New ``SourceQueueMessage`` (``message_type="source"``)
+    - New ``DataQueueMessage`` (``message_type="data"`` or ``"eof"``)
+    - Legacy format (no ``message_type``): discriminated by empty ``payload_key``
+    """
+    d = json.loads(data.decode())
+    msg_type = d.get("message_type", "")
+
+    if msg_type == MessageType.SOURCE:
+        return SourceQueueMessage(
+            message_id=d["message_id"],
+            split_id=d["split_id"],
+            data_range=d.get("data_range", {}),
+            metadata=d.get("metadata", {}),
+            timestamp=d.get("timestamp", time.time()),
+        )
+
+    if msg_type in (MessageType.DATA, MessageType.EOF):
+        return DataQueueMessage(
+            message_id=d["message_id"],
+            split_id=d["split_id"],
+            payload_key=d.get("payload_key", ""),
+            metadata=d.get("metadata", {}),
+            timestamp=d.get("timestamp", time.time()),
+            message_type=msg_type,
+        )
+
+    # Legacy wire format: no message_type field.
+    # Source messages had payload_key="" and stored data_range in metadata.
+    meta = dict(d.get("metadata", {}))
+    if not d.get("payload_key"):
+        data_range = meta.pop("data_range", {})
+        return SourceQueueMessage(
+            message_id=d["message_id"],
+            split_id=d["split_id"],
+            data_range=data_range,
+            metadata=meta,
+            timestamp=d.get("timestamp", time.time()),
+        )
+    return DataQueueMessage(
+        message_id=d["message_id"],
+        split_id=d["split_id"],
+        payload_key=d["payload_key"],
+        metadata=meta,
+        timestamp=d.get("timestamp", time.time()),
+    )
 
 
 # =============================================================================

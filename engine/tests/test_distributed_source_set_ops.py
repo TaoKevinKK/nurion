@@ -86,8 +86,7 @@ class _MemSourceOperator(SourceOperator):
         start = split.data_range["start"]
         end = split.data_range["end"]
         rows = [
-            {"id": cfg.id_start + i, "value": f"v{cfg.id_start + i}"}
-            for i in range(start, end)
+            {"id": cfg.id_start + i, "value": f"v{cfg.id_start + i}"} for i in range(start, end)
         ]
         if not rows:
             return SplitPayload.empty(split_id=split.split_id)

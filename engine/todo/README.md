@@ -6,9 +6,11 @@ This directory tracks implementation status of features.
 
 ```
 todo/
-├── README.md           # This file
-├── webui.md           # WebUI feature tracking
-└── <feature>.md       # Other feature tracking files
+├── README.md                               # This file
+├── runtime-prod-hardening.md               # Runtime production hardening backlog
+├── dedup.md                                # Active dedup/union-find tracking
+├── webui.md                                # WebUI tracking
+└── dedup-and-fault-tolerance-deprecated.md # Archived historical TODO (deprecated)
 ```
 
 ## File Format Guidelines
@@ -64,5 +66,7 @@ Sync periodically. When implementation diverges from design:
 
 | File | Description | Last Updated |
 |------|-------------|--------------|
-| [webui.md](./webui.md) | WebUI feature tracking | 2025-01-07 |
-| [dedup-and-fault-tolerance.md](./dedup-and-fault-tolerance.md) | Dedup operators & checkpoint recovery | 2026-01-12 |
+| [runtime-prod-hardening.md](./runtime-prod-hardening.md) | Runtime production hardening backlog (1B+/1000+ scale) | 2026-02-23 |
+| [dedup.md](./dedup.md) | Dedup operators and Union-Find service tracking | 2026-02-23 |
+| [webui.md](./webui.md) | WebUI feature tracking | 2026-02-23 |
+| [dedup-and-fault-tolerance-deprecated.md](./dedup-and-fault-tolerance-deprecated.md) | Archived old CC/legacy fault-tolerance notes | 2026-02-23 (deprecated cleanup) |

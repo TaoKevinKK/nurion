@@ -114,9 +114,10 @@ class TestSparkSourceV2Integration:
             assert len(messages) > 0
 
             # Check message format (messages have .value attribute)
-            from _internal.core.stage_master import QueueMessage
+            from _internal.core.models import DataQueueMessage, queue_message_from_bytes
 
-            msg = QueueMessage.from_bytes(messages[0].value)
+            msg = queue_message_from_bytes(messages[0].value)
+            assert isinstance(msg, DataQueueMessage)
             assert msg.payload_key.startswith("_jvm_arrow:")
 
             # Verify payload_store can fetch data

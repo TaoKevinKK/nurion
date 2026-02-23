@@ -85,9 +85,7 @@ class AntiJoinSourceConfig(OperatorConfig):
 
     # Unique instance ID — prevents key collisions when multiple AntiJoinSourceConfigs
     # share the same SplitPayloadStore (e.g. two anti-join stages in one job).
-    _instance_id: str = field(
-        default_factory=lambda: uuid.uuid4().hex[:16], init=False, repr=False
-    )
+    _instance_id: str = field(default_factory=lambda: uuid.uuid4().hex[:16], init=False, repr=False)
     # Set by prepare(); not user-facing.
     _exclude_payload_key: Optional[str] = field(default=None, init=False, repr=False)
 
@@ -438,14 +436,15 @@ class AntiJoinSourceOperator(SourceOperator):
         conn = self._duckdb_conn
         conn.register("source_tbl", table)
         conn.register("exclude_tbl", exclude_table)
-
-        join_cond = " AND ".join(
-            f'source_tbl."{k}" = exclude_tbl."{k}"' for k in self._join_keys
-        )
-        sql = f"SELECT source_tbl.* FROM source_tbl ANTI JOIN exclude_tbl ON {join_cond}"
-        result = conn.execute(sql).fetch_arrow_table()
-        conn.unregister("source_tbl")
-        conn.unregister("exclude_tbl")
+        try:
+            join_cond = " AND ".join(
+                f'source_tbl."{k}" = exclude_tbl."{k}"' for k in self._join_keys
+            )
+            sql = f"SELECT source_tbl.* FROM source_tbl ANTI JOIN exclude_tbl ON {join_cond}"
+            result = conn.execute(sql).fetch_arrow_table()
+        finally:
+            conn.unregister("source_tbl")
+            conn.unregister("exclude_tbl")
         return result
 
 

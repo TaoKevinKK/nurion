@@ -36,7 +36,6 @@ from _internal.core.models import (
     FailurePolicy,
     FailureTracker,
     QueueEndpoint,
-    QueueMessage,
     StageStatus,
 )
 from _internal.core.split_payload_store import SplitPayloadStore
@@ -59,7 +58,6 @@ __all__ = [
     "StageMaster",
     "StageWorker",
     "QueueEndpoint",
-    "QueueMessage",
     "StageStatus",
     "FailurePolicy",
     "FailureTracker",
@@ -284,6 +282,11 @@ class StageMaster:
 
         try:
             while self._running and not self._finished:
+                # Fail fast if the background split-production task has crashed
+                # (e.g., schema mismatch detected inside plan_splits).
+                if self._source_manager:
+                    self._source_manager.raise_if_production_failed()
+
                 if self._worker_manager.worker_count == 0:
                     if self._has_unprocessed_messages():
                         self.logger.info(

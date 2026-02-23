@@ -32,7 +32,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from _internal.core.models import QueueMessage, Split
+from _internal.core.models import SourceQueueMessage, Split
 from _internal.core.source import DirectProduceContext, DirectProducer, SplitPlanner
 from _internal.testing.fault_injection import InjectedFaultError
 
@@ -134,13 +134,29 @@ class SourceManager:
             name=f"split_production_{self._stage_id}",
         )
 
+    def raise_if_production_failed(self) -> None:
+        """Re-raise the production task's exception if it has already failed.
+
+        Call this from the StageMaster run-loop so that source errors (e.g.,
+        schema-mismatch raised inside plan_splits) surface immediately instead
+        of hanging until stop() is awaited.
+        """
+        if (
+            self._production_task is not None
+            and self._production_task.done()
+            and not self._production_task.cancelled()
+        ):
+            exc = self._production_task.exception()
+            if exc is not None:
+                raise exc
+
     async def stop(self) -> None:
         """Cancel split production and clean up."""
         if self._production_task:
             self._production_task.cancel()
             try:
                 await self._production_task
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, Exception):
                 pass
             self._production_task = None
 
@@ -198,9 +214,15 @@ class SourceManager:
             if not running_fn():
                 break
 
+            # Wait out backpressure *without* advancing the iterator.
+            # The previous pattern used `continue` which advanced the for-loop
+            # to the next split, silently dropping the current one.
             if idx % backpressure_check_interval == 0:
-                should_pause = await backpressure_fn()
-                if should_pause:
+                while True:
+                    should_pause = await backpressure_fn()
+                    if not should_pause:
+                        consecutive_pauses = 0
+                        break
                     consecutive_pauses += 1
                     if consecutive_pauses >= 100:
                         self._logger.warning(
@@ -208,9 +230,11 @@ class SourceManager:
                             f"{consecutive_pauses} consecutive backpressure checks"
                         )
                     await asyncio.sleep(0.1)
-                    continue
-                else:
-                    consecutive_pauses = 0
+                    if not running_fn():
+                        break
+
+            if not running_fn():
+                break
 
             await self._produce_split_with_retry(queue_client, split, idx)
             idx += 1
@@ -281,14 +305,11 @@ class SourceManager:
         )
         async def _do_produce() -> None:
             assert self._planner_queue_name is not None
-            message = QueueMessage(
+            message = SourceQueueMessage(
                 message_id=f"{self._stage_id}_{idx}",
                 split_id=split.split_id,
-                payload_key="",
-                metadata={
-                    "source_stage": self._stage_id,
-                    "data_range": split.data_range,
-                },
+                data_range=split.data_range,
+                metadata={"source_stage": self._stage_id},
             )
             queue_client.push(self._planner_queue_name, message.to_bytes())
 
