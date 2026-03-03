@@ -18,4 +18,4 @@ Read `AGENTS.md` for full project context (architecture, patterns, conventions).
 - Don't over-engineer; only implement what's requested
 - Operators are config-driven and stateless (`OperatorConfig` + `OperatorRuntime`)
 - WorkQueue hot paths must be O(1) — never scan
-- Check `engine/design-docs/` before proposing architectural changes
+- Check `docs/design/` before proposing architectural changes

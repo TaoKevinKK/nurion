@@ -2,7 +2,7 @@
 
 > NOTE: This document references the former Tansu/Kafka queue model. The current
 > implementation uses the embedded WorkQueue backend. See
-> `design-docs/work-queue-redesign.md`.
+> `work-queue-redesign.md`.
 
 _Design document for optimized Spark-to-Nurion Runtime data pipeline_
 _Created: December 2025_

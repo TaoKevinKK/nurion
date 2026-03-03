@@ -139,7 +139,7 @@
 
 #### `sources/sparkv2.py`
 - **`SparkSourceV2Config`** / **`SparkSourceV2`** — Spark Source V2 with predicate pushdown
-- Design doc: `engine/design-docs/spark-source-v2.md`
+- Design doc: `docs/design/spark-source-v2.md`
 
 ### Sinks (`operators/sinks/`)
 

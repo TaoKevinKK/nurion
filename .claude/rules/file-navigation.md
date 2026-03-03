@@ -35,7 +35,7 @@
 | Add a DB model (control) | `control/control/models/` + alembic migration | |
 | Understand full module layout | `engine/_internal/INDEX.md` | Read this first |
 | Understand execution pipeline | `.claude/rules/architecture.md` | Diagrams + key invariants |
-| Find architecture decision | `engine/design-docs/*.md` | Before proposing changes |
+| Find architecture decision | `docs/design/*.md` | Before proposing changes |
 
 ---
 
@@ -143,18 +143,18 @@ Check before proposing architectural changes:
 
 | Topic | File |
 |---|---|
-| Checkpoint & recovery | `engine/design-docs/checkpoint-and-recovery.md` |
-| Worker auto-scaling | `engine/design-docs/dynamic-worker-scaling.md` |
-| GPU scheduling | `engine/design-docs/gpu-scheduling-and-routing.md` |
-| LLM inference | `engine/design-docs/llm-inference.md` |
-| Exactly-once semantics | `engine/design-docs/exactly-once-semantics.md` |
-| WorkQueue semantics | `engine/design-docs/workqueue-semantics.md` |
-| WorkQueue redesign | `engine/design-docs/work-queue-redesign.md` |
-| MinHash dedup | `engine/design-docs/minhash-dedup.md` |
-| Backpressure | `engine/design-docs/partition-backpressure-improvements.md` |
-| Multi-upstream join | `engine/design-docs/multi-upstream-join.md` |
-| WebUI v1 / v2 | `engine/design-docs/webui.md`, `webui-api-v2.md` |
-| Spark Source V2 | `engine/design-docs/spark-source-v2.md` |
+| Checkpoint & recovery | `docs/design/checkpoint-and-recovery.md` |
+| Worker auto-scaling | `docs/design/dynamic-worker-scaling.md` |
+| GPU scheduling | `docs/design/gpu-scheduling-and-routing.md` |
+| LLM inference | `docs/design/llm-inference.md` |
+| Exactly-once semantics | `docs/design/exactly-once-semantics.md` |
+| WorkQueue semantics | `docs/design/workqueue-semantics.md` |
+| WorkQueue redesign | `docs/design/work-queue-redesign.md` |
+| MinHash dedup | `docs/design/minhash-dedup.md` |
+| Backpressure | `docs/design/deprecated/partition-backpressure-improvements.md` |
+| Multi-upstream join | `docs/design/multi-upstream-join.md` |
+| WebUI v1 / v2 | `docs/design/webui.md`, `webui-api-v2.md` |
+| Spark Source V2 | `docs/design/spark-source-v2.md` |
 
 ---
 

@@ -228,3 +228,4 @@ lib/workqueue-rs/
 3. **Exactly-once semantics** — `ack_and_forward` is atomic (ack upstream + push downstream in one WriteBatch)
 4. **No partitions** — single queue per stage; workers compete via `claim()`
 5. **Operator config is immutable** — frozen after `__init__`; no `set_*()` methods
+6. **Core never imports operators** — `_internal/core/` must not reference specific operator types from `_internal/operators/`. Behavior differences are expressed through `OperatorConfig` hooks (`get_output_partition_count()`, `create_source()`, etc.)

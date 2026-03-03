@@ -880,9 +880,7 @@ class TestAntiJoinDuckDBCleanup:
 
         mock_conn = MagicMock()
         # Simulate a successful execute that returns an Arrow table.
-        mock_conn.execute.return_value.fetch_arrow_table.return_value = pa.table(
-            {"id": [2, 3]}
-        )
+        mock_conn.execute.return_value.fetch_arrow_table.return_value = pa.table({"id": [2, 3]})
         op._duckdb_conn = mock_conn
         op._join_keys = ["id"]
 

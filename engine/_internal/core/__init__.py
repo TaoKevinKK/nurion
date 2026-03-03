@@ -25,7 +25,7 @@ from _internal.core.models import (
     queue_message_from_bytes,
 )
 from _internal.core.stage_master import StageMaster
-from _internal.core.stage_worker import StageWorker, WorkerRuntime
+from _internal.core.stage_worker import OutputRouting, StageWorker, WorkerRuntime
 
 __all__ = [
     # Job
@@ -37,6 +37,7 @@ __all__ = [
     "StageMaster",
     "StageWorker",
     "WorkerRuntime",
+    "OutputRouting",
     # Operator
     "Operator",
     "OperatorConfig",

@@ -69,6 +69,12 @@ class ShuffleOperatorConfig(OperatorConfig):
     # Subclasses must set these
     operator_class: ClassVar[Type["ShuffleOperator"]]
 
+    def get_output_partition_count(self) -> int:
+        return self.num_partitions
+
+    def get_partition_column(self) -> str:
+        return ShuffleOperator.PARTITION_COLUMN
+
 
 class ShuffleOperator(Operator):
     """Base class for operators that shuffle data by partition key.
@@ -253,15 +259,3 @@ def split_by_partition(table: pa.Table) -> dict[int, pa.Table]:
         result[partition_id] = partition_table
 
     return result
-
-
-def is_shuffle_operator(config: OperatorConfig) -> bool:
-    """Check if an operator config is for a shuffle operator.
-
-    Args:
-        config: Operator configuration
-
-    Returns:
-        True if this is a shuffle operator
-    """
-    return isinstance(config, ShuffleOperatorConfig)

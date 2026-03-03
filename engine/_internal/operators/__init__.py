@@ -37,7 +37,6 @@ from _internal.operators.shuffle import (
     RepartitionOperator,
     RepartitionConfig,
     split_by_partition,
-    is_shuffle_operator,
 )
 from _internal.operators.dedupe import (
     HashDedupeOperator,
@@ -104,7 +103,6 @@ __all__ = [
     "RepartitionOperator",
     "RepartitionConfig",
     "split_by_partition",
-    "is_shuffle_operator",
     # Dedupe operators and configs
     "HashDedupeOperator",
     "HashDedupeConfig",

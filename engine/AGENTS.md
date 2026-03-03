@@ -41,8 +41,8 @@ StageMaster StageMaster StageMaster
 - `_internal/webui/` — Debug UI (see `_internal/webui/README.md`)
 - `nurion/` — Public API package (`nurion/__init__.py` for all exports)
 - `workflows/`, `examples/` — Example pipelines
-- `design-docs/` — Architecture decisions
-- `todo/` — Implementation tracking
+- `../docs/design/` — Architecture decisions
+- `../docs/todo/` — Implementation tracking
 
 ## Dev Commands
 

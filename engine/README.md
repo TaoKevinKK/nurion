@@ -80,8 +80,8 @@ Instead, it is focused on:
 
 - **engine/**: Nurion Runtime core streaming framework (Ray-based distributed processing)
 - **workflows/**: Example workflows
-- **design-docs/**: Architecture and design documents
-- **todo/**: Feature implementation tracking
+- **docs/design/**: Architecture and design documents (at repo root)
+- **docs/todo/**: Feature implementation tracking (at repo root)
 
 ### Shared Libraries (in `/lib`)
 
@@ -346,8 +346,8 @@ See `engine/webui/README.md` for details.
 
 - `README.md` - This file (overview and usage)
 - `PROJECT_OVERVIEW.md` - Extended project overview
-- `design-docs/` - Architecture and design documents
-- `todo/` - Feature implementation tracking
+- `../docs/design/` - Architecture and design documents
+- `../docs/todo/` - Feature implementation tracking
 - `engine/webui/README.md` - WebUI documentation
 
 ## Examples

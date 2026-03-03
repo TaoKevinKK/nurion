@@ -5,7 +5,7 @@
 **Status**: ✅ IMPLEMENTED
 **Author**: AI Assistant
 **Created**: 2026-02-09
-**Supersedes**: Connected Components label propagation design (see `todo/dedup-and-fault-tolerance-deprecated.md`)
+**Supersedes**: Connected Components label propagation design (see `../todo/dedup-and-fault-tolerance-deprecated.md`)
 
 ### Implementation Status
 

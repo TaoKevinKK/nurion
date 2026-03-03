@@ -55,8 +55,8 @@ engine/
 ├── workflows/               # Example workflows
 ├── examples/                # Example scripts
 ├── tests/                   # Test suite
-├── design-docs/             # Architecture documents
-└── todo/                    # Feature tracking
+├── design/                  # → moved to docs/design/
+└── todo/                    # → moved to docs/todo/
 
 # Shared libraries (in nurion/lib/)
 lib/
@@ -291,16 +291,16 @@ asyncio.run(main())
 
 - **`README.md`** - Quick start and overview
 - **`PROJECT_OVERVIEW.md`** - This file
-- **`design-docs/`** - Architecture decisions and designs
-- **`todo/`** - Implementation status tracking
+- **`../docs/design/`** - Architecture decisions and designs
+- **`../docs/todo/`** - Implementation status tracking
 - **`engine/webui/README.md`** - WebUI documentation
 
 ## Next Steps
 
 1. Read `README.md` for quick start
 2. Explore `examples/` for sample pipelines
-3. Check `design-docs/` for architecture details
-4. See `todo/` for implementation status
+3. Check `../docs/design/` for architecture details
+4. See `../docs/todo/` for implementation status
 
 ---
 

@@ -483,6 +483,7 @@ class DataQueueMessage:
 # Union type for type annotations that accept either message kind.
 AnyQueueMessage = Union[SourceQueueMessage, DataQueueMessage]
 
+
 def queue_message_from_bytes(data: bytes) -> AnyQueueMessage:
     """Deserialize a queue message, dispatching to the correct concrete type.
 

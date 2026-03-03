@@ -35,7 +35,7 @@ This document describes the **design intent** for checkpoint and recovery. The a
 - Resuming from last committed offset after crash
 - Multi-partition parallel consumption
 
-See `todo/dedup-and-fault-tolerance.md` for detailed tracking.
+See `../todo/dedup-and-fault-tolerance-deprecated.md` for detailed tracking.
 
 ---
 

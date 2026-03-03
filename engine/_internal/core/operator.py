@@ -232,6 +232,23 @@ class OperatorConfig(ABC):
         """
         return 1
 
+    def get_output_partition_count(self) -> int:
+        """Number of output partitions. 0 = no partitioning (default).
+
+        Override in shuffle/repartition configs to declare how many
+        partition queues the worker should route output to.
+        """
+        return 0
+
+    def get_partition_column(self) -> str:
+        """Column name used for partition routing.
+
+        Only meaningful when get_output_partition_count() > 0.
+        The worker splits output rows by this integer column and
+        routes each partition to its corresponding queue.
+        """
+        return "__partition"
+
     def get_source_schema(self) -> Optional[pa.Schema]:
         """Return the Arrow schema of data this source produces.
 

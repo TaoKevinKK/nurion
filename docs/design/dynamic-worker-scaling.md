@@ -1,7 +1,7 @@
 # Dynamic Worker Scaling Design
 
 > NOTE: The current implementation uses the embedded WorkQueue backend. See
-> `design-docs/work-queue-redesign.md`.
+> `work-queue-redesign.md`.
 
 _Design document for Nurion Engine auto-scaling feature_
 _Created: December 2025_
@@ -433,7 +433,7 @@ The simple design should be revisited if Solstice evolves to support:
 ## 11. References
 
 - [Checkpoint and Recovery Design](checkpoint-and-recovery.md)
-- [Architecture Overview](deprecated-design/architecture.md)
+- [Architecture Overview](deprecated/architecture.md)
 - [WorkQueue Redesign](work-queue-redesign.md)
 
 ---

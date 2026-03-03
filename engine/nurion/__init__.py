@@ -36,6 +36,12 @@ from _internal.operators.sources import (
     SparkSourceV2Config,
     UnionSourceConfig,
 )
+from _internal.operators.llm import (
+    EmbeddedLLMOperator,
+    EmbeddedLLMOperatorConfig,
+    ExternalLLMOperator,
+    ExternalLLMOperatorConfig,
+)
 from _internal.serve import ModelConfig, ModelServiceManager, create_manager
 from _internal.serve.client import ModelClient
 
@@ -68,6 +74,10 @@ __all__ = [
     "MapBatchesOperatorConfig",
     "FlatMapOperatorConfig",
     "FilterOperatorConfig",
+    "EmbeddedLLMOperator",
+    "EmbeddedLLMOperatorConfig",
+    "ExternalLLMOperator",
+    "ExternalLLMOperatorConfig",
     "ModelConfig",
     "ModelServiceManager",
     "create_manager",

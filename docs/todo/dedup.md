@@ -2,8 +2,8 @@
 
 Track implementation status of the Union-Find Service dedup architecture.
 
-> **Last Updated**: 2026-02-23 (doc cleanup: path fixes + stale item refresh)
-> **Design Doc**: `design-docs/minhash-dedup.md`
+> **Last Updated**: 2026-03-02
+> **Design Doc**: `../design/minhash-dedup.md`
 
 ---
 
@@ -58,7 +58,7 @@ Track implementation status of the Union-Find Service dedup architecture.
   - Auto-checkpoint every `checkpoint_interval` ops; auto-restore on startup
   - Three payloads per shard: `uf_ckpt:{cluster}:{shard}:{uf|band_index|cross_edges}`
   - Manager: `force_checkpoint()`, `clear_checkpoints` on shutdown
-  - See `design-docs/minhash-dedup.md` "Checkpoint and Fault Tolerance"
+  - See `../design/minhash-dedup.md` "Checkpoint and Fault Tolerance"
 
 ---
 
@@ -66,16 +66,16 @@ Track implementation status of the Union-Find Service dedup architecture.
 
 ### High Priority
 
-- [ ] **Shuffle partition routing**
+- [ ] **Shuffle partition routing** ← _tracked in `roadmap.md` §1.1_
   - `__target_partition` column produced by ShuffleOperator is not yet used for routing
   - Current dedup works without it (shard-side band_hash index handles cross-batch matching)
   - Proper shuffle routing needed for general shuffle operators (GroupBy, Join, etc.)
-  - Design TBD: should be a first-class concept in the queue/runner layer, not in StageWorker
+  - Implementation: wire `split_by_partition()` into `StageWorker._serialize_outputs()`, create per-partition queues in `ray_runner.py`
 
 - [ ] **PayloadStore S3 production hardening**
   - `FsspecSplitPayloadStore` already supports `s3://` URIs
   - Pending: large-payload throughput benchmark, recovery validation, TTL/cleanup policy
-  - Align with `todo/runtime-prod-hardening.md` durability/recovery items
+  - Align with `runtime-prod-hardening.md` durability/recovery items
 
 ### Medium Priority
 
@@ -127,4 +127,4 @@ The following components were removed in the Union-Find Service redesign:
 | CCIterateMaster | legacy cc master module (removed) | No iterative master needed |
 | Old workflow (v1) | `workflows/minhash_dedup.py` | 7-stage pipeline replaced by 3-stage |
 
-See `todo/dedup-and-fault-tolerance-deprecated.md` for the old implementation status.
+See `dedup-and-fault-tolerance-deprecated.md` for the old implementation status.

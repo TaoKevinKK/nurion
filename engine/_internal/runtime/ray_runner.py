@@ -241,6 +241,8 @@ class RayJobRunner:
             # Determine upstream queue name (None for source stages)
             upstream_queue_name: Optional[str] = None
 
+            upstream_partition_queue_names: Optional[tuple[str, ...]] = None
+
             if not is_source:
                 # Non-source stage: get upstream queue name
                 # TODO: Implement multi-upstream support (currently only uses first upstream)
@@ -256,10 +258,22 @@ class RayJobRunner:
                 if not upstream_master._running:
                     await upstream_master.start()
 
-                upstream_queue_name = upstream_master._output_queue_name
+                # Check if upstream is a shuffle stage with partition queues
+                partition_queues = upstream_master.get_partition_queue_names()
+                if partition_queues:
+                    # Downstream reads from upstream's partition queues
+                    upstream_partition_queue_names = partition_queues
+                    # Also set a regular upstream queue name for fallback/backpressure
+                    upstream_queue_name = upstream_master._output_queue_name
+                else:
+                    upstream_queue_name = upstream_master._output_queue_name
 
             # Build immutable StageRuntime with all info
-            runtime = self._build_stage_runtime(stage, upstream_queue_name)
+            runtime = self._build_stage_runtime(
+                stage,
+                upstream_queue_name,
+                upstream_partition_queue_names,
+            )
 
             # Create master using operator_config.master_class (or default StageMaster)
             master = self._create_master(stage, runtime)
@@ -310,17 +324,21 @@ class RayJobRunner:
         self,
         stage: "Stage",
         upstream_queue_name: Optional[str] = None,
+        upstream_partition_queue_names: Optional[tuple[str, ...]] = None,
     ) -> StageRuntime:
         """Build StageRuntime from job and runner configuration.
 
         Args:
             stage: The stage being configured
             upstream_queue_name: Queue name for upstream stage (None for source)
+            upstream_partition_queue_names: Partition queue names if upstream
+                is a shuffle stage (None for non-shuffle upstream)
         """
         return StageRuntime(
             broker_endpoint=self._broker_endpoint,
             upstream_queue_name=upstream_queue_name,
             claim_timeout_secs=self.job.config.claim_timeout_secs,
+            upstream_partition_queue_names=upstream_partition_queue_names,
         )
 
     def _stage_info(self, stage: "Stage") -> Dict[str, Any]:

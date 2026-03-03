@@ -28,7 +28,12 @@ from dataclasses import dataclass
 from typing import List
 from unittest.mock import AsyncMock, MagicMock
 
-from _internal.core.models import DataQueueMessage, QueueEndpoint, SplitPayload, queue_message_from_bytes
+from _internal.core.models import (
+    DataQueueMessage,
+    QueueEndpoint,
+    SplitPayload,
+    queue_message_from_bytes,
+)
 from _internal.core.stage_master import StageMaster
 from _internal.core.operator import OperatorConfig, Operator, OperatorRuntime
 from _internal.core.stage import StageRuntime
@@ -464,7 +469,7 @@ class TestStageWorkerPayloadCleanup:
                 storage_url="memory://",
             ),
             upstream_queue_name="cleanup_upstream",
-            output_queue_name=None,  # no downstream — ack-only path
+            # no downstream — ack-only path (default OutputRouting has queue_name=None)
         )
 
         worker = WorkerClass(runtime, MockStage(), mock_payload_store)
@@ -481,9 +486,7 @@ class TestStageWorkerPayloadCleanup:
         )
         workqueue_backend.client.push("cleanup_upstream", msg.to_bytes())
 
-        records = workqueue_backend.client.claim(
-            "cleanup_upstream", batch_size=1, timeout_ms=1000
-        )
+        records = workqueue_backend.client.claim("cleanup_upstream", batch_size=1, timeout_ms=1000)
         assert len(records) == 1, "Expected to claim 1 record"
 
         await worker._process_and_ack(records)

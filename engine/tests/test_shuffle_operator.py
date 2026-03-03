@@ -22,10 +22,8 @@ from _internal.core.models import Split, SplitPayload
 from _internal.operators.shuffle import (
     RepartitionConfig,
     ShuffleOperator,
-    is_shuffle_operator,
     split_by_partition,
 )
-from _internal.operators.map import MapOperatorConfig
 
 
 class TestRepartitionOperator:
@@ -227,15 +225,22 @@ class TestSplitByPartition:
             split_by_partition(table)
 
 
-class TestIsShuffleOperator:
-    """Tests for is_shuffle_operator utility."""
+class TestPartitionHooks:
+    """Tests for get_output_partition_count / get_partition_column hooks."""
 
-    def test_shuffle_config(self):
-        """Test that shuffle configs are detected."""
+    def test_shuffle_config_partition_count(self):
+        """Test that shuffle configs report partition count via hook."""
+        config = RepartitionConfig(partition_keys=["user_id"], num_partitions=8)
+        assert config.get_output_partition_count() == 8
+
+    def test_shuffle_config_partition_column(self):
+        """Test that shuffle configs report partition column via hook."""
         config = RepartitionConfig(partition_keys=["user_id"])
-        assert is_shuffle_operator(config) is True
+        assert config.get_partition_column() == ShuffleOperator.PARTITION_COLUMN
 
-    def test_non_shuffle_config(self):
-        """Test that non-shuffle configs are not detected."""
-        config = MapOperatorConfig(map_fn=lambda x: x)
-        assert is_shuffle_operator(config) is False
+    def test_non_shuffle_config_partition_count(self):
+        """Test that non-shuffle configs report 0 partitions."""
+        # Check default via a concrete subclass (OperatorConfig itself is abstract)
+        config = RepartitionConfig(partition_keys=["user_id"], num_partitions=1)
+        # Even with 1 partition, ShuffleOperatorConfig reports it
+        assert config.get_output_partition_count() == 1

@@ -18,9 +18,11 @@ nurion/
 │   ├── nurion/               # Public API package
 │   ├── _internal/            # Implementation (core, operators, runtime, serve, webui)
 │   ├── workflows/            # Example workflows
-│   ├── tests/                # Unit/integration tests
-│   ├── design-docs/          # Architecture decisions
-│   └── todo/                 # Feature tracking
+│   └── tests/                # Unit/integration tests
+├── docs/                     # Documentation
+│   ├── design/               # Architecture decision records
+│   ├── todo/                 # Feature tracking
+│   └── lessons/              # Post-mortems and learnings
 ├── control/                  # Orchestration service
 │   ├── control/              # FastAPI app (api/, models/, schemas/, services/)
 │   ├── alembic/              # Database migrations
@@ -58,6 +60,7 @@ Follow [Conventional Commits](https://conventionalcommits.org/): `feat:`, `fix:`
 3. **Don't worry about pre-1.0 compatibility**: Breaking changes are acceptable before 1.0
 4. **Don't skip types**: Add appropriate type annotations
 5. **Don't hardcode config**: Use config classes and environment variables
+6. **Don't import operator-layer types in core**: `_internal/core/` must never import from `_internal/operators/`. Use `OperatorConfig` hooks to let operators declare capabilities; core dispatches generically
 
 ## Preferred Patterns
 
@@ -68,8 +71,8 @@ Follow [Conventional Commits](https://conventionalcommits.org/): `feat:`, `fix:`
 
 ## Agent Working Tips
 
-1. **Design Docs**: Check `engine/design-docs/` for architecture decisions
-2. **TODO Tracking**: Check `engine/todo/` for implementation status
+1. **Design Docs**: Check `docs/design/` for architecture decisions
+2. **TODO Tracking**: Check `docs/todo/` for implementation status
 3. **Core Abstractions**: Start with `engine/_internal/core/` to understand the framework
 4. **Examples**: Reference `engine/workflows/` and `engine/examples/`
 
@@ -84,8 +87,8 @@ Each subproject has its own `AGENTS.md` with specific context:
 
 ## Resources
 
-- **Architecture Decisions**: `engine/design-docs/`
-- **Implementation Status**: `engine/todo/`
+- **Architecture Decisions**: `docs/design/`
+- **Implementation Status**: `docs/todo/`
 - **WebUI Guide**: `engine/_internal/webui/README.md`
 - **CI Pipeline**: `.github/workflows/ci.yml`
 

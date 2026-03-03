@@ -669,7 +669,7 @@ engine/
 │   └── __init__.py             # Public API re-exports
 │
 ├── workflows/                  # Example workflows
-├── design-docs/                # Architecture decision records
+├── design/                     # Architecture decision records (in docs/design/)
 └── tests/                      # Unit + integration tests
 ```
 
