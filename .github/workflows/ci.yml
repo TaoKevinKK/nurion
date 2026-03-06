@@ -208,6 +208,60 @@ jobs:
         cargo test --release
 
   # ============================================================================
+  # Rust code quality (clippy + rustfmt)
+  # ============================================================================
+
+  lint-workqueue-rs:
+    name: Workqueue-rs Lint
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Get changed files
+      id: changed-files
+      uses: tj-actions/changed-files@v45
+      with:
+        files: |
+          lib/workqueue-rs/**
+
+    - name: Skip if no workqueue-rs changes
+      if: steps.changed-files.outputs.any_changed == 'false' && github.event_name == 'pull_request'
+      run: echo "No workqueue-rs files changed, skipping..."
+
+    - name: Set up Rust
+      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy, rustfmt
+
+    - name: Install protoc
+      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
+      uses: arduino/setup-protoc@v3
+      with:
+        version: "25.x"
+
+    - name: Rust cache
+      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: "lib/workqueue-rs -> target"
+
+    - name: Check formatting
+      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
+      run: |
+        cd lib/workqueue-rs
+        cargo fmt -- --check
+
+    - name: Run clippy
+      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
+      run: |
+        cd lib/workqueue-rs
+        cargo clippy --lib --tests -- -W clippy::all -D warnings
+
+  # ============================================================================
   # Lint and code quality checks
   # ============================================================================
 

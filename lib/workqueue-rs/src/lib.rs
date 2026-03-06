@@ -28,6 +28,9 @@ mod state;
 mod storage;
 mod types;
 
+#[cfg(test)]
+mod dst;
+
 use server::WorkQueueBrokerInner;
 use storage::WorkQueueStorage;
 use types::WorkQueueConfig;
@@ -50,7 +53,10 @@ impl BrokerError {
     }
 
     fn __repr__(&self) -> String {
-        format!("BrokerError(kind='{}', message='{}')", self.kind, self.message)
+        format!(
+            "BrokerError(kind='{}', message='{}')",
+            self.kind, self.message
+        )
     }
 
     fn __str__(&self) -> String {
@@ -83,6 +89,7 @@ pub struct BrokerConfig {
 #[pymethods]
 impl BrokerConfig {
     #[new]
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (db_path, host="0.0.0.0".to_string(), port=0, claim_timeout_secs=60.0, recovery_interval_secs=10.0, max_queue_depth=0, acked_retention_secs=3600.0, gc_interval_secs=60.0))]
     fn new(
         db_path: String,
@@ -354,10 +361,7 @@ impl WorkQueueStorageReader {
     #[pyo3(signature = (db_path))]
     fn new(db_path: String) -> PyResult<Self> {
         let runtime = Runtime::new().map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Failed to create runtime: {}",
-                e
-            ))
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to create runtime: {}", e))
         })?;
         let storage = runtime
             .block_on(WorkQueueStorage::new(&db_path))
@@ -409,10 +413,7 @@ impl WorkQueueStorageReader {
             .runtime
             .block_on(self.storage.scan_acked(queue.as_deref()))
             .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Failed to scan acked: {}",
-                    e
-                ))
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to scan acked: {}", e))
             })?;
         let mut results = Vec::new();
         for (queue_name, ts_ns, msg_id) in entries {
@@ -457,10 +458,7 @@ impl WorkQueueStorageReader {
             .runtime
             .block_on(self.storage.scan_claimed(queue.as_deref()))
             .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Failed to scan claimed: {}",
-                    e
-                ))
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to scan claimed: {}", e))
             })?;
         let list = PyList::empty(py);
         let mut count = 0usize;
@@ -517,11 +515,10 @@ impl WorkQueueStorageReader {
     ) -> PyResult<PyObject> {
         let entries = self
             .runtime
-            .block_on(self.storage.state_scan_prefix(
-                &namespace,
-                prefix,
-                limit.unwrap_or(0),
-            ))
+            .block_on(
+                self.storage
+                    .state_scan_prefix(&namespace, prefix, limit.unwrap_or(0)),
+            )
             .map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(
                     "Failed to scan state for {}: {}",
@@ -544,10 +541,7 @@ impl WorkQueueStorageReader {
             .runtime
             .block_on(self.storage.list_queues())
             .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Failed to list queues: {}",
-                    e
-                ))
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to list queues: {}", e))
             })?;
         let list = PyList::empty(py);
         for queue in queues {
@@ -564,10 +558,7 @@ impl WorkQueueStorageReader {
 impl WorkQueueStorageReader {
     fn from_storage(db_path: String, storage: Arc<WorkQueueStorage>) -> PyResult<Self> {
         let runtime = Runtime::new().map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Failed to create runtime: {}",
-                e
-            ))
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to create runtime: {}", e))
         })?;
         Ok(Self {
             db_path,

@@ -43,6 +43,7 @@ pub struct WorkQueueBrokerInner {
 
 impl WorkQueueBrokerInner {
     /// Create a new broker instance
+    #[allow(dead_code)]
     pub async fn new(
         config: WorkQueueConfig,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {

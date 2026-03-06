@@ -41,5 +41,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 futures = "0.3"
 
+[dev-dependencies]
+rand = "0.9"
+
 [build-dependencies]
 tonic-build = "0.12"

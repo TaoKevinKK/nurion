@@ -18,9 +18,9 @@
 // - Claim locks: serialize concurrent claims per queue
 // - Queue registry: track known queues for stats
 
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
-use dashmap::DashMap;
 use tokio::sync::Mutex;
 
 use crate::types::now_secs;
@@ -70,6 +70,7 @@ impl WorkQueueState {
     }
 
     /// Check if queue exists in registry
+    #[allow(dead_code)]
     pub fn queue_exists(&self, queue: &str) -> bool {
         self.queues.contains_key(queue)
     }

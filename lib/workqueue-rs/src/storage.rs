@@ -27,7 +27,7 @@ use tokio::time::{sleep, Duration};
 
 use slatedb::{Db, DbRead, Error as SlateError, ErrorKind, IsolationLevel, WriteBatch};
 
-use crate::types::{now_nanos, ClaimedMessage, ClaimInfo, Message};
+use crate::types::{now_nanos, ClaimInfo, ClaimedMessage, Message};
 
 pub type StorageError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -38,7 +38,7 @@ fn is_txn_conflict(err: &SlateError) -> bool {
 }
 
 /// Queue metadata for O(1) operations
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct QueueMeta {
     pub claim_seq: u64,
     pub push_seq: u64,
@@ -51,18 +51,6 @@ pub struct QueueMeta {
     /// Total messages ever acked (lifetime counter)
     #[serde(default)]
     pub total_acked: u64,
-}
-
-impl Default for QueueMeta {
-    fn default() -> Self {
-        Self {
-            claim_seq: 0,
-            push_seq: 0,
-            claimed_count: 0,
-            total_pushed: 0,
-            total_acked: 0,
-        }
-    }
 }
 
 /// Options for ack operations
@@ -93,6 +81,7 @@ impl WorkQueueStorage {
     /// Close the storage gracefully.
     /// This should be called before dropping the storage to ensure all background
     /// tasks are properly shut down and avoid "channel closed" panics.
+    #[allow(dead_code)]
     pub async fn close(&self) -> Result<(), StorageError> {
         self.db.close().await?;
         Ok(())
@@ -134,7 +123,7 @@ impl WorkQueueStorage {
         reader: &R,
         queue: &str,
     ) -> Result<QueueMeta, StorageError> {
-        match reader.get(&Self::meta_key(queue)).await? {
+        match reader.get(Self::meta_key(queue)).await? {
             Some(data) => Ok(serde_json::from_slice(&data)?),
             None => Ok(QueueMeta::default()),
         }
@@ -160,7 +149,9 @@ impl WorkQueueStorage {
     pub async fn create_queue(&self, queue: &str) -> Result<(), StorageError> {
         let key = Self::meta_key(queue);
         if self.db.get(&key).await?.is_none() {
-            self.db.put(&key, &serde_json::to_vec(&QueueMeta::default())?).await?;
+            self.db
+                .put(&key, &serde_json::to_vec(&QueueMeta::default())?)
+                .await?;
             self.db.flush().await?;
         }
         Ok(())
@@ -169,22 +160,23 @@ impl WorkQueueStorage {
     // === Push Operations ===
 
     /// Push messages to queue (single or batch)
-    pub async fn push_messages(&self, queue: &str, messages: &[Message]) -> Result<(), StorageError> {
+    pub async fn push_messages(
+        &self,
+        queue: &str,
+        messages: &[Message],
+    ) -> Result<(), StorageError> {
         if messages.is_empty() {
             return Ok(());
         }
 
         for attempt in 0..MAX_TXN_RETRIES {
-            let txn = self
-                .db
-                .begin(IsolationLevel::SerializableSnapshot)
-                .await?;
+            let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
             let meta = Self::get_meta_from_reader(&txn, queue).await?;
 
             for (i, msg) in messages.iter().enumerate() {
                 let seq = meta.push_seq + i as u64;
-                txn.put(&Self::msg_key(queue, &msg.msg_id), &serde_json::to_vec(msg)?)?;
-                txn.put(&Self::pending_key(queue, seq), msg.msg_id.as_bytes())?;
+                txn.put(Self::msg_key(queue, &msg.msg_id), &serde_json::to_vec(msg)?)?;
+                txn.put(Self::pending_key(queue, seq), msg.msg_id.as_bytes())?;
             }
 
             let msg_count = messages.len() as u64;
@@ -193,7 +185,7 @@ impl WorkQueueStorage {
                 total_pushed: meta.total_pushed + msg_count,
                 ..meta
             };
-            txn.put(&Self::meta_key(queue), &serde_json::to_vec(&new_meta)?)?;
+            txn.put(Self::meta_key(queue), &serde_json::to_vec(&new_meta)?)?;
 
             match txn.commit().await {
                 Ok(()) => return Ok(()),
@@ -226,10 +218,7 @@ impl WorkQueueStorage {
         lease_id: &str,
     ) -> Result<Vec<ClaimedMessage>, StorageError> {
         for attempt in 0..MAX_TXN_RETRIES {
-            let txn = self
-                .db
-                .begin(IsolationLevel::SerializableSnapshot)
-                .await?;
+            let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
             let meta = Self::get_meta_from_reader(&txn, queue).await?;
 
             if meta.claim_seq >= meta.push_seq {
@@ -259,7 +248,7 @@ impl WorkQueueStorage {
                             lease_id.to_string(),
                         );
                         txn.put(
-                            &Self::claimed_key(queue, &msg_id),
+                            Self::claimed_key(queue, &msg_id),
                             &serde_json::to_vec(&claim_info)?,
                         )?;
 
@@ -281,7 +270,7 @@ impl WorkQueueStorage {
                 claimed_count: meta.claimed_count + claimed.len() as u64,
                 ..meta
             };
-            txn.put(&Self::meta_key(queue), &serde_json::to_vec(&new_meta)?)?;
+            txn.put(Self::meta_key(queue), &serde_json::to_vec(&new_meta)?)?;
 
             match txn.commit().await {
                 Ok(()) => return Ok(claimed),
@@ -307,7 +296,7 @@ impl WorkQueueStorage {
         msg_ids: &[String],
         opts: AckOptions<'_>,
     ) -> Result<(), StorageError> {
-        if msg_ids.is_empty() && opts.downstream_messages.map_or(true, |m| m.is_empty()) {
+        if msg_ids.is_empty() && opts.downstream_messages.is_none_or(|m| m.is_empty()) {
             return Ok(());
         }
 
@@ -331,10 +320,7 @@ impl WorkQueueStorage {
         let expected_worker_id = opts.worker_id.filter(|v| !v.is_empty());
 
         for attempt in 0..MAX_TXN_RETRIES {
-            let txn = self
-                .db
-                .begin(IsolationLevel::SerializableSnapshot)
-                .await?;
+            let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
 
             let now_ns = now_nanos();
             let ack_count = msg_ids.len() as u64;
@@ -342,8 +328,7 @@ impl WorkQueueStorage {
             // 1. Validate claims + move messages from claimed to acked + update upstream meta
             if !msg_ids.is_empty() {
                 for (msg_id, token) in msg_ids.iter().zip(claim_tokens.unwrap().iter()) {
-                    let claim_info =
-                        Self::get_claim_info_from_reader(&txn, queue, msg_id).await?;
+                    let claim_info = Self::get_claim_info_from_reader(&txn, queue, msg_id).await?;
                     if claim_info.claim_token != *token {
                         return Err(Box::new(SlateError::invalid(format!(
                             "claim_token mismatch for msg_id {}",
@@ -370,15 +355,18 @@ impl WorkQueueStorage {
 
                 let upstream_meta = Self::get_meta_from_reader(&txn, queue).await?;
                 for msg_id in msg_ids {
-                    txn.delete(&Self::claimed_key(queue, msg_id))?;
-                    txn.put(&Self::acked_key(queue, now_ns, msg_id), &[])?;
+                    txn.delete(Self::claimed_key(queue, msg_id))?;
+                    txn.put(Self::acked_key(queue, now_ns, msg_id), [])?;
                 }
                 let new_upstream_meta = QueueMeta {
                     claimed_count: upstream_meta.claimed_count.saturating_sub(ack_count),
                     total_acked: upstream_meta.total_acked + ack_count,
                     ..upstream_meta
                 };
-                txn.put(&Self::meta_key(queue), &serde_json::to_vec(&new_upstream_meta)?)?;
+                txn.put(
+                    Self::meta_key(queue),
+                    &serde_json::to_vec(&new_upstream_meta)?,
+                )?;
             }
 
             // 2. Push downstream messages if provided
@@ -393,11 +381,11 @@ impl WorkQueueStorage {
                     for (i, msg) in messages.iter().enumerate() {
                         let seq = downstream_meta.push_seq + i as u64;
                         txn.put(
-                            &Self::msg_key(downstream_queue, &msg.msg_id),
+                            Self::msg_key(downstream_queue, &msg.msg_id),
                             &serde_json::to_vec(msg)?,
                         )?;
                         txn.put(
-                            &Self::pending_key(downstream_queue, seq),
+                            Self::pending_key(downstream_queue, seq),
                             msg.msg_id.as_bytes(),
                         )?;
                     }
@@ -407,7 +395,10 @@ impl WorkQueueStorage {
                         total_pushed: downstream_meta.total_pushed + msg_count,
                         ..downstream_meta
                     };
-                    txn.put(&Self::meta_key(downstream_queue), &serde_json::to_vec(&new_meta)?)?;
+                    txn.put(
+                        Self::meta_key(downstream_queue),
+                        &serde_json::to_vec(&new_meta)?,
+                    )?;
                 }
             }
 
@@ -415,12 +406,12 @@ impl WorkQueueStorage {
             if let Some(namespace) = opts.state_namespace {
                 if let Some(puts) = opts.state_puts {
                     for (key, value) in puts {
-                        txn.put(&Self::state_key(namespace, key), value)?;
+                        txn.put(Self::state_key(namespace, key), value)?;
                     }
                 }
                 if let Some(deletes) = opts.state_deletes {
                     for key in deletes {
-                        txn.delete(&Self::state_key(namespace, key))?;
+                        txn.delete(Self::state_key(namespace, key))?;
                     }
                 }
             }
@@ -463,6 +454,7 @@ impl WorkQueueStorage {
     }
 
     /// Acknowledge with state updates
+    #[allow(clippy::too_many_arguments)]
     pub async fn ack_with_state(
         &self,
         queue: &str,
@@ -491,6 +483,7 @@ impl WorkQueueStorage {
     }
 
     /// Acknowledge upstream and push to downstream
+    #[allow(clippy::too_many_arguments)]
     pub async fn ack_and_forward(
         &self,
         upstream_queue: &str,
@@ -517,6 +510,7 @@ impl WorkQueueStorage {
     }
 
     /// Acknowledge upstream, push downstream, and update state
+    #[allow(clippy::too_many_arguments)]
     pub async fn ack_forward_with_state(
         &self,
         upstream_queue: &str,
@@ -571,6 +565,7 @@ impl WorkQueueStorage {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn nack_messages_with_state(
         &self,
         queue: &str,
@@ -605,6 +600,7 @@ impl WorkQueueStorage {
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn nack_messages_internal(
         &self,
         queue: &str,
@@ -634,15 +630,11 @@ impl WorkQueueStorage {
         let expected_lease_id = lease_id.filter(|v| !v.is_empty());
 
         for attempt in 0..MAX_TXN_RETRIES {
-            let txn = self
-                .db
-                .begin(IsolationLevel::SerializableSnapshot)
-                .await?;
+            let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
 
             if let Some(tokens) = claim_tokens {
                 for (msg_id, token) in msg_ids.iter().zip(tokens.iter()) {
-                    let claim_info =
-                        Self::get_claim_info_from_reader(&txn, queue, msg_id).await?;
+                    let claim_info = Self::get_claim_info_from_reader(&txn, queue, msg_id).await?;
                     if claim_info.claim_token != *token {
                         return Err(Box::new(SlateError::invalid(format!(
                             "claim_token mismatch for msg_id {}",
@@ -672,9 +664,9 @@ impl WorkQueueStorage {
             let nack_count = msg_ids.len() as u64;
 
             for (i, msg_id) in msg_ids.iter().enumerate() {
-                txn.delete(&Self::claimed_key(queue, msg_id))?;
+                txn.delete(Self::claimed_key(queue, msg_id))?;
                 txn.put(
-                    &Self::pending_key(queue, meta.push_seq + i as u64),
+                    Self::pending_key(queue, meta.push_seq + i as u64),
                     msg_id.as_bytes(),
                 )?;
             }
@@ -684,21 +676,21 @@ impl WorkQueueStorage {
                 claimed_count: meta.claimed_count.saturating_sub(nack_count),
                 ..meta
             };
-            txn.put(&Self::meta_key(queue), &serde_json::to_vec(&new_meta)?)?;
+            txn.put(Self::meta_key(queue), &serde_json::to_vec(&new_meta)?)?;
 
             let has_state_updates = state_namespace.is_some()
-                && (state_puts.map_or(false, |puts| !puts.is_empty())
-                    || state_deletes.map_or(false, |deletes| !deletes.is_empty()));
+                && (state_puts.is_some_and(|puts| !puts.is_empty())
+                    || state_deletes.is_some_and(|deletes| !deletes.is_empty()));
             if has_state_updates {
                 let namespace = state_namespace.unwrap();
                 if let Some(puts) = state_puts {
                     for (key, value) in puts {
-                        txn.put(&Self::state_key(namespace, key), value)?;
+                        txn.put(Self::state_key(namespace, key), value)?;
                     }
                 }
                 if let Some(deletes) = state_deletes {
                     for key in deletes {
-                        txn.delete(&Self::state_key(namespace, key))?;
+                        txn.delete(Self::state_key(namespace, key))?;
                     }
                 }
             }
@@ -721,7 +713,10 @@ impl WorkQueueStorage {
     // === Scan Operations ===
 
     /// Scan all claimed messages (optionally filtered by queue)
-    pub async fn scan_claimed(&self, queue: Option<&str>) -> Result<Vec<(String, String, ClaimInfo)>, StorageError> {
+    pub async fn scan_claimed(
+        &self,
+        queue: Option<&str>,
+    ) -> Result<Vec<(String, String, ClaimInfo)>, StorageError> {
         let prefix = match queue {
             Some(q) => format!("claimed:{}:", q).into_bytes(),
             None => b"claimed:".to_vec(),
@@ -745,7 +740,10 @@ impl WorkQueueStorage {
     }
 
     /// Scan all acked messages (optionally filtered by queue)
-    pub async fn scan_acked(&self, queue: Option<&str>) -> Result<Vec<(String, u64, String)>, StorageError> {
+    pub async fn scan_acked(
+        &self,
+        queue: Option<&str>,
+    ) -> Result<Vec<(String, u64, String)>, StorageError> {
         let prefix = match queue {
             Some(q) => format!("acked:{}:", q).into_bytes(),
             None => b"acked:".to_vec(),
@@ -785,7 +783,7 @@ impl WorkQueueStorage {
         let mut batch = WriteBatch::new();
         let mut deleted = 0;
 
-        batch.delete(&Self::meta_key(queue));
+        batch.delete(Self::meta_key(queue));
 
         // Delete pending entries and messages
         for seq in meta.claim_seq..meta.push_seq {
@@ -793,22 +791,22 @@ impl WorkQueueStorage {
             if let Some(msg_id_bytes) = self.db.get(&pending_key).await? {
                 let msg_id = String::from_utf8_lossy(&msg_id_bytes).to_string();
                 batch.delete(&pending_key);
-                batch.delete(&Self::msg_key(queue, &msg_id));
+                batch.delete(Self::msg_key(queue, &msg_id));
                 deleted += 1;
             }
         }
 
         // Delete claimed entries and messages
         for (_, msg_id, _) in &claimed {
-            batch.delete(&Self::claimed_key(queue, msg_id));
-            batch.delete(&Self::msg_key(queue, msg_id));
+            batch.delete(Self::claimed_key(queue, msg_id));
+            batch.delete(Self::msg_key(queue, msg_id));
             deleted += 1;
         }
 
         // Delete acked entries and messages
         for (_, ts, msg_id) in &acked {
-            batch.delete(&Self::acked_key(queue, *ts, msg_id));
-            batch.delete(&Self::msg_key(queue, msg_id));
+            batch.delete(Self::acked_key(queue, *ts, msg_id));
+            batch.delete(Self::msg_key(queue, msg_id));
             deleted += 1;
         }
 
@@ -830,8 +828,8 @@ impl WorkQueueStorage {
 
         for (queue, timestamp_ns, msg_id) in all_acked {
             if timestamp_ns < cutoff_ns {
-                batch.delete(&Self::acked_key(&queue, timestamp_ns, &msg_id));
-                batch.delete(&Self::msg_key(&queue, &msg_id));
+                batch.delete(Self::acked_key(&queue, timestamp_ns, &msg_id));
+                batch.delete(Self::msg_key(&queue, &msg_id));
                 deleted += 1;
             }
         }
@@ -937,10 +935,10 @@ impl WorkQueueStorage {
         let mut batch = WriteBatch::new();
 
         for (key, value) in puts {
-            batch.put(&Self::state_key(namespace, key), value);
+            batch.put(Self::state_key(namespace, key), value);
         }
         for key in deletes {
-            batch.delete(&Self::state_key(namespace, key));
+            batch.delete(Self::state_key(namespace, key));
         }
 
         self.db.write(batch).await?;
@@ -1000,7 +998,10 @@ impl WorkQueueStorage {
 
     /// Check if queue is finished AND drained (safe for worker to exit)
     /// Returns (finished, drained, pending_count, claimed_count)
-    pub async fn check_queue_completion(&self, queue: &str) -> Result<(bool, bool, u64, u64), StorageError> {
+    pub async fn check_queue_completion(
+        &self,
+        queue: &str,
+    ) -> Result<(bool, bool, u64, u64), StorageError> {
         let finished = self.is_queue_finished(queue).await?;
         let meta = self.get_meta(queue).await?;
 
@@ -1020,6 +1021,7 @@ impl WorkQueueStorage {
     }
 
     /// Clear the finished flag (for queue reuse/testing)
+    #[allow(dead_code)]
     pub async fn clear_queue_finished(&self, queue: &str) -> Result<(), StorageError> {
         self.db.delete(&Self::finished_key(queue)).await?;
         Ok(())
@@ -1027,11 +1029,10 @@ impl WorkQueueStorage {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)] // SIM_TIME_LOCK is intentionally held across awaits to serialize time-sensitive tests
 mod tests {
     use super::*;
-    use crate::types::now_secs;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::time::{sleep, Duration};
 
     static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -1039,7 +1040,9 @@ mod tests {
         let counter = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
         let temp_dir = std::env::temp_dir().join(format!("workqueue_test_{}", counter));
         let _ = std::fs::remove_dir_all(&temp_dir);
-        WorkQueueStorage::new(&format!("file://{}", temp_dir.display())).await.unwrap()
+        WorkQueueStorage::new(&format!("file://{}", temp_dir.display()))
+            .await
+            .unwrap()
     }
 
     fn split_claims(claimed: &[ClaimedMessage]) -> (Vec<String>, Vec<String>) {
@@ -1181,7 +1184,13 @@ mod tests {
         let (msg_ids, _claim_tokens) = split_claims(&claimed);
 
         let result = storage
-            .ack_messages(queue, &msg_ids, &[String::from("bad-token")], "worker-1", "lease-1")
+            .ack_messages(
+                queue,
+                &msg_ids,
+                &[String::from("bad-token")],
+                "worker-1",
+                "lease-1",
+            )
             .await;
         assert!(result.is_err());
     }
@@ -1236,16 +1245,17 @@ mod tests {
         storage.create_queue("downstream").await.unwrap();
 
         let upstream_msg = Message::new("upstream".to_string(), b"input".to_vec());
-        storage.push_message("upstream", &upstream_msg).await.unwrap();
+        storage
+            .push_message("upstream", &upstream_msg)
+            .await
+            .unwrap();
         let claimed = storage
             .claim_messages("upstream", 1, "worker-1", "lease-1")
             .await
             .unwrap();
 
-        let downstream_msgs: Vec<Message> = vec![Message::new(
-            "downstream".to_string(),
-            b"out".to_vec(),
-        )];
+        let downstream_msgs: Vec<Message> =
+            vec![Message::new("downstream".to_string(), b"out".to_vec())];
 
         let result = storage
             .ack_and_forward(
@@ -1292,6 +1302,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_ack_rejects_stale_token_after_reclaim() {
+        use crate::types::{advance_sim_time_secs, set_sim_time_nanos, SIM_TIME_LOCK};
+        let _guard = SIM_TIME_LOCK.lock().unwrap();
+        set_sim_time_nanos(1_900_000_000_000_000_000);
+
         let storage = create_temp_storage().await;
         let queue = "test-queue";
 
@@ -1306,11 +1320,9 @@ mod tests {
             .unwrap();
         let (msg_ids, claim_tokens) = split_claims(&claimed);
 
-        sleep(Duration::from_millis(5)).await;
-        let recovered = storage
-            .recover_expired_claims(0.0, None)
-            .await
-            .unwrap();
+        // Advance sim time so claim is expired
+        advance_sim_time_secs(1.0);
+        let recovered = storage.recover_expired_claims(0.0, None).await.unwrap();
         assert_eq!(recovered, 1);
 
         let claimed_again = storage
@@ -1323,10 +1335,16 @@ mod tests {
             .ack_messages(queue, &msg_ids, &claim_tokens, "worker-1", "lease-1")
             .await;
         assert!(result.is_err());
+
+        set_sim_time_nanos(0);
     }
 
     #[tokio::test]
     async fn test_recover_respects_active_leases() {
+        use crate::types::{advance_sim_time_secs, set_sim_time_nanos, SIM_TIME_LOCK};
+        let _guard = SIM_TIME_LOCK.lock().unwrap();
+        set_sim_time_nanos(2_100_000_000_000_000_000);
+
         let storage = create_temp_storage().await;
         let queue = "test-queue";
 
@@ -1339,9 +1357,11 @@ mod tests {
             .await
             .unwrap();
 
+        advance_sim_time_secs(1.0);
+
         let mut active = HashMap::new();
-        // Set last_seen slightly in the future to guarantee "active" for zero timeout.
-        active.insert("lease-1".to_string(), now_secs() + 10.0);
+        // Set last_seen to current sim time to guarantee "active" for zero timeout.
+        active.insert("lease-1".to_string(), crate::types::now_secs());
 
         let recovered = storage
             .recover_expired_claims(0.0, Some(&active))
@@ -1352,6 +1372,8 @@ mod tests {
         let still_claimed = storage.scan_claimed(Some(queue)).await.unwrap();
         assert_eq!(still_claimed.len(), 1);
         assert_eq!(still_claimed[0].1, claimed[0].message.msg_id);
+
+        set_sim_time_nanos(0);
     }
 
     #[tokio::test]
@@ -1378,7 +1400,10 @@ mod tests {
         storage.create_queue("downstream").await.unwrap();
 
         let upstream_msg = Message::new("upstream".to_string(), b"input".to_vec());
-        storage.push_message("upstream", &upstream_msg).await.unwrap();
+        storage
+            .push_message("upstream", &upstream_msg)
+            .await
+            .unwrap();
         let claimed = storage
             .claim_messages("upstream", 1, "worker-1", "lease-1")
             .await
@@ -1408,12 +1433,19 @@ mod tests {
         let meta = storage.get_meta("downstream").await.unwrap();
         assert_eq!(meta.push_seq, 2);
 
-        let downstream_claimed = storage.claim_messages("downstream", 2, "worker-2", "lease-2").await.unwrap();
+        let downstream_claimed = storage
+            .claim_messages("downstream", 2, "worker-2", "lease-2")
+            .await
+            .unwrap();
         assert_eq!(downstream_claimed.len(), 2);
     }
 
     #[tokio::test]
     async fn test_gc_acked_messages() {
+        use crate::types::{advance_sim_time_secs, set_sim_time_nanos, SIM_TIME_LOCK};
+        let _guard = SIM_TIME_LOCK.lock().unwrap();
+        set_sim_time_nanos(1_800_000_000_000_000_000);
+
         let storage = create_temp_storage().await;
         let queue = "test-queue";
 
@@ -1436,11 +1468,16 @@ mod tests {
         let acked = storage.scan_acked(Some(queue)).await.unwrap();
         assert_eq!(acked.len(), 5);
 
+        // Advance time so messages are older than retention=0
+        advance_sim_time_secs(1.0);
+
         let deleted = storage.gc_acked_messages(0).await.unwrap();
         assert_eq!(deleted, 5);
 
         let acked = storage.scan_acked(Some(queue)).await.unwrap();
         assert!(acked.is_empty());
+
+        set_sim_time_nanos(0);
     }
 
     #[tokio::test]
@@ -1461,7 +1498,10 @@ mod tests {
         assert_eq!(meta.claimed_count, 0);
         assert_eq!(meta.total_pushed, 5);
 
-        storage.claim_messages(queue, 3, "worker-1", "lease-1").await.unwrap();
+        storage
+            .claim_messages(queue, 3, "worker-1", "lease-1")
+            .await
+            .unwrap();
 
         let meta = storage.get_queue_stats(queue).await.unwrap();
         let pending = meta.push_seq.saturating_sub(meta.claim_seq);
@@ -1478,7 +1518,10 @@ mod tests {
         puts.insert("key1".to_string(), b"value1".to_vec());
         puts.insert("key2".to_string(), b"value2".to_vec());
 
-        storage.state_put_batch(namespace, &puts, &[]).await.unwrap();
+        storage
+            .state_put_batch(namespace, &puts, &[])
+            .await
+            .unwrap();
 
         let keys = vec!["key1".to_string(), "key2".to_string(), "key3".to_string()];
         let values = storage.state_get_batch(namespace, &keys).await.unwrap();
@@ -1520,7 +1563,10 @@ mod tests {
             .await
             .unwrap();
 
-        let values = storage.state_get_batch(namespace, &["seen_key".to_string()]).await.unwrap();
+        let values = storage
+            .state_get_batch(namespace, &["seen_key".to_string()])
+            .await
+            .unwrap();
         assert_eq!(values.get("seen_key"), Some(&b"1".to_vec()));
     }
 
@@ -1535,7 +1581,10 @@ mod tests {
             let msg = Message::new(queue.to_string(), format!("msg{}", i).into_bytes());
             storage.push_message(queue, &msg).await.unwrap();
         }
-        storage.claim_messages(queue, 2, "worker-1", "lease-1").await.unwrap();
+        storage
+            .claim_messages(queue, 2, "worker-1", "lease-1")
+            .await
+            .unwrap();
 
         let deleted = storage.delete_queue(queue).await.unwrap();
         assert!(deleted > 0);
@@ -1547,6 +1596,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_recover_expired_claims() {
+        use crate::types::{advance_sim_time_secs, set_sim_time_nanos, SIM_TIME_LOCK};
+        let _guard = SIM_TIME_LOCK.lock().unwrap();
+        set_sim_time_nanos(2_000_000_000_000_000_000);
+
         let storage = create_temp_storage().await;
         let queue = "test-queue";
 
@@ -1554,13 +1607,22 @@ mod tests {
 
         let msg = Message::new(queue.to_string(), b"hello".to_vec());
         storage.push_message(queue, &msg).await.unwrap();
-        storage.claim_messages(queue, 1, "worker-1", "lease-1").await.unwrap();
+        storage
+            .claim_messages(queue, 1, "worker-1", "lease-1")
+            .await
+            .unwrap();
 
+        advance_sim_time_secs(1.0);
         let recovered = storage.recover_expired_claims(0.0, None).await.unwrap();
         assert_eq!(recovered, 1);
 
-        let claimed = storage.claim_messages(queue, 1, "worker-2", "lease-2").await.unwrap();
+        let claimed = storage
+            .claim_messages(queue, 1, "worker-2", "lease-2")
+            .await
+            .unwrap();
         assert_eq!(claimed.len(), 1);
+
+        set_sim_time_nanos(0);
     }
 
     #[tokio::test]
@@ -1655,7 +1717,10 @@ mod tests {
         let meta = storage.get_queue_stats(queue).await.unwrap();
         assert_eq!(meta.claimed_count, 0, "All messages processed");
         assert_eq!(meta.total_pushed, 10);
-        assert_eq!(meta.total_acked, 10, "All 10 messages acked (including re-acked nacked ones)");
+        assert_eq!(
+            meta.total_acked, 10,
+            "All 10 messages acked (including re-acked nacked ones)"
+        );
     }
 
     #[tokio::test]
@@ -1692,8 +1757,8 @@ mod tests {
             storage
                 .ack_and_forward(
                     "upstream",
-                    &[msg.message.msg_id.clone()],
-                    &[msg.claim_token.clone()],
+                    std::slice::from_ref(&msg.message.msg_id),
+                    std::slice::from_ref(&msg.claim_token),
                     "worker-1",
                     "lease-1",
                     "downstream",
@@ -1705,18 +1770,29 @@ mod tests {
 
         // Verify upstream counters
         let upstream_meta = storage.get_queue_stats("upstream").await.unwrap();
-        assert_eq!(upstream_meta.claimed_count, 0, "All upstream claimed messages acked");
+        assert_eq!(
+            upstream_meta.claimed_count, 0,
+            "All upstream claimed messages acked"
+        );
         assert_eq!(upstream_meta.total_pushed, 5);
         assert_eq!(upstream_meta.total_acked, 5);
 
         // Verify downstream counters
         let downstream_meta = storage.get_queue_stats("downstream").await.unwrap();
-        assert_eq!(downstream_meta.claimed_count, 0, "No downstream messages claimed yet");
-        assert_eq!(downstream_meta.total_pushed, 10, "5 inputs * 2 outputs = 10");
+        assert_eq!(
+            downstream_meta.claimed_count, 0,
+            "No downstream messages claimed yet"
+        );
+        assert_eq!(
+            downstream_meta.total_pushed, 10,
+            "5 inputs * 2 outputs = 10"
+        );
         assert_eq!(downstream_meta.total_acked, 0);
 
         // Verify downstream pending
-        let downstream_pending = downstream_meta.push_seq.saturating_sub(downstream_meta.claim_seq);
+        let downstream_pending = downstream_meta
+            .push_seq
+            .saturating_sub(downstream_meta.claim_seq);
         assert_eq!(downstream_pending, 10);
     }
 }
