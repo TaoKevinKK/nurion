@@ -127,8 +127,8 @@ class SimpleAutoscaler:
             if not cfg:
                 raise RuntimeError(f"Missing queue config for stage {stage_id}")
 
-            input_stats = self._queue_stats_client.get_stats(cfg.input_queue_name)
-            output_stats = self._queue_stats_client.get_stats(cfg.output_queue_name)
+            input_stats = self._queue_stats_client.get_ref_stats(cfg.input)
+            output_stats = self._queue_stats_client.get_ref_stats(cfg.output)
 
             metrics[stage_id] = StageMetrics(
                 stage_id=stage_id,

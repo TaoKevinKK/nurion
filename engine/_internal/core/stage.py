@@ -28,6 +28,7 @@ from _internal.core.operator import OperatorConfig
 
 if TYPE_CHECKING:
     from _internal.core.models import QueueEndpoint
+    from _internal.runtime.queue_stats import QueueRef
 
 
 # =============================================================================
@@ -42,17 +43,19 @@ class StageRuntime:
     These are determined when the job starts and remain constant throughout
     the stage's lifecycle. Immutable (frozen) for distributed safety.
 
-    Attributes:
-        broker_endpoint: WorkQueue broker endpoint
-        upstream_queue_name: Upstream queue name (None for source stages)
-        upstream_partition_queue_names: If upstream is a shuffle stage, the
-            partition queue names to claim from (None for normal stages)
+    Upstream data:
+    - upstream: QueueRef identifying the upstream queue.
+      Source stages: QueueRef.queue(planner_queue_name) — set by StageMaster
+      after SplitPlanner creates its queue. None initially.
+      Non-source stages: QueueRef.group(group_name) — set by runner.
+    - upstream_num_partitions: partition count for round-robin assignment
+      (0 for source stages / non-shuffle).
     """
 
     broker_endpoint: Optional["QueueEndpoint"] = None
-    upstream_queue_name: Optional[str] = None
+    upstream: Optional["QueueRef"] = None
     claim_timeout_secs: float = 60.0
-    upstream_partition_queue_names: Optional[Tuple[str, ...]] = None
+    upstream_num_partitions: int = 0
 
 
 # =============================================================================

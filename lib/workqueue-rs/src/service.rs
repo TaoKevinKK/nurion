@@ -591,4 +591,351 @@ impl WorkQueue for WorkQueueService {
             }
         }
     }
+
+    // =========================================================================
+    // QueueGroup API
+    // =========================================================================
+
+    async fn create_queue_group(
+        &self,
+        request: Request<CreateQueueGroupRequest>,
+    ) -> Result<Response<CreateQueueGroupResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.group_name.is_empty() {
+            return Err(Status::invalid_argument("group_name is required"));
+        }
+        if req.num_partitions <= 0 {
+            return Err(Status::invalid_argument("num_partitions must be positive"));
+        }
+
+        // Check if already exists to set `created` flag
+        let existed = self
+            .storage
+            .get_group_meta(&req.group_name)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to check group: {}", e);
+                Status::internal("Storage error")
+            })?
+            .is_some();
+
+        match self
+            .storage
+            .create_queue_group(&req.group_name, req.num_partitions as u32)
+            .await
+        {
+            Ok(meta) => {
+                // Also create claim locks for each partition queue
+                for queue_name in &meta.partition_queues {
+                    self.state.get_or_create_queue(queue_name);
+                }
+                Ok(Response::new(CreateQueueGroupResponse {
+                    queue_names: meta.partition_queues,
+                    version: meta.version as i32,
+                    created: !existed,
+                }))
+            }
+            Err(e) => {
+                tracing::error!("Failed to create queue group: {}", e);
+                Err(Status::internal("Storage error"))
+            }
+        }
+    }
+
+    async fn ack_and_scatter(
+        &self,
+        request: Request<AckAndScatterRequest>,
+    ) -> Result<Response<AckAndScatterResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.group_name.is_empty() {
+            return Err(Status::invalid_argument("group_name is required"));
+        }
+        if !req.upstream_msg_ids.is_empty()
+            && req.upstream_claim_tokens.len() != req.upstream_msg_ids.len()
+        {
+            return Err(Status::invalid_argument(
+                "upstream_claim_tokens length must match upstream_msg_ids",
+            ));
+        }
+
+        // Validate partition IDs are non-negative
+        if req.partitions.iter().any(|pp| pp.partition_id < 0) {
+            return Err(Status::invalid_argument(
+                "partition_id must be non-negative",
+            ));
+        }
+
+        // Build partition payloads: Vec<(partition_id, Vec<Message>)>
+        let mut partition_msgs: Vec<(u32, Vec<Message>)> = Vec::new();
+        for pp in &req.partitions {
+            let messages: Vec<Message> = pp
+                .payloads
+                .iter()
+                .map(|payload| {
+                    let queue_name = format!("{}_p{}", req.group_name, pp.partition_id);
+                    Message::new(queue_name, payload.clone())
+                })
+                .collect();
+            partition_msgs.push((pp.partition_id as u32, messages));
+        }
+
+        let has_state = !req.state_namespace.is_empty()
+            && (!req.state_puts.is_empty() || !req.state_deletes.is_empty());
+
+        let state_puts_map: HashMap<String, Vec<u8>> = req.state_puts.into_iter().collect();
+
+        match self
+            .storage
+            .ack_and_scatter(
+                &req.upstream_queue,
+                &req.upstream_msg_ids,
+                &req.upstream_claim_tokens,
+                &req.worker_id,
+                &req.lease_id,
+                &req.group_name,
+                &partition_msgs,
+                if has_state {
+                    Some(req.state_namespace.as_str())
+                } else {
+                    None
+                },
+                if has_state {
+                    Some(&state_puts_map)
+                } else {
+                    None
+                },
+                if has_state {
+                    Some(&req.state_deletes)
+                } else {
+                    None
+                },
+            )
+            .await
+        {
+            Ok(new_msg_ids) => Ok(Response::new(AckAndScatterResponse {
+                success: true,
+                new_msg_ids,
+            })),
+            Err(e) => {
+                tracing::error!("Failed ack_and_scatter: {}", e);
+                Ok(Response::new(AckAndScatterResponse {
+                    success: false,
+                    new_msg_ids: vec![],
+                }))
+            }
+        }
+    }
+
+    async fn claim_from_group(
+        &self,
+        request: Request<ClaimFromGroupRequest>,
+    ) -> Result<Response<ClaimFromGroupResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.group_name.is_empty() {
+            return Err(Status::invalid_argument("group_name is required"));
+        }
+
+        let batch_size = if req.batch_size > 0 {
+            req.batch_size as usize
+        } else {
+            1
+        };
+
+        if req.assigned_partitions.iter().any(|&p| p < 0) {
+            return Err(Status::invalid_argument(
+                "assigned_partitions must be non-negative",
+            ));
+        }
+        if req.steal_pending_threshold < 0 {
+            return Err(Status::invalid_argument(
+                "steal_pending_threshold must be non-negative",
+            ));
+        }
+
+        let assigned: Vec<u32> = req.assigned_partitions.iter().map(|&p| p as u32).collect();
+
+        match self
+            .storage
+            .claim_from_group(
+                &req.group_name,
+                batch_size,
+                &req.worker_id,
+                &req.lease_id,
+                &assigned,
+                req.allow_steal,
+                req.steal_pending_threshold as u64,
+            )
+            .await
+        {
+            Ok((claimed, source_queue, source_partition)) => {
+                let proto_messages: Vec<proto::Message> = claimed
+                    .iter()
+                    .map(|c| Self::to_proto_message(&c.message))
+                    .collect();
+                let claim_tokens: Vec<String> =
+                    claimed.iter().map(|c| c.claim_token.clone()).collect();
+
+                Ok(Response::new(ClaimFromGroupResponse {
+                    messages: proto_messages,
+                    claim_tokens,
+                    source_queue,
+                    source_partition: source_partition as i32,
+                    has_more: false, // simplified; caller can check group stats
+                }))
+            }
+            Err(e) => {
+                tracing::error!("Failed claim_from_group: {}", e);
+                Err(Status::internal("Storage error"))
+            }
+        }
+    }
+
+    async fn is_group_finished(
+        &self,
+        request: Request<IsGroupFinishedRequest>,
+    ) -> Result<Response<IsGroupFinishedResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.group_name.is_empty() {
+            return Err(Status::invalid_argument("group_name is required"));
+        }
+
+        match self.storage.check_group_completion(&req.group_name).await {
+            Ok((all_finished, all_drained, partition_statuses)) => {
+                let partitions = partition_statuses
+                    .iter()
+                    .map(|(pid, pending, claimed, finished)| PartitionStatus {
+                        partition_id: *pid as i32,
+                        pending_count: *pending as i64,
+                        claimed_count: *claimed as i64,
+                        finished: *finished,
+                    })
+                    .collect();
+
+                Ok(Response::new(IsGroupFinishedResponse {
+                    all_finished,
+                    all_drained,
+                    safe_to_exit: all_finished && all_drained,
+                    partitions,
+                }))
+            }
+            Err(e) => {
+                tracing::error!("Failed is_group_finished: {}", e);
+                Err(Status::internal("Storage error"))
+            }
+        }
+    }
+
+    async fn get_group_stats(
+        &self,
+        request: Request<GetGroupStatsRequest>,
+    ) -> Result<Response<GetGroupStatsResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.group_name.is_empty() {
+            return Err(Status::invalid_argument("group_name is required"));
+        }
+
+        match self.storage.get_group_stats(&req.group_name).await {
+            Ok((group_meta, stats)) => {
+                let mut total_pending: i64 = 0;
+                let mut total_claimed: i64 = 0;
+                let mut max_pending: i64 = 0;
+                let mut pending_values: Vec<i64> = Vec::new();
+
+                let partitions: Vec<PartitionStats> = stats
+                    .iter()
+                    .map(|(pid, meta)| {
+                        let pending = meta.push_seq.saturating_sub(meta.claim_seq) as i64;
+                        let claimed = meta.claimed_count as i64;
+                        total_pending += pending;
+                        total_claimed += claimed;
+                        if pending > max_pending {
+                            max_pending = pending;
+                        }
+                        pending_values.push(pending);
+
+                        PartitionStats {
+                            partition_id: *pid as i32,
+                            pending_count: pending,
+                            claimed_count: claimed,
+                            total_pushed: meta.total_pushed as i64,
+                            total_acked: meta.total_acked as i64,
+                        }
+                    })
+                    .collect();
+
+                // Compute median and skew
+                pending_values.sort();
+                let median = if pending_values.is_empty() {
+                    0
+                } else {
+                    pending_values[pending_values.len() / 2]
+                };
+
+                let skew_ratio = if median > 0 {
+                    max_pending as f32 / median as f32
+                } else {
+                    0.0
+                };
+
+                // Hot partitions: pending > 5x median (and median > 0)
+                let hot_partitions: Vec<i32> = if median > 0 {
+                    stats
+                        .iter()
+                        .filter_map(|(pid, meta)| {
+                            let pending = meta.push_seq.saturating_sub(meta.claim_seq) as i64;
+                            if pending > median * 5 {
+                                Some(*pid as i32)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                } else {
+                    vec![]
+                };
+
+                Ok(Response::new(GetGroupStatsResponse {
+                    partitions,
+                    total_pending,
+                    total_claimed,
+                    max_partition_pending: max_pending,
+                    median_partition_pending: median,
+                    skew_ratio,
+                    hot_partitions,
+                    version: group_meta.version as i32,
+                }))
+            }
+            Err(e) => {
+                tracing::error!("Failed get_group_stats: {}", e);
+                Err(Status::internal("Storage error"))
+            }
+        }
+    }
+
+    async fn mark_group_finished(
+        &self,
+        request: Request<MarkGroupFinishedRequest>,
+    ) -> Result<Response<MarkGroupFinishedResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.group_name.is_empty() {
+            return Err(Status::invalid_argument("group_name is required"));
+        }
+
+        match self.storage.mark_group_finished(&req.group_name).await {
+            Ok(count) => Ok(Response::new(MarkGroupFinishedResponse {
+                success: true,
+                queues_marked: count as i32,
+            })),
+            Err(e) => {
+                tracing::error!("Failed mark_group_finished: {}", e);
+                Err(Status::internal("Storage error"))
+            }
+        }
+    }
 }

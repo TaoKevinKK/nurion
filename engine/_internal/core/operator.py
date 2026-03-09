@@ -223,7 +223,7 @@ class OperatorConfig(ABC):
         When > 1, StageWorker claims multiple messages, merges their
         SplitPayloads (Arrow table concatenation), and calls process_split()
         once with the merged data. All upstream messages are acked atomically
-        after processing via ack_and_forward.
+        after processing via ack_and_scatter.
 
         Override in configs that benefit from larger batches (e.g., Lance sink
         wants larger fragments rather than one per upstream message).
@@ -330,7 +330,7 @@ class Operator(ABC):
 
     State Management (WorkQueue model):
     - State operations go through WorkQueue Client
-    - Atomic ack + state update supported via ack_and_forward()
+    - Atomic ack + state update supported via ack_and_scatter()
     - No local SlateDB needed in operators
 
     Usage:

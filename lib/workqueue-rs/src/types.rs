@@ -161,6 +161,31 @@ pub struct ClaimedMessage {
     pub claim_token: String,
 }
 
+/// Queue group metadata (stored at group_meta:{group_name})
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueGroupMeta {
+    pub name: String,
+    pub num_partitions: u32,
+    pub version: u32,
+    pub partition_queues: Vec<String>,
+    pub created_at: f64,
+}
+
+impl QueueGroupMeta {
+    pub fn new(name: String, num_partitions: u32) -> Self {
+        let partition_queues = (0..num_partitions)
+            .map(|i| format!("{}_p{}", name, i))
+            .collect();
+        Self {
+            name,
+            num_partitions,
+            version: 0,
+            partition_queues,
+            created_at: now_secs(),
+        }
+    }
+}
+
 /// WorkQueue server configuration
 #[derive(Debug, Clone)]
 pub struct WorkQueueConfig {

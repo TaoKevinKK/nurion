@@ -2,7 +2,7 @@
 
 Track runtime hardening gaps for production workloads at scale.
 
-> **Last Updated**: 2026-03-02
+> **Last Updated**: 2026-03-06
 > **Scope**: `engine/_internal/core`, `engine/_internal/runtime`, `engine/_internal/queue`
 > **Strategic context**: See `roadmap.md` for business-value-driven prioritization.
 
@@ -22,10 +22,10 @@ Track runtime hardening gaps for production workloads at scale.
 
 ### High Priority — Unlocks User Scenarios
 
-- [ ] **Shuffle partition routing** ← _blocks dedup routing, groupby, join_
-  - `__target_partition` column produced by `ShuffleOperator` is ignored by `StageWorker`
-  - Wire `split_by_partition()` into output serialization; create per-partition queues in runner
-  - **Tracked in**: `dedup.md`, `roadmap.md` §1.1
+- [x] **Shuffle partition routing + QueueGroup** ✅ (PR #59 + QueueGroup, 2026-03-06)
+  - Shuffle routing + QueueGroup abstraction with exactly-once `ack_and_scatter`
+  - O(1) `claim_from_group` with work-stealing, single-RPC completion checking
+  - Phase 5 cleanup: removed legacy partition paths from engine
 
 - [ ] **Multi-upstream fan-in** ← _blocks complex DAGs, future RL pipelines_
   - `ray_runner.py:246` hardcodes `upstream_ids[0]`; multi-upstream silently uses first only
@@ -48,17 +48,18 @@ Track runtime hardening gaps for production workloads at scale.
   - Per-message event writes can explode state volume at very large scale
   - **Acceptance**: Sampling/aggregation modes for ack events; configurable retention
 
-- [ ] **Skew handling for shuffle-heavy workflows**
-  - Heavy keys hotspot single workers causing OOM/retry loops
-  - **Acceptance**: Hot-key detection + adaptive repartitioning
+- [x] **Skew handling: work-stealing** ✅ (2026-03-06)
+  - `ClaimFromGroup` with `allow_steal` + round-robin probe across unassigned partitions
+  - `GetGroupStats` with skew_ratio, hot_partition detection
+  - **Remaining**: Salted two-phase aggregation for GroupBy/Join (DAG layer, future)
+
+- [ ] **Fan-out atomicity across multiple downstream queues**
+  - Now solved for partition scatter via `ack_and_scatter`
+  - Remaining: non-partition multi-destination (e.g., broadcast to multiple stages)
 
 - [ ] **Streaming merge execution path**
   - Large in-memory materialization when `merge_upstream > 1` on wide tables
   - **Acceptance**: Chunked merge mode with bounded memory
-
-- [ ] **Fan-out atomicity across multiple downstream queues**
-  - `ack_and_forward` only guarantees atomicity for one downstream queue
-  - **Acceptance**: Multi-destination exactly-once, or explicit at-least-once + reconciliation
 
 ### Low Priority — Optimization
 

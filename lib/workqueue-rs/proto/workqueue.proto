@@ -60,6 +60,26 @@ service WorkQueue {
 
   // Check if queue is finished and drained (safe to exit)
   rpc IsQueueFinished(IsQueueFinishedRequest) returns (IsQueueFinishedResponse);
+
+  // === QueueGroup API (partitioned queues) ===
+
+  // Create a group of partition queues atomically
+  rpc CreateQueueGroup(CreateQueueGroupRequest) returns (CreateQueueGroupResponse);
+
+  // Atomic ack upstream + push to multiple partition queues
+  rpc AckAndScatter(AckAndScatterRequest) returns (AckAndScatterResponse);
+
+  // Claim from a partition group (broker picks partition)
+  rpc ClaimFromGroup(ClaimFromGroupRequest) returns (ClaimFromGroupResponse);
+
+  // Check if all queues in a group are finished and drained
+  rpc IsGroupFinished(IsGroupFinishedRequest) returns (IsGroupFinishedResponse);
+
+  // Get stats for all partitions in a group (with skew detection)
+  rpc GetGroupStats(GetGroupStatsRequest) returns (GetGroupStatsResponse);
+
+  // Mark all queues in a group as finished
+  rpc MarkGroupFinished(MarkGroupFinishedRequest) returns (MarkGroupFinishedResponse);
 }
 
 // ============================================================================
@@ -287,4 +307,120 @@ message IsQueueFinishedResponse {
   bool safe_to_exit = 3;           // True if finished && drained (worker can exit)
   int64 pending_count = 4;         // Current pending count
   int64 claimed_count = 5;         // Current claimed count
+}
+
+// ============================================================================
+// QueueGroup API Messages (Partitioned Queues)
+// ============================================================================
+
+message CreateQueueGroupRequest {
+  string group_name = 1;           // e.g., "job123_stage2"
+  int32 num_partitions = 2;        // Number of partition queues to create
+}
+
+message CreateQueueGroupResponse {
+  repeated string queue_names = 1; // Created queue names
+  int32 version = 2;               // Group version (0 on creation)
+  bool created = 3;                // true = new, false = already existed
+}
+
+message AckAndScatterRequest {
+  // Upstream ack
+  string upstream_queue = 1;
+  repeated string upstream_msg_ids = 2;
+  repeated string upstream_claim_tokens = 3;
+
+  // Downstream scatter to partition queues
+  string group_name = 4;
+  repeated PartitionPayload partitions = 5;
+
+  // Worker identity
+  string worker_id = 6;
+  string lease_id = 7;
+
+  // Atomic state updates
+  string state_namespace = 8;
+  map<string, bytes> state_puts = 9;
+  repeated string state_deletes = 10;
+}
+
+message PartitionPayload {
+  int32 partition_id = 1;          // Target partition index
+  repeated bytes payloads = 2;     // Messages for this partition
+}
+
+message AckAndScatterResponse {
+  bool success = 1;
+  repeated string new_msg_ids = 2; // All created downstream message IDs
+}
+
+message ClaimFromGroupRequest {
+  string group_name = 1;
+  string worker_id = 2;
+  string lease_id = 3;
+  int32 batch_size = 4;            // Max messages to claim
+  int32 timeout_ms = 5;
+  repeated int32 assigned_partitions = 6; // Partitions this worker is assigned
+
+  // Skew handling
+  bool allow_steal = 7;            // Allow claiming from unassigned partitions
+  int64 steal_pending_threshold = 8; // Only steal if pending > threshold
+}
+
+message ClaimFromGroupResponse {
+  repeated Message messages = 1;
+  repeated string claim_tokens = 2;
+  string source_queue = 3;         // Which partition queue the messages came from
+  int32 source_partition = 4;      // Partition ID
+  bool has_more = 5;
+}
+
+message IsGroupFinishedRequest {
+  string group_name = 1;
+}
+
+message IsGroupFinishedResponse {
+  bool all_finished = 1;           // All partition queues marked finished
+  bool all_drained = 2;            // All queues: pending==0 && claimed==0
+  bool safe_to_exit = 3;           // all_finished && all_drained
+  repeated PartitionStatus partitions = 4;
+}
+
+message PartitionStatus {
+  int32 partition_id = 1;
+  int64 pending_count = 2;
+  int64 claimed_count = 3;
+  bool finished = 4;
+}
+
+message GetGroupStatsRequest {
+  string group_name = 1;
+}
+
+message GetGroupStatsResponse {
+  repeated PartitionStats partitions = 1;
+  int64 total_pending = 2;
+  int64 total_claimed = 3;
+  int64 max_partition_pending = 4;
+  int64 median_partition_pending = 5;
+  float skew_ratio = 6;            // max / median (0 if median==0)
+  repeated int32 hot_partitions = 7; // Partitions with pending > 5x median
+  int32 version = 8;               // Group version
+}
+
+message PartitionStats {
+  int32 partition_id = 1;
+  int64 pending_count = 2;
+  int64 claimed_count = 3;
+  int64 total_pushed = 4;
+  int64 total_acked = 5;
+}
+
+message MarkGroupFinishedRequest {
+  string group_name = 1;
+}
+
+message MarkGroupFinishedResponse {
+  bool success = 1;
+  int32 queues_marked = 2;        // Number of queues marked finished
 }

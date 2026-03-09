@@ -133,7 +133,6 @@ async def _run_source_stage(
             port=workqueue_backend.port,
             storage_url="memory://",
         ),
-        upstream_queue_name=None,
     )
     master = StageMaster(
         job_id=f"test_job_{id(operator_config)}",
@@ -226,7 +225,6 @@ class TestUnionLanceIntegration:
                 port=workqueue_backend.port,
                 storage_url="memory://",
             ),
-            upstream_queue_name=None,
         )
         master = StageMaster(
             job_id="test_schema_mismatch",

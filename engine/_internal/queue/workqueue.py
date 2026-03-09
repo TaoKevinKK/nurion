@@ -372,6 +372,76 @@ class WorkQueueQueueClient:
     def get_pending_count(self, queue: str) -> int:
         return self.get_stats(queue).get("pending_count", 0)
 
+    # QueueGroup API
+    def get_group_stats(self, group_name: str) -> Dict:
+        """Get aggregate stats for all partitions in a group."""
+        client = self._check()
+        return client.get_group_stats(group_name)
+
+    def create_queue_group(self, group_name: str, num_partitions: int) -> Dict:
+        """Create a group of partition queues atomically."""
+        client = self._check()
+        return client.create_queue_group(group_name, num_partitions)
+
+    def ack_and_scatter(
+        self,
+        upstream_queue: str,
+        upstream_msg_ids: List[str],
+        upstream_claim_tokens: Optional[List[str]],
+        group_name: str,
+        partition_payloads: Dict[int, List[bytes]],
+        state_namespace: Optional[str] = None,
+        state_puts: Optional[Dict[str, bytes]] = None,
+        state_deletes: Optional[List[str]] = None,
+    ) -> List[str]:
+        """Atomically ack upstream + push to multiple partition queues."""
+        client = self._check()
+        return client.ack_and_scatter(
+            upstream_queue,
+            upstream_msg_ids,
+            upstream_claim_tokens,
+            group_name,
+            partition_payloads,
+            state_namespace=state_namespace,
+            state_puts=state_puts,
+            state_deletes=state_deletes,
+        )
+
+    def claim_from_group(
+        self,
+        group_name: str,
+        batch_size: int = 1,
+        timeout_ms: int = 5000,
+        assigned_partitions: Optional[List[int]] = None,
+        allow_steal: bool = False,
+        steal_pending_threshold: int = 0,
+    ) -> "tuple[List[WorkQueueRecord], str, int]":
+        """Claim from a partition group (broker picks partition)."""
+        client = self._check()
+        messages, source_queue, source_partition = client.claim_from_group(
+            group_name,
+            batch_size=batch_size,
+            timeout_ms=timeout_ms,
+            assigned_partitions=assigned_partitions,
+            allow_steal=allow_steal,
+            steal_pending_threshold=steal_pending_threshold,
+        )
+        return (
+            [WorkQueueRecord.from_message(m) for m in messages],
+            source_queue,
+            source_partition,
+        )
+
+    def is_group_finished(self, group_name: str) -> Dict:
+        """Check if all queues in a group are finished and drained."""
+        client = self._check()
+        return client.is_group_finished(group_name)
+
+    def mark_group_finished(self, group_name: str) -> Dict:
+        """Mark all queues in a group as finished."""
+        client = self._check()
+        return client.mark_group_finished(group_name)
+
     # Queue Completion API
     def mark_queue_finished(self, queue: str) -> bool:
         """Mark queue as finished (no more messages will be pushed)."""

@@ -214,7 +214,6 @@ class TestLancePipeline:
                 port=workqueue_backend.port,
                 storage_url="memory://",
             ),
-            upstream_queue_name=None,
         )
         master = StageMaster(
             job_id="test-lance-pipeline",
@@ -299,7 +298,6 @@ class TestLancePipeline:
                 port=workqueue_backend.port,
                 storage_url="memory://",
             ),
-            upstream_queue_name=None,
         )
         master = StageMaster(
             job_id="test-lance-s3-pipeline",

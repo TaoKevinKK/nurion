@@ -109,6 +109,36 @@ class WorkQueueStub(object):
                 request_serializer=workqueue__pb2.IsQueueFinishedRequest.SerializeToString,
                 response_deserializer=workqueue__pb2.IsQueueFinishedResponse.FromString,
                 _registered_method=True)
+        self.CreateQueueGroup = channel.unary_unary(
+                '/workqueue.WorkQueue/CreateQueueGroup',
+                request_serializer=workqueue__pb2.CreateQueueGroupRequest.SerializeToString,
+                response_deserializer=workqueue__pb2.CreateQueueGroupResponse.FromString,
+                _registered_method=True)
+        self.AckAndScatter = channel.unary_unary(
+                '/workqueue.WorkQueue/AckAndScatter',
+                request_serializer=workqueue__pb2.AckAndScatterRequest.SerializeToString,
+                response_deserializer=workqueue__pb2.AckAndScatterResponse.FromString,
+                _registered_method=True)
+        self.ClaimFromGroup = channel.unary_unary(
+                '/workqueue.WorkQueue/ClaimFromGroup',
+                request_serializer=workqueue__pb2.ClaimFromGroupRequest.SerializeToString,
+                response_deserializer=workqueue__pb2.ClaimFromGroupResponse.FromString,
+                _registered_method=True)
+        self.IsGroupFinished = channel.unary_unary(
+                '/workqueue.WorkQueue/IsGroupFinished',
+                request_serializer=workqueue__pb2.IsGroupFinishedRequest.SerializeToString,
+                response_deserializer=workqueue__pb2.IsGroupFinishedResponse.FromString,
+                _registered_method=True)
+        self.GetGroupStats = channel.unary_unary(
+                '/workqueue.WorkQueue/GetGroupStats',
+                request_serializer=workqueue__pb2.GetGroupStatsRequest.SerializeToString,
+                response_deserializer=workqueue__pb2.GetGroupStatsResponse.FromString,
+                _registered_method=True)
+        self.MarkGroupFinished = channel.unary_unary(
+                '/workqueue.WorkQueue/MarkGroupFinished',
+                request_serializer=workqueue__pb2.MarkGroupFinishedRequest.SerializeToString,
+                response_deserializer=workqueue__pb2.MarkGroupFinishedResponse.FromString,
+                _registered_method=True)
 
 
 class WorkQueueServicer(object):
@@ -227,6 +257,50 @@ class WorkQueueServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def CreateQueueGroup(self, request, context):
+        """=== QueueGroup API (partitioned queues) ===
+
+        Create a group of partition queues atomically
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def AckAndScatter(self, request, context):
+        """Atomic ack upstream + push to multiple partition queues
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ClaimFromGroup(self, request, context):
+        """Claim from a partition group (broker picks partition)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def IsGroupFinished(self, request, context):
+        """Check if all queues in a group are finished and drained
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetGroupStats(self, request, context):
+        """Get stats for all partitions in a group (with skew detection)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def MarkGroupFinished(self, request, context):
+        """Mark all queues in a group as finished
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_WorkQueueServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -299,6 +373,36 @@ def add_WorkQueueServicer_to_server(servicer, server):
                     servicer.IsQueueFinished,
                     request_deserializer=workqueue__pb2.IsQueueFinishedRequest.FromString,
                     response_serializer=workqueue__pb2.IsQueueFinishedResponse.SerializeToString,
+            ),
+            'CreateQueueGroup': grpc.unary_unary_rpc_method_handler(
+                    servicer.CreateQueueGroup,
+                    request_deserializer=workqueue__pb2.CreateQueueGroupRequest.FromString,
+                    response_serializer=workqueue__pb2.CreateQueueGroupResponse.SerializeToString,
+            ),
+            'AckAndScatter': grpc.unary_unary_rpc_method_handler(
+                    servicer.AckAndScatter,
+                    request_deserializer=workqueue__pb2.AckAndScatterRequest.FromString,
+                    response_serializer=workqueue__pb2.AckAndScatterResponse.SerializeToString,
+            ),
+            'ClaimFromGroup': grpc.unary_unary_rpc_method_handler(
+                    servicer.ClaimFromGroup,
+                    request_deserializer=workqueue__pb2.ClaimFromGroupRequest.FromString,
+                    response_serializer=workqueue__pb2.ClaimFromGroupResponse.SerializeToString,
+            ),
+            'IsGroupFinished': grpc.unary_unary_rpc_method_handler(
+                    servicer.IsGroupFinished,
+                    request_deserializer=workqueue__pb2.IsGroupFinishedRequest.FromString,
+                    response_serializer=workqueue__pb2.IsGroupFinishedResponse.SerializeToString,
+            ),
+            'GetGroupStats': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetGroupStats,
+                    request_deserializer=workqueue__pb2.GetGroupStatsRequest.FromString,
+                    response_serializer=workqueue__pb2.GetGroupStatsResponse.SerializeToString,
+            ),
+            'MarkGroupFinished': grpc.unary_unary_rpc_method_handler(
+                    servicer.MarkGroupFinished,
+                    request_deserializer=workqueue__pb2.MarkGroupFinishedRequest.FromString,
+                    response_serializer=workqueue__pb2.MarkGroupFinishedResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -684,6 +788,168 @@ class WorkQueue(object):
             '/workqueue.WorkQueue/IsQueueFinished',
             workqueue__pb2.IsQueueFinishedRequest.SerializeToString,
             workqueue__pb2.IsQueueFinishedResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CreateQueueGroup(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/workqueue.WorkQueue/CreateQueueGroup',
+            workqueue__pb2.CreateQueueGroupRequest.SerializeToString,
+            workqueue__pb2.CreateQueueGroupResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def AckAndScatter(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/workqueue.WorkQueue/AckAndScatter',
+            workqueue__pb2.AckAndScatterRequest.SerializeToString,
+            workqueue__pb2.AckAndScatterResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ClaimFromGroup(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/workqueue.WorkQueue/ClaimFromGroup',
+            workqueue__pb2.ClaimFromGroupRequest.SerializeToString,
+            workqueue__pb2.ClaimFromGroupResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def IsGroupFinished(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/workqueue.WorkQueue/IsGroupFinished',
+            workqueue__pb2.IsGroupFinishedRequest.SerializeToString,
+            workqueue__pb2.IsGroupFinishedResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetGroupStats(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/workqueue.WorkQueue/GetGroupStats',
+            workqueue__pb2.GetGroupStatsRequest.SerializeToString,
+            workqueue__pb2.GetGroupStatsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def MarkGroupFinished(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/workqueue.WorkQueue/MarkGroupFinished',
+            workqueue__pb2.MarkGroupFinishedRequest.SerializeToString,
+            workqueue__pb2.MarkGroupFinishedResponse.FromString,
             options,
             channel_credentials,
             insecure,

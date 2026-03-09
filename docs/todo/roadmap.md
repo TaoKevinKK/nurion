@@ -3,7 +3,7 @@
 Prioritized by **business value**, not technical elegance. Each item answers:
 "What user scenario does this unlock that we can't serve today?"
 
-> **Last Updated**: 2026-03-02
+> **Last Updated**: 2026-03-06
 > **Positioning**: Distributed data processing engine with first-class LLM inference.
 > **Competitive benchmark**: Ray Data, Spark.
 > **Future direction**: RL training loops, Agent evaluation pipelines.
@@ -24,14 +24,18 @@ Prioritized by **business value**, not technical elegance. Each item answers:
 > Unlock: general data processing, dedup routing, groupby, distributed join.
 > Without these, users hit walls that Ray Data / Spark handle trivially.
 
-### 1.1 Shuffle Partition Routing
+### 1.1 Shuffle Partition Routing + QueueGroup ✅
 
-- **Status**: Operator exists (`operators/shuffle.py`), routing NOT wired up
-- **Gap**: `StageWorker._serialize_outputs()` ignores `__target_partition` column; no per-partition queues
-- **Unlocks**: Dedup routing (MinHash `__target_partition`), GroupBy aggregation, distributed Join, any repartition
-- **Scope**: `stage_worker.py` (output serialization) + `ray_runner.py` (partition queue creation) + `stage.py` (StageRuntime)
-- **Design doc**: None needed — straightforward wiring of existing components
-- **Tracking**: `dedup.md` (shuffle partition routing)
+- **Status**: **Completed** (PR #59 + QueueGroup, 2026-03-06)
+- **Implemented**:
+  - Shuffle routing: `StageWorker._shuffle_output_and_ack()` routes by `__target_partition`
+  - QueueGroup: first-class partition group abstraction in workqueue-rs
+  - `AckAndScatter`: atomic ack upstream + push to N partition queues (exactly-once)
+  - `ClaimFromGroup`: O(1) broker-directed claim with round-robin + work-stealing
+  - `IsGroupFinished` / `MarkGroupFinished`: single-RPC completion checking
+  - Phase 5 cleanup: removed `partition_queue_names` from engine data structures, deleted legacy `_run_partition_claim_loop`, eliminated at-least-once fallback
+- **Unlocks**: Dedup routing, GroupBy aggregation, distributed Join, any repartition
+- **Design doc**: `../design/queue-group-and-skew-handling.md`
 
 ### 1.2 Multi-Upstream Fan-in
 

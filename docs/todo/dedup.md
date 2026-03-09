@@ -2,7 +2,7 @@
 
 Track implementation status of the Union-Find Service dedup architecture.
 
-> **Last Updated**: 2026-03-02
+> **Last Updated**: 2026-03-06
 > **Design Doc**: `../design/minhash-dedup.md`
 
 ---
@@ -66,11 +66,9 @@ Track implementation status of the Union-Find Service dedup architecture.
 
 ### High Priority
 
-- [ ] **Shuffle partition routing** ← _tracked in `roadmap.md` §1.1_
-  - `__target_partition` column produced by ShuffleOperator is not yet used for routing
-  - Current dedup works without it (shard-side band_hash index handles cross-batch matching)
-  - Proper shuffle routing needed for general shuffle operators (GroupBy, Join, etc.)
-  - Implementation: wire `split_by_partition()` into `StageWorker._serialize_outputs()`, create per-partition queues in `ray_runner.py`
+- [x] **Shuffle partition routing + QueueGroup** ✅ (PR #59 + QueueGroup, 2026-03-06)
+  - Partition routing with exactly-once `ack_and_scatter` via QueueGroup
+  - O(1) `claim_from_group` with work-stealing for dedup bucket routing
 
 - [ ] **PayloadStore S3 production hardening**
   - `FsspecSplitPayloadStore` already supports `s3://` URIs

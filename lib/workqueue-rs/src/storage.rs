@@ -27,7 +27,7 @@ use tokio::time::{sleep, Duration};
 
 use slatedb::{Db, DbRead, Error as SlateError, ErrorKind, IsolationLevel, WriteBatch};
 
-use crate::types::{now_nanos, ClaimInfo, ClaimedMessage, Message};
+use crate::types::{now_nanos, ClaimInfo, ClaimedMessage, Message, QueueGroupMeta};
 
 pub type StorageError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -69,13 +69,18 @@ pub struct AckOptions<'a> {
 /// WorkQueue storage backed by SlateDB
 pub struct WorkQueueStorage {
     db: Db,
+    /// Per-group round-robin counters for O(1) steal path in claim_from_group
+    steal_rr: std::sync::Mutex<HashMap<String, u64>>,
 }
 
 impl WorkQueueStorage {
     pub async fn new(db_path: &str) -> Result<Self, StorageError> {
         let object_store = Db::resolve_object_store(db_path)?;
         let db = Db::open("/", object_store).await?;
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            steal_rr: std::sync::Mutex::new(HashMap::new()),
+        })
     }
 
     /// Close the storage gracefully.
@@ -115,6 +120,10 @@ impl WorkQueueStorage {
 
     fn finished_key(queue: &str) -> Vec<u8> {
         format!("finished:{}", queue).into_bytes()
+    }
+
+    fn group_meta_key(group_name: &str) -> Vec<u8> {
+        format!("group_meta:{}", group_name).into_bytes()
     }
 
     // === Queue Metadata ===
@@ -1026,6 +1035,400 @@ impl WorkQueueStorage {
         self.db.delete(&Self::finished_key(queue)).await?;
         Ok(())
     }
+
+    // =========================================================================
+    // QueueGroup Operations
+    // =========================================================================
+
+    /// Get group metadata. Returns None if group doesn't exist.
+    pub async fn get_group_meta(
+        &self,
+        group_name: &str,
+    ) -> Result<Option<QueueGroupMeta>, StorageError> {
+        match self.db.get(&Self::group_meta_key(group_name)).await? {
+            Some(data) => Ok(Some(serde_json::from_slice(&data)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Create a queue group with N partition queues atomically.
+    /// Idempotent: returns existing group if it already exists.
+    pub async fn create_queue_group(
+        &self,
+        group_name: &str,
+        num_partitions: u32,
+    ) -> Result<QueueGroupMeta, StorageError> {
+        // Check for existing group
+        if let Some(existing) = self.get_group_meta(group_name).await? {
+            return Ok(existing);
+        }
+
+        let meta = QueueGroupMeta::new(group_name.to_string(), num_partitions);
+
+        // Create group_meta + all partition queue metas in one WriteBatch
+        let mut batch = WriteBatch::new();
+        batch.put(
+            Self::group_meta_key(group_name),
+            &serde_json::to_vec(&meta)?,
+        );
+        for queue_name in &meta.partition_queues {
+            let queue_meta = QueueMeta::default();
+            batch.put(
+                Self::meta_key(queue_name),
+                &serde_json::to_vec(&queue_meta)?,
+            );
+        }
+        self.db.write(batch).await?;
+
+        tracing::info!(
+            "Created queue group '{}' with {} partitions",
+            group_name,
+            num_partitions
+        );
+        Ok(meta)
+    }
+
+    /// Atomic ack upstream + push to multiple downstream partition queues.
+    ///
+    /// All operations happen in a single SlateDB transaction:
+    /// 1. Validate and ack upstream messages
+    /// 2. Push payloads to each partition's queue
+    /// 3. Update state
+    ///
+    /// `partition_payloads`: Vec of (partition_index, messages) pairs.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn ack_and_scatter(
+        &self,
+        upstream_queue: &str,
+        upstream_msg_ids: &[String],
+        upstream_claim_tokens: &[String],
+        worker_id: &str,
+        lease_id: &str,
+        group_name: &str,
+        partition_payloads: &[(u32, Vec<Message>)],
+        state_namespace: Option<&str>,
+        state_puts: Option<&HashMap<String, Vec<u8>>>,
+        state_deletes: Option<&[String]>,
+    ) -> Result<Vec<String>, StorageError> {
+        // Resolve group
+        let group = self
+            .get_group_meta(group_name)
+            .await?
+            .ok_or_else(|| SlateError::invalid(format!("Queue group not found: {}", group_name)))?;
+
+        // Validate partition indices
+        for (pid, _) in partition_payloads {
+            if *pid >= group.num_partitions {
+                return Err(Box::new(SlateError::invalid(format!(
+                    "Partition {} out of range [0, {})",
+                    pid, group.num_partitions
+                ))));
+            }
+        }
+
+        let expected_lease_id = if lease_id.is_empty() {
+            None
+        } else {
+            Some(lease_id)
+        };
+        let expected_worker_id = if worker_id.is_empty() {
+            None
+        } else {
+            Some(worker_id)
+        };
+
+        for attempt in 0..MAX_TXN_RETRIES {
+            let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+
+            let now_ns = now_nanos();
+            let ack_count = upstream_msg_ids.len() as u64;
+            let mut all_new_msg_ids = Vec::new();
+
+            // 1. Validate claims and ack upstream
+            if !upstream_msg_ids.is_empty() {
+                if upstream_claim_tokens.len() != upstream_msg_ids.len() {
+                    return Err(Box::new(SlateError::invalid(
+                        "claim_tokens length must match msg_ids".to_string(),
+                    )));
+                }
+
+                for (msg_id, token) in upstream_msg_ids.iter().zip(upstream_claim_tokens.iter()) {
+                    let claim_info =
+                        Self::get_claim_info_from_reader(&txn, upstream_queue, msg_id).await?;
+                    if claim_info.claim_token != *token {
+                        return Err(Box::new(SlateError::invalid(format!(
+                            "claim_token mismatch for msg_id {}",
+                            msg_id
+                        ))));
+                    }
+                    if let Some(expected) = expected_lease_id {
+                        if claim_info.lease_id != expected {
+                            return Err(Box::new(SlateError::invalid(format!(
+                                "lease_id mismatch for msg_id {}",
+                                msg_id
+                            ))));
+                        }
+                    }
+                    if let Some(expected) = expected_worker_id {
+                        if claim_info.worker_id != expected {
+                            return Err(Box::new(SlateError::invalid(format!(
+                                "worker_id mismatch for msg_id {}",
+                                msg_id
+                            ))));
+                        }
+                    }
+                }
+
+                let upstream_meta = Self::get_meta_from_reader(&txn, upstream_queue).await?;
+                for msg_id in upstream_msg_ids {
+                    txn.delete(Self::claimed_key(upstream_queue, msg_id))?;
+                    txn.put(Self::acked_key(upstream_queue, now_ns, msg_id), [])?;
+                }
+                let new_upstream_meta = QueueMeta {
+                    claimed_count: upstream_meta.claimed_count.saturating_sub(ack_count),
+                    total_acked: upstream_meta.total_acked + ack_count,
+                    ..upstream_meta
+                };
+                txn.put(
+                    Self::meta_key(upstream_queue),
+                    &serde_json::to_vec(&new_upstream_meta)?,
+                )?;
+            }
+
+            // 2. Push to each partition queue
+            for (pid, messages) in partition_payloads {
+                if messages.is_empty() {
+                    continue;
+                }
+                let partition_queue = &group.partition_queues[*pid as usize];
+                let partition_meta = Self::get_meta_from_reader(&txn, partition_queue).await?;
+                let msg_count = messages.len() as u64;
+
+                for (i, msg) in messages.iter().enumerate() {
+                    let seq = partition_meta.push_seq + i as u64;
+                    txn.put(
+                        Self::msg_key(partition_queue, &msg.msg_id),
+                        &serde_json::to_vec(msg)?,
+                    )?;
+                    txn.put(
+                        Self::pending_key(partition_queue, seq),
+                        msg.msg_id.as_bytes(),
+                    )?;
+                    all_new_msg_ids.push(msg.msg_id.clone());
+                }
+
+                let new_partition_meta = QueueMeta {
+                    push_seq: partition_meta.push_seq + msg_count,
+                    total_pushed: partition_meta.total_pushed + msg_count,
+                    ..partition_meta
+                };
+                txn.put(
+                    Self::meta_key(partition_queue),
+                    &serde_json::to_vec(&new_partition_meta)?,
+                )?;
+            }
+
+            // 3. State updates
+            if let Some(namespace) = state_namespace {
+                if let Some(puts) = state_puts {
+                    for (key, value) in puts {
+                        txn.put(Self::state_key(namespace, key), value)?;
+                    }
+                }
+                if let Some(deletes) = state_deletes {
+                    for key in deletes {
+                        txn.delete(Self::state_key(namespace, key))?;
+                    }
+                }
+            }
+
+            match txn.commit().await {
+                Ok(()) => return Ok(all_new_msg_ids),
+                Err(e) if is_txn_conflict(&e) && attempt + 1 < MAX_TXN_RETRIES => {
+                    sleep(Duration::from_millis(5 * (attempt as u64 + 1))).await;
+                    continue;
+                }
+                Err(e) => return Err(Box::new(e)),
+            }
+        }
+
+        Err(Box::new(SlateError::transaction(
+            "ack_and_scatter exceeded retry budget".to_string(),
+        )))
+    }
+
+    /// Claim from a partition group (O(1) per call).
+    ///
+    /// Assigned path: tries claim_messages directly on each assigned partition
+    /// (no meta reads, no sort). A is small (2-4), so this is effectively O(1).
+    ///
+    /// Steal path: probes ONE unassigned partition per call via round-robin
+    /// counter, avoiding full-scan. The caller's retry loop rotates through all
+    /// partitions across successive calls.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn claim_from_group(
+        &self,
+        group_name: &str,
+        batch_size: usize,
+        worker_id: &str,
+        lease_id: &str,
+        assigned_partitions: &[u32],
+        allow_steal: bool,
+        steal_pending_threshold: u64,
+    ) -> Result<(Vec<ClaimedMessage>, String, u32), StorageError> {
+        let group = self
+            .get_group_meta(group_name)
+            .await?
+            .ok_or_else(|| SlateError::invalid(format!("Queue group not found: {}", group_name)))?;
+
+        // O(A) where A is small (2-4): try claim directly, no meta reads needed.
+        // Round-robin starting offset prevents starvation when one worker owns
+        // multiple partitions and earlier ones always have work.
+        if !assigned_partitions.is_empty() {
+            let a_len = assigned_partitions.len() as u64;
+            let rr_assigned = {
+                let mut map = self.steal_rr.lock().unwrap();
+                let key = format!("{}_assigned_{}", group_name, worker_id);
+                let counter = map.entry(key).or_insert(0);
+                let val = *counter;
+                *counter = val.wrapping_add(1);
+                val
+            };
+            for offset in 0..a_len {
+                let idx = ((rr_assigned + offset) % a_len) as usize;
+                let pid = assigned_partitions[idx];
+                if (pid as usize) < group.partition_queues.len() {
+                    let queue_name = &group.partition_queues[pid as usize];
+                    let claimed = self
+                        .claim_messages(queue_name, batch_size, worker_id, lease_id)
+                        .await?;
+                    if !claimed.is_empty() {
+                        return Ok((claimed, queue_name.to_string(), pid));
+                    }
+                }
+            }
+        }
+
+        // Steal: round-robin through unassigned partitions.
+        // When threshold == 0: skip meta reads, just try claim_messages directly
+        // (each is O(1) single-key lookup). When threshold > 0: read meta for
+        // ONE candidate only (bounded cost).
+        if allow_steal {
+            let total = group.partition_queues.len() as u64;
+            if total > 0 {
+                let rr = {
+                    let mut map = self.steal_rr.lock().unwrap();
+                    let counter = map.entry(group_name.to_string()).or_insert(0);
+                    let val = *counter;
+                    *counter = val.wrapping_add(1);
+                    val
+                };
+
+                for offset in 0..total {
+                    let pid = ((rr + offset) % total) as u32;
+                    if assigned_partitions.contains(&pid) {
+                        continue;
+                    }
+                    let queue_name = &group.partition_queues[pid as usize];
+                    if steal_pending_threshold > 0 {
+                        let meta = self.get_meta(queue_name).await?;
+                        let pending = meta.push_seq.saturating_sub(meta.claim_seq);
+                        if pending <= steal_pending_threshold {
+                            continue;
+                        }
+                    }
+                    let claimed = self
+                        .claim_messages(queue_name, batch_size, worker_id, lease_id)
+                        .await?;
+                    if !claimed.is_empty() {
+                        return Ok((claimed, queue_name.to_string(), pid));
+                    }
+                }
+            }
+        }
+
+        // Nothing to claim
+        Ok((Vec::new(), String::new(), 0))
+    }
+
+    /// Check if all queues in a group are finished and drained.
+    pub async fn check_group_completion(
+        &self,
+        group_name: &str,
+    ) -> Result<(bool, bool, Vec<(u32, u64, u64, bool)>), StorageError> {
+        let group = self
+            .get_group_meta(group_name)
+            .await?
+            .ok_or_else(|| SlateError::invalid(format!("Queue group not found: {}", group_name)))?;
+
+        let mut all_finished = true;
+        let mut all_drained = true;
+        let mut partition_statuses = Vec::new();
+
+        for (i, queue_name) in group.partition_queues.iter().enumerate() {
+            let (finished, drained, pending, claimed) =
+                self.check_queue_completion(queue_name).await?;
+            if !finished {
+                all_finished = false;
+            }
+            if !drained {
+                all_drained = false;
+            }
+            partition_statuses.push((i as u32, pending, claimed, finished));
+        }
+
+        Ok((all_finished, all_drained, partition_statuses))
+    }
+
+    /// Get stats for all partitions in a group, with skew detection.
+    /// Returns (group_meta, partition_stats_vec).
+    pub async fn get_group_stats(
+        &self,
+        group_name: &str,
+    ) -> Result<(QueueGroupMeta, Vec<(u32, QueueMeta)>), StorageError> {
+        let group = self
+            .get_group_meta(group_name)
+            .await?
+            .ok_or_else(|| SlateError::invalid(format!("Queue group not found: {}", group_name)))?;
+
+        let mut stats = Vec::new();
+        for (i, queue_name) in group.partition_queues.iter().enumerate() {
+            let meta = self.get_meta(queue_name).await?;
+            stats.push((i as u32, meta));
+        }
+
+        Ok((group, stats))
+    }
+
+    /// Mark all queues in a group as finished.
+    pub async fn mark_group_finished(&self, group_name: &str) -> Result<u32, StorageError> {
+        let group = self
+            .get_group_meta(group_name)
+            .await?
+            .ok_or_else(|| SlateError::invalid(format!("Queue group not found: {}", group_name)))?;
+
+        let mut batch = WriteBatch::new();
+        for queue_name in &group.partition_queues {
+            batch.put(Self::finished_key(queue_name), b"1");
+        }
+        self.db.write(batch).await?;
+
+        // Clean up in-memory round-robin counters for this group
+        // Use delimiter-aware prefix to avoid matching groups whose name
+        // starts with the same prefix (e.g., "job_s1_output" vs "job_s1_output_extra")
+        let prefix = format!("{}_", group_name);
+        {
+            let mut map = self.steal_rr.lock().unwrap();
+            map.retain(|k, _| !k.starts_with(&prefix) && k != group_name);
+        }
+
+        tracing::info!(
+            "Marked all {} queues in group '{}' as finished",
+            group.num_partitions,
+            group_name
+        );
+        Ok(group.num_partitions)
+    }
 }
 
 #[cfg(test)]
@@ -1794,5 +2197,381 @@ mod tests {
             .push_seq
             .saturating_sub(downstream_meta.claim_seq);
         assert_eq!(downstream_pending, 10);
+    }
+
+    // =========================================================================
+    // QueueGroup tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_create_queue_group() {
+        let storage = create_temp_storage().await;
+
+        let group = storage.create_queue_group("grp1", 4).await.unwrap();
+        assert_eq!(group.name, "grp1");
+        assert_eq!(group.num_partitions, 4);
+        assert_eq!(group.partition_queues.len(), 4);
+        assert_eq!(group.partition_queues[0], "grp1_p0");
+        assert_eq!(group.partition_queues[3], "grp1_p3");
+        assert_eq!(group.version, 0);
+
+        // Each partition queue should have metadata
+        for q in &group.partition_queues {
+            let meta = storage.get_meta(q).await.unwrap();
+            assert_eq!(meta.push_seq, 0);
+            assert_eq!(meta.claim_seq, 0);
+        }
+
+        // Idempotent: creating again returns the same group
+        let group2 = storage.create_queue_group("grp1", 4).await.unwrap();
+        assert_eq!(group2.name, group.name);
+        assert_eq!(group2.num_partitions, group.num_partitions);
+    }
+
+    #[tokio::test]
+    async fn test_ack_and_scatter() {
+        let storage = create_temp_storage().await;
+
+        // Setup: upstream queue with 2 messages, downstream group with 3 partitions
+        storage.create_queue("upstream").await.unwrap();
+        let group = storage.create_queue_group("grp1", 3).await.unwrap();
+
+        let msg1 = Message::new("upstream".to_string(), b"a".to_vec());
+        let msg2 = Message::new("upstream".to_string(), b"b".to_vec());
+        storage.push_message("upstream", &msg1).await.unwrap();
+        storage.push_message("upstream", &msg2).await.unwrap();
+
+        let claimed = storage
+            .claim_messages("upstream", 2, "w1", "l1")
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 2);
+        let (msg_ids, claim_tokens) = split_claims(&claimed);
+
+        // Build partition payloads: 2 messages to p0, 1 to p2
+        let out_p0 = vec![
+            Message::new(group.partition_queues[0].clone(), b"x1".to_vec()),
+            Message::new(group.partition_queues[0].clone(), b"x2".to_vec()),
+        ];
+        let out_p2 = vec![Message::new(
+            group.partition_queues[2].clone(),
+            b"y1".to_vec(),
+        )];
+        let partition_payloads: Vec<(u32, Vec<Message>)> = vec![(0, out_p0), (2, out_p2)];
+
+        let new_ids = storage
+            .ack_and_scatter(
+                "upstream",
+                &msg_ids,
+                &claim_tokens,
+                "w1",
+                "l1",
+                "grp1",
+                &partition_payloads,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(new_ids.len(), 3); // 2 + 1
+
+        // Upstream should be fully acked
+        let upstream_meta = storage.get_queue_stats("upstream").await.unwrap();
+        assert_eq!(upstream_meta.claimed_count, 0);
+        assert_eq!(upstream_meta.total_acked, 2);
+
+        // Partition p0 should have 2 pending
+        let p0_meta = storage.get_meta(&group.partition_queues[0]).await.unwrap();
+        assert_eq!(p0_meta.push_seq, 2);
+        assert_eq!(p0_meta.total_pushed, 2);
+
+        // Partition p1 should be empty
+        let p1_meta = storage.get_meta(&group.partition_queues[1]).await.unwrap();
+        assert_eq!(p1_meta.push_seq, 0);
+
+        // Partition p2 should have 1 pending
+        let p2_meta = storage.get_meta(&group.partition_queues[2]).await.unwrap();
+        assert_eq!(p2_meta.push_seq, 1);
+        assert_eq!(p2_meta.total_pushed, 1);
+
+        // Verify we can claim from partition queues
+        let claimed_p0 = storage
+            .claim_messages(&group.partition_queues[0], 10, "w2", "l2")
+            .await
+            .unwrap();
+        assert_eq!(claimed_p0.len(), 2);
+        assert_eq!(claimed_p0[0].message.payload, b"x1");
+        assert_eq!(claimed_p0[1].message.payload, b"x2");
+    }
+
+    #[tokio::test]
+    async fn test_ack_and_scatter_rejects_wrong_token() {
+        let storage = create_temp_storage().await;
+
+        storage.create_queue("upstream").await.unwrap();
+        storage.create_queue_group("grp1", 2).await.unwrap();
+
+        let msg = Message::new("upstream".to_string(), b"a".to_vec());
+        storage.push_message("upstream", &msg).await.unwrap();
+
+        let claimed = storage
+            .claim_messages("upstream", 1, "w1", "l1")
+            .await
+            .unwrap();
+        let (msg_ids, _) = split_claims(&claimed);
+
+        // Use wrong claim token
+        let result = storage
+            .ack_and_scatter(
+                "upstream",
+                &msg_ids,
+                &["wrong-token".to_string()],
+                "w1",
+                "l1",
+                "grp1",
+                &[],
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("claim_token"));
+    }
+
+    #[tokio::test]
+    async fn test_ack_and_scatter_rejects_invalid_partition() {
+        let storage = create_temp_storage().await;
+
+        storage.create_queue("upstream").await.unwrap();
+        storage.create_queue_group("grp1", 2).await.unwrap();
+
+        // Partition 5 is out of range for a group with 2 partitions
+        let out = vec![Message::new("grp1_p5".to_string(), b"x".to_vec())];
+        let result = storage
+            .ack_and_scatter(
+                "upstream",
+                &[],
+                &[],
+                "w1",
+                "l1",
+                "grp1",
+                &[(5, out)],
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("out of range"));
+    }
+
+    #[tokio::test]
+    async fn test_ack_and_scatter_with_state() {
+        let storage = create_temp_storage().await;
+
+        storage.create_queue("upstream").await.unwrap();
+        storage.create_queue_group("grp1", 2).await.unwrap();
+
+        let msg = Message::new("upstream".to_string(), b"a".to_vec());
+        storage.push_message("upstream", &msg).await.unwrap();
+
+        let claimed = storage
+            .claim_messages("upstream", 1, "w1", "l1")
+            .await
+            .unwrap();
+        let (msg_ids, claim_tokens) = split_claims(&claimed);
+
+        let mut state_puts = HashMap::new();
+        state_puts.insert("cursor".to_string(), b"offset_42".to_vec());
+
+        storage
+            .ack_and_scatter(
+                "upstream",
+                &msg_ids,
+                &claim_tokens,
+                "w1",
+                "l1",
+                "grp1",
+                &[],
+                Some("ns1"),
+                Some(&state_puts),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Verify state was written atomically
+        let vals = storage
+            .state_get_batch("ns1", &["cursor".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(vals.get("cursor"), Some(&b"offset_42".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_claim_from_group_assigned() {
+        let storage = create_temp_storage().await;
+
+        let group = storage.create_queue_group("grp1", 3).await.unwrap();
+
+        // Push messages: 5 to p0, 2 to p1, 0 to p2
+        for i in 0..5 {
+            let msg = Message::new(group.partition_queues[0].clone(), format!("p0_{i}").into());
+            storage
+                .push_message(&group.partition_queues[0], &msg)
+                .await
+                .unwrap();
+        }
+        for i in 0..2 {
+            let msg = Message::new(group.partition_queues[1].clone(), format!("p1_{i}").into());
+            storage
+                .push_message(&group.partition_queues[1], &msg)
+                .await
+                .unwrap();
+        }
+
+        // Worker assigned to p0 and p1 — should claim from p0 first (highest pending)
+        let (claimed, source_queue, source_pid) = storage
+            .claim_from_group("grp1", 3, "w1", "l1", &[0, 1], false, 0)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 3);
+        assert_eq!(source_queue, group.partition_queues[0]);
+        assert_eq!(source_pid, 0);
+    }
+
+    #[tokio::test]
+    async fn test_claim_from_group_empty() {
+        let storage = create_temp_storage().await;
+
+        storage.create_queue_group("grp1", 2).await.unwrap();
+
+        // No messages — claim should return empty
+        let (claimed, source_queue, _) = storage
+            .claim_from_group("grp1", 5, "w1", "l1", &[0, 1], false, 0)
+            .await
+            .unwrap();
+        assert!(claimed.is_empty());
+        assert!(source_queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_claim_from_group_work_stealing() {
+        let storage = create_temp_storage().await;
+
+        let group = storage.create_queue_group("grp1", 3).await.unwrap();
+
+        // Push 10 messages to p2 only (p0 and p1 are empty)
+        for i in 0..10 {
+            let msg = Message::new(group.partition_queues[2].clone(), format!("p2_{i}").into());
+            storage
+                .push_message(&group.partition_queues[2], &msg)
+                .await
+                .unwrap();
+        }
+
+        // Worker assigned to p0 only, allow_steal=false — should get nothing
+        let (claimed, _, _) = storage
+            .claim_from_group("grp1", 5, "w1", "l1", &[0], false, 0)
+            .await
+            .unwrap();
+        assert!(claimed.is_empty());
+
+        // Worker assigned to p0 only, allow_steal=true, threshold=0 — should steal from p2
+        let (claimed, source_queue, source_pid) = storage
+            .claim_from_group("grp1", 3, "w1", "l1", &[0], true, 0)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 3);
+        assert_eq!(source_queue, group.partition_queues[2]);
+        assert_eq!(source_pid, 2);
+
+        // With threshold=100, should NOT steal (p2 only has 7 remaining)
+        let (claimed, _, _) = storage
+            .claim_from_group("grp1", 5, "w2", "l2", &[0], true, 100)
+            .await
+            .unwrap();
+        assert!(claimed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_group_completion() {
+        let storage = create_temp_storage().await;
+
+        let group = storage.create_queue_group("grp1", 2).await.unwrap();
+
+        // Not finished yet — empty queues without total_pushed > 0 are NOT drained
+        let (all_finished, all_drained, statuses) =
+            storage.check_group_completion("grp1").await.unwrap();
+        assert!(!all_finished);
+        assert!(!all_drained); // empty unused queues are not considered drained
+        assert_eq!(statuses.len(), 2);
+
+        // Mark finished
+        let marked = storage.mark_group_finished("grp1").await.unwrap();
+        assert_eq!(marked, 2);
+
+        // Now should be finished AND drained (no messages)
+        let (all_finished, all_drained, _) = storage.check_group_completion("grp1").await.unwrap();
+        assert!(all_finished);
+        assert!(all_drained);
+
+        // Push a message — drained should become false
+        let msg = Message::new(group.partition_queues[0].clone(), b"late".to_vec());
+        storage
+            .push_message(&group.partition_queues[0], &msg)
+            .await
+            .unwrap();
+
+        let (all_finished, all_drained, statuses) =
+            storage.check_group_completion("grp1").await.unwrap();
+        assert!(all_finished);
+        assert!(!all_drained);
+        // p0 has 1 pending, p1 has 0
+        assert_eq!(statuses[0].1, 1); // pending
+        assert_eq!(statuses[1].1, 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_group_stats() {
+        let storage = create_temp_storage().await;
+
+        let group = storage.create_queue_group("grp1", 3).await.unwrap();
+
+        // Push varying amounts
+        for _ in 0..5 {
+            let msg = Message::new(group.partition_queues[0].clone(), b"x".to_vec());
+            storage
+                .push_message(&group.partition_queues[0], &msg)
+                .await
+                .unwrap();
+        }
+        for _ in 0..2 {
+            let msg = Message::new(group.partition_queues[1].clone(), b"y".to_vec());
+            storage
+                .push_message(&group.partition_queues[1], &msg)
+                .await
+                .unwrap();
+        }
+
+        let (group_meta, stats) = storage.get_group_stats("grp1").await.unwrap();
+        assert_eq!(group_meta.name, "grp1");
+        assert_eq!(stats.len(), 3);
+        assert_eq!(stats[0].1.total_pushed, 5); // p0
+        assert_eq!(stats[1].1.total_pushed, 2); // p1
+        assert_eq!(stats[2].1.total_pushed, 0); // p2
+    }
+
+    #[tokio::test]
+    async fn test_group_not_found() {
+        let storage = create_temp_storage().await;
+
+        let result = storage
+            .claim_from_group("nonexistent", 1, "w1", "l1", &[0], false, 0)
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
     }
 }

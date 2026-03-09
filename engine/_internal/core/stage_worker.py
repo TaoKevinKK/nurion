@@ -15,14 +15,16 @@
 """StageWorker - Claim-based streaming worker.
 
 Claim-process-ack loop with optional merge:
-1. Claim messages from upstream queue
+1. Claim messages from upstream QueueGroup via claim_from_group()
 2. Merge payloads if merge_upstream > 1 (Arrow table concatenation)
 3. Call operator.process_split() once per group
-4. Atomic ack_and_forward (ack all upstream + push output downstream)
+4. Atomic ack_and_scatter (ack upstream + scatter output to downstream QueueGroup)
 
 merge_upstream=1: each message processed individually (default).
 merge_upstream=N: N messages merged before processing (e.g., Lance sink).
 Both use the same code path -- single record is just a group of size 1.
+
+Source workers claim from planner queue (single queue, not QueueGroup).
 """
 
 from __future__ import annotations
@@ -57,6 +59,7 @@ if TYPE_CHECKING:
     import pyarrow as pa
 
     from _internal.core.stage import Stage
+    from _internal.runtime.queue_stats import QueueRef
 
 
 class _ParsedBatch(NamedTuple):
@@ -74,30 +77,41 @@ class _ParsedBatch(NamedTuple):
 
 @dataclass(frozen=True)
 class OutputRouting:
-    """Where to send processed output."""
+    """Where to send processed output.
 
-    queue_name: Optional[str] = None
-    partition_queue_names: Optional[tuple[str, ...]] = None
+    All inter-stage data flows through a QueueGroup (group_name).
+    Non-shuffle stages use a 1-partition group; shuffle stages use N partitions.
+    Sink commit metadata (RawOutputBytes) goes to commit_queue_name instead.
+    """
+
+    group_name: Optional[str] = None
+    num_partitions: int = 1
     partition_column: Optional[str] = None
+    commit_queue_name: Optional[str] = None
 
 
 @dataclass(frozen=True)
 class WorkerRuntime:
-    """Runtime parameters for StageWorker initialization."""
+    """Runtime parameters for StageWorker initialization.
+
+    upstream: QueueRef identifying where to claim messages from.
+      Single queue (is_group=False): source workers claim from planner queue.
+      QueueGroup (is_group=True): non-source workers claim via claim_from_group().
+    """
 
     worker_id: str
     job_id: str
     stage_id: str
 
     broker_endpoint: Optional[QueueEndpoint] = None
-    upstream_queue_name: Optional[str] = None
+    upstream: Optional["QueueRef"] = None
     output: OutputRouting = field(default_factory=OutputRouting)
 
     batch_size: int = 100
     claim_timeout_secs: float = 60.0
 
-    # Partition support: assigned partition queue names to claim from
-    assigned_partition_queue_names: Optional[tuple[str, ...]] = None
+    # Non-source workers: partition IDs this worker is assigned to
+    assigned_partition_ids: Optional[tuple[int, ...]] = None
 
 
 class PayloadMissingError(RuntimeError):
@@ -175,9 +189,9 @@ class StageWorker:
         self._running = True
         self.logger.info(f"Worker {self.worker_id} starting")
 
-        if not self._runtime.broker_endpoint or not self._runtime.upstream_queue_name:
+        if not self._runtime.broker_endpoint or not self._runtime.upstream:
             raise RuntimeError(
-                f"Worker {self.worker_id} requires broker_endpoint and upstream_queue_name."
+                f"Worker {self.worker_id} requires broker_endpoint and upstream QueueRef."
             )
 
         try:
@@ -192,27 +206,26 @@ class StageWorker:
             await self._cleanup()
 
     async def _run_claim_loop(self) -> None:
-        """Claim-process-ack loop.
+        """Claim-process-ack loop, dispatched by upstream QueueRef type.
 
-        Always uses group processing. When merge_upstream=1,
-        each record is a group of size 1. No special case needed.
-
-        If this worker is downstream of a shuffle stage, it claims from
-        its assigned partition queues in round-robin instead of one queue.
+        QueueGroup (is_group=True): claim_from_group() — broker picks the best
+        partition from the worker's assigned set.
+        Single queue (is_group=False): standard claim() from planner queue.
         """
         assert self.queue_client is not None
+        assert self._runtime.upstream is not None
 
-        if self._runtime.assigned_partition_queue_names:
-            await self._run_partition_claim_loop()
+        if self._runtime.upstream.is_group:
+            await self._run_group_claim_loop()
         else:
             await self._run_single_queue_claim_loop()
 
     async def _run_single_queue_claim_loop(self) -> None:
-        """Standard claim loop from a single upstream queue."""
+        """Claim loop for source workers (planner queue only)."""
         assert self.queue_client is not None
-        assert self._runtime.upstream_queue_name is not None
+        assert self._runtime.upstream is not None and not self._runtime.upstream.is_group
 
-        upstream_queue = self._runtime.upstream_queue_name
+        upstream_queue = self._runtime.upstream.name
         merge = self._merge_upstream
         pending: list[WorkQueueRecord] = []
 
@@ -255,48 +268,66 @@ class StageWorker:
                 self.logger.error(f"Error in worker {self.worker_id}: {e}")
                 await asyncio.sleep(0.1)
 
-    async def _run_partition_claim_loop(self) -> None:
-        """Claim from assigned partition queues in round-robin.
+    async def _run_group_claim_loop(self) -> None:
+        """Claim from a QueueGroup via broker-side partition selection.
 
-        Each partition queue is processed independently to maintain partition
-        affinity — all records in a single _process_and_ack call come from
-        the same partition queue.
+        The broker picks the assigned partition with the highest pending count.
+        If all assigned partitions are empty and work-stealing is allowed,
+        the broker steals from unassigned partitions above the threshold.
         """
         assert self.queue_client is not None
-        assert self._runtime.assigned_partition_queue_names is not None
+        assert self._runtime.upstream is not None and self._runtime.upstream.is_group
 
-        queues = list(self._runtime.assigned_partition_queue_names)
+        group_name = self._runtime.upstream.name
+        assigned = list(self._runtime.assigned_partition_ids or [])
         merge = self._merge_upstream
+        pending: list[WorkQueueRecord] = []
+        # Track which partition queue the current pending batch came from
+        current_source_queue: Optional[str] = None
 
         while self._running:
-            any_records = False
             try:
-                for queue_name in queues:
-                    records = self.queue_client.claim(
-                        queue_name,
-                        batch_size=self._batch_size,
-                        timeout_ms=200,
-                    )
-                    if not records:
-                        continue
+                records, source_queue, _ = self.queue_client.claim_from_group(
+                    group_name,
+                    batch_size=self._batch_size,
+                    timeout_ms=1000,
+                    assigned_partitions=assigned,
+                    allow_steal=True,
+                    steal_pending_threshold=0,
+                )
 
-                    any_records = True
-                    pending: list[WorkQueueRecord] = list(records)
-
-                    # Process complete groups from this partition queue
-                    while len(pending) >= merge:
-                        group = pending[:merge]
-                        pending = pending[merge:]
-                        await self._process_and_ack(group, upstream_queue_override=queue_name)
-
-                    # Flush partial group
-                    if pending:
-                        await self._process_and_ack(pending, upstream_queue_override=queue_name)
-
-                if not any_records:
+                if records:
+                    # If source queue changed, flush the old batch first
+                    if pending and current_source_queue and current_source_queue != source_queue:
+                        await self._process_and_ack(
+                            pending, upstream_queue_override=current_source_queue
+                        )
+                        pending.clear()
+                    current_source_queue = source_queue
+                    pending.extend(records)
+                else:
                     if self._should_exit():
+                        if pending and current_source_queue:
+                            await self._process_and_ack(
+                                pending, upstream_queue_override=current_source_queue
+                            )
+                            pending.clear()
                         break
+                    # Flush partial group if queue is idle
+                    if pending and current_source_queue:
+                        await self._process_and_ack(
+                            pending, upstream_queue_override=current_source_queue
+                        )
+                        pending.clear()
+                        current_source_queue = None
                     await asyncio.sleep(0.05)
+                    continue
+
+                # Process complete groups
+                while len(pending) >= merge:
+                    group = pending[:merge]
+                    pending = pending[merge:]
+                    await self._process_and_ack(group, upstream_queue_override=current_source_queue)
 
             except asyncio.CancelledError:
                 self.logger.info(f"Worker {self.worker_id} cancelled")
@@ -306,6 +337,9 @@ class StageWorker:
                     self.logger.error(f"Worker {self.worker_id} broker error: {e}")
                     raise RuntimeError("broker_unavailable") from e
                 self.logger.error(f"Error in worker {self.worker_id}: {e}")
+                # Clear stale pending records to avoid mixing with next iteration
+                pending.clear()
+                current_source_queue = None
                 await asyncio.sleep(0.1)
 
     # =========================================================================
@@ -321,18 +355,20 @@ class StageWorker:
 
         When len(records) == 1: equivalent to the old single-record path.
         When len(records) > 1: merges payloads via Arrow concat, processes once.
-        All upstream messages are acked atomically via ack_and_forward.
+        All upstream messages are acked atomically via ack_and_scatter.
 
         Args:
             records: Claimed records to process.
             upstream_queue_override: If set, use this queue name for ack
-                instead of self.upstream_queue_name. Used by partition claim
-                loop where records come from different partition queues.
+                instead of the default upstream. Used by group claim loop
+                where records come from different partition queues.
         """
         assert self.queue_client is not None
         assert self._operator is not None
 
-        upstream_queue = upstream_queue_override or self._runtime.upstream_queue_name
+        upstream_queue = upstream_queue_override or (
+            self._runtime.upstream.name if self._runtime.upstream else None
+        )
         assert upstream_queue is not None
 
         batch = self._parse_records(records, upstream_queue=upstream_queue)
@@ -365,25 +401,15 @@ class StageWorker:
             input_bytes=input_bytes,
         )
 
-        # Shuffle output: split by partition and push to partition queues
-        if self._output.partition_queue_names and not isinstance(collected, RawOutputBytes):
-            await self._shuffle_output_and_ack(
-                collected,
-                split_id,
-                batch,
-                upstream_queue,
-                event_puts,
-            )
-        else:
-            # Standard path: atomic ack_and_forward to single output queue
-            output_bytes_list = await self._serialize_outputs(collected, split_id)
-            if output_bytes_list and self._output.queue_name:
+        if isinstance(collected, RawOutputBytes):
+            # Sink commit: forward raw bytes to commit queue
+            if self._output.commit_queue_name and collected.payloads:
                 self.queue_client.ack_and_forward(
                     upstream_queue=upstream_queue,
                     upstream_msg_ids=batch.msg_ids,
                     upstream_claim_tokens=batch.claim_tokens,
-                    downstream_queue=self._output.queue_name,
-                    downstream_payloads=output_bytes_list,
+                    downstream_queue=self._output.commit_queue_name,
+                    downstream_payloads=collected.payloads,
                     state_namespace=job_namespace(self.job_id),
                     state_puts=event_puts,
                 )
@@ -395,6 +421,24 @@ class StageWorker:
                     state_namespace=job_namespace(self.job_id),
                     state_puts=event_puts,
                 )
+        elif self._output.group_name:
+            # Data output: scatter to QueueGroup (all stages use this path)
+            await self._scatter_output_and_ack(
+                collected,
+                split_id,
+                batch,
+                upstream_queue,
+                event_puts,
+            )
+        else:
+            # No output destination (terminal stage)
+            self.queue_client.ack(
+                upstream_queue,
+                batch.msg_ids,
+                claim_tokens=batch.claim_tokens,
+                state_namespace=job_namespace(self.job_id),
+                state_puts=event_puts,
+            )
 
         # Eagerly free input payloads now that ack succeeded.
         for key in batch.consumed_payload_keys:
@@ -413,7 +457,9 @@ class StageWorker:
         upstream_queue: Optional[str] = None,
     ) -> Optional[_ParsedBatch]:
         """Parse claimed records, fetch payloads. Returns None if nacked."""
-        nack_queue = upstream_queue or self._runtime.upstream_queue_name
+        nack_queue = upstream_queue or (
+            self._runtime.upstream.name if self._runtime.upstream else None
+        )
 
         msg_ids: list[str] = []
         claim_tokens: list[str] = []
@@ -472,7 +518,9 @@ class StageWorker:
     ) -> None:
         """Nack all messages with WebUI nack events."""
         assert self.queue_client is not None
-        queue = upstream_queue_override or self._runtime.upstream_queue_name
+        queue = upstream_queue_override or (
+            self._runtime.upstream.name if self._runtime.upstream else None
+        )
         assert queue is not None
 
         ts_ns = time.time_ns()
@@ -536,41 +584,11 @@ class StageWorker:
 
         return split_id, split, merged_payload
 
-    async def _serialize_outputs(self, result: Any, split_id: str) -> list[bytes]:
-        """Serialize process_split results into output messages.
-
-        Args:
-            result: Either RawOutputBytes or a pre-collected list[SplitPayload].
-        """
-        output_bytes_list: list[bytes] = []
-
-        if isinstance(result, RawOutputBytes):
-            if self._output.queue_name:
-                output_bytes_list = result.payloads
-        else:
-            # result is already collected (list[SplitPayload]) by _process_and_ack.
-            output_payloads = (
-                result if isinstance(result, list) else await self._collect_outputs(result)
-            )
-            if output_payloads and self._output.queue_name:
-                for idx, out_payload in enumerate(output_payloads):
-                    out_id = split_id if len(output_payloads) == 1 else f"{split_id}_{idx}"
-                    self.payload_store.store(out_id, out_payload)
-                    out_msg = DataQueueMessage(
-                        message_id=out_id,
-                        split_id=out_id,
-                        payload_key=out_id,
-                        metadata={"source_stage": self.stage_id},
-                    )
-                    output_bytes_list.append(out_msg.to_bytes())
-
-        return output_bytes_list
-
     # =========================================================================
-    # Partitioned output
+    # Output scatter (unified for shuffle and non-shuffle)
     # =========================================================================
 
-    async def _shuffle_output_and_ack(
+    async def _scatter_output_and_ack(
         self,
         result: Any,
         split_id: str,
@@ -578,25 +596,20 @@ class StageWorker:
         upstream_queue: str,
         event_puts: Dict[str, bytes],
     ) -> None:
-        """Split output by partition column and push to partition queues.
+        """Scatter output to QueueGroup and ack upstream atomically.
 
-        Uses at-least-once semantics: push all partition messages first, then
-        ack upstream. If the worker crashes between push and ack, upstream
-        messages will be reprocessed and partition queues may receive duplicates.
-        This matches Spark's shuffle write semantics.
+        If partition_column is set: split by column → N partitions (shuffle).
+        Otherwise: all output → partition 0 (non-shuffle).
+        Uses atomic ack_and_scatter (exactly-once).
         """
-        from _internal.core.partition import split_table_by_column
-
         assert self.queue_client is not None
-        assert self._output.partition_queue_names is not None
-        assert self._output.partition_column is not None
+        assert self._output.group_name is not None
 
         # result is already collected (list[SplitPayload]) by _process_and_ack.
         output_payloads = (
             result if isinstance(result, list) else await self._collect_outputs(result)
         )
         if not output_payloads:
-            # No output: just ack upstream
             self.queue_client.ack(
                 upstream_queue,
                 batch.msg_ids,
@@ -606,14 +619,54 @@ class StageWorker:
             )
             return
 
+        scatter: Dict[int, list[bytes]] = {}
         partition_column = self._output.partition_column
 
-        # Split each output payload by partition and push to partition queues
-        for idx, out_payload in enumerate(output_payloads):
-            table = out_payload.data
-            if partition_column not in table.column_names:
-                # No partition column (e.g., filtered to None then returned).
-                # Push to first partition queue as fallback.
+        if partition_column:
+            # Shuffle path: split by partition column
+            from _internal.core.partition import split_table_by_column
+
+            for idx, out_payload in enumerate(output_payloads):
+                table = out_payload.data
+                if partition_column not in table.column_names:
+                    out_id = split_id if len(output_payloads) == 1 else f"{split_id}_{idx}"
+                    self.payload_store.store(out_id, out_payload)
+                    out_msg = DataQueueMessage(
+                        message_id=out_id,
+                        split_id=out_id,
+                        payload_key=out_id,
+                        metadata={"source_stage": self.stage_id},
+                    )
+                    scatter.setdefault(0, []).append(out_msg.to_bytes())
+                    continue
+
+                partition_tables = split_table_by_column(table, partition_column)
+                for partition_id, partition_table in partition_tables.items():
+                    if partition_id < 0 or partition_id >= self._output.num_partitions:
+                        raise ValueError(
+                            f"Partition ID {partition_id} out of range "
+                            f"[0, {self._output.num_partitions}). "
+                            f"Check the '{partition_column}' column values in operator output."
+                        )
+
+                    out_id = f"{split_id}_{idx}_p{partition_id}"
+                    from _internal.core.models import SplitPayload
+
+                    partition_payload = SplitPayload(data=partition_table, split_id=out_id)
+                    self.payload_store.store(out_id, partition_payload)
+                    out_msg = DataQueueMessage(
+                        message_id=out_id,
+                        split_id=out_id,
+                        payload_key=out_id,
+                        metadata={
+                            "source_stage": self.stage_id,
+                            "partition_id": str(partition_id),
+                        },
+                    )
+                    scatter.setdefault(partition_id, []).append(out_msg.to_bytes())
+        else:
+            # Non-shuffle: all output to partition 0
+            for idx, out_payload in enumerate(output_payloads):
                 out_id = split_id if len(output_payloads) == 1 else f"{split_id}_{idx}"
                 self.payload_store.store(out_id, out_payload)
                 out_msg = DataQueueMessage(
@@ -622,40 +675,14 @@ class StageWorker:
                     payload_key=out_id,
                     metadata={"source_stage": self.stage_id},
                 )
-                self.queue_client.push(self._output.partition_queue_names[0], out_msg.to_bytes())
-                continue
+                scatter.setdefault(0, []).append(out_msg.to_bytes())
 
-            partition_tables = split_table_by_column(table, partition_column)
-            for partition_id, partition_table in partition_tables.items():
-                if partition_id < 0 or partition_id >= len(self._output.partition_queue_names):
-                    self.logger.warning(
-                        f"Partition ID {partition_id} out of range "
-                        f"[0, {len(self._output.partition_queue_names)}), skipping"
-                    )
-                    continue
-
-                out_id = f"{split_id}_{idx}_p{partition_id}"
-                from _internal.core.models import SplitPayload
-
-                partition_payload = SplitPayload(data=partition_table, split_id=out_id)
-                self.payload_store.store(out_id, partition_payload)
-                out_msg = DataQueueMessage(
-                    message_id=out_id,
-                    split_id=out_id,
-                    payload_key=out_id,
-                    metadata={
-                        "source_stage": self.stage_id,
-                        "partition_id": str(partition_id),
-                    },
-                )
-                partition_queue = self._output.partition_queue_names[partition_id]
-                self.queue_client.push(partition_queue, out_msg.to_bytes())
-
-        # After all pushes succeed, ack upstream (at-least-once)
-        self.queue_client.ack(
-            upstream_queue,
-            batch.msg_ids,
-            claim_tokens=batch.claim_tokens,
+        self.queue_client.ack_and_scatter(
+            upstream_queue=upstream_queue,
+            upstream_msg_ids=batch.msg_ids,
+            upstream_claim_tokens=batch.claim_tokens,
+            group_name=self._output.group_name,
+            partition_payloads=scatter,
             state_namespace=job_namespace(self.job_id),
             state_puts=event_puts,
         )

@@ -155,6 +155,7 @@ Check before proposing architectural changes:
 | Multi-upstream join | `docs/design/multi-upstream-join.md` |
 | WebUI v1 / v2 | `docs/design/webui.md`, `webui-api-v2.md` |
 | Spark Source V2 | `docs/design/spark-source-v2.md` |
+| QueueGroup & skew handling | `docs/design/queue-group-and-skew-handling.md` |
 
 ---
 

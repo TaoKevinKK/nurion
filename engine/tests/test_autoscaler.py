@@ -28,7 +28,7 @@ import pytest
 
 from _internal.core.models import QueueStats
 from _internal.runtime.autoscaler import AutoscaleConfig, SimpleAutoscaler, StageMetrics
-from _internal.runtime.queue_stats import StageQueueConfig
+from _internal.runtime.queue_stats import QueueRef, StageQueueConfig
 from _internal.core.stage_master import StageStatus
 
 
@@ -116,10 +116,10 @@ class FakeQueueStatsClient:
     def __init__(self, stats: dict[str, QueueStats]) -> None:
         self._stats = stats
 
-    def get_stats(self, queue_name: str | None) -> QueueStats:
-        if not queue_name:
+    def get_ref_stats(self, ref: QueueRef | None) -> QueueStats:
+        if not ref:
             return QueueStats()
-        return self._stats.get(queue_name, QueueStats())
+        return self._stats.get(ref.name, QueueStats())
 
 
 # ============================================================================
@@ -392,8 +392,8 @@ class TestMetricsCollection:
         )
         stage_cfg = StageQueueConfig(
             stage_id="stage_a",
-            input_queue_name="input_stage_a",
-            output_queue_name="output_stage_a",
+            input=QueueRef.queue("input_stage_a"),
+            output=QueueRef.queue("output_stage_a"),
             backpressure_threshold_lag=1000,
             backpressure_threshold_queue_size=1000,
         )
@@ -430,8 +430,8 @@ class TestMetricsCollection:
         source.stage.max_parallelism = 1
         stage_cfg = StageQueueConfig(
             stage_id="source",
-            input_queue_name=None,
-            output_queue_name="output_source",
+            input=None,
+            output=QueueRef.queue("output_source"),
             backpressure_threshold_lag=1000,
             backpressure_threshold_queue_size=1000,
         )

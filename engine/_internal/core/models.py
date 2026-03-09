@@ -101,7 +101,7 @@ class Record:
 
 @dataclass
 class RawOutputBytes:
-    """Raw bytes to forward to the output queue via ack_and_forward.
+    """Raw bytes to forward to the commit queue via ack_and_forward.
 
     Returned by sink operators that need to push raw data (e.g., fragment metadata)
     to a commit queue. StageWorker pushes these directly without going through

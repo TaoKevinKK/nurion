@@ -20,9 +20,10 @@ StageMaster delegates concerns to component managers:
 - SourceManager: SplitPlanner / DirectProducer lifecycle
 - SinkManager: SinkCommitter background commit lifecycle
 
-WorkQueue Model:
-- No partitions - single queue per stage
-- Workers compete for messages via claim()
+QueueGroup Model:
+- All inter-stage data flows through QueueGroup (1 partition for non-shuffle, N for shuffle)
+- Workers claim from group via claim_from_group() (broker picks best partition)
+- Source planner queues remain as single queues (internal coordination only)
 """
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ from _internal.webui.state.schema import encode_json, job_namespace, stage_key, 
 
 if TYPE_CHECKING:
     from _internal.core.stage import Stage, StageRuntime
+    from _internal.runtime.queue_stats import QueueRef
 
 
 class BackpressureProvider(Protocol):
@@ -86,23 +88,18 @@ class StageMaster:
         self.runtime = runtime
         self.logger = create_ray_logger(f"Master-{self.stage_id}")
 
-        # Queue configuration (from runtime; upstream_queue_name is mutable for SplitPlanner)
-        self.upstream_queue_name = runtime.upstream_queue_name
+        # Upstream reference (mutable: SplitPlanner overrides with its planner queue)
+        self.upstream: Optional[QueueRef] = runtime.upstream
 
         # SplitPayloadStore - shared across all stages
         self.payload_store = payload_store
 
-        # Queue client and output queue
+        # Queue client and output group
         self._queue_client: Optional[WorkQueueQueueClient] = None
-        self._output_queue_name = f"{job_id}_{self.stage_id}_output"
 
-        # Partition support: partition queue names for operators with partitioned output
-        self._partition_queue_names: Optional[tuple[str, ...]] = None
-        n = stage.operator_config.get_output_partition_count()
-        if n > 1:
-            self._partition_queue_names = tuple(
-                f"{job_id}_{self.stage_id}_part_{i}" for i in range(n)
-            )
+        # All inter-stage output uses QueueGroup: 1 partition for non-shuffle, N for shuffle
+        self._output_group_name = f"{job_id}_{self.stage_id}_output"
+        self._num_partitions: int = max(1, stage.operator_config.get_output_partition_count())
 
         # State
         self._running = False
@@ -150,37 +147,25 @@ class StageMaster:
         self._queue_client.start()
         self.logger.info(f"Connected to broker at {broker_url}")
 
-        self._queue_client.create_queue(self._output_queue_name)
-        self.logger.info(f"Created output queue: {self._output_queue_name}")
-
-        # Create partition queues for shuffle stages
-        if self._partition_queue_names:
-            for pq_name in self._partition_queue_names:
-                self._queue_client.create_queue(pq_name)
-            self.logger.info(
-                f"Created {len(self._partition_queue_names)} partition queues "
-                f"for shuffle stage {self.stage_id}"
-            )
+        # All inter-stage output uses QueueGroup
+        self._queue_client.create_queue_group(self._output_group_name, self._num_partitions)
+        self.logger.info(
+            f"Created output group '{self._output_group_name}' with "
+            f"{self._num_partitions} partition(s) for stage {self.stage_id}"
+        )
 
     def _init_managers(self) -> None:
         """Initialize worker and recovery managers."""
         from _internal.core.stage_worker import OutputRouting
 
-        # For sink stages with a committer, workers output to the commit queue
-        # (fragment metadata goes there via ack_and_forward).
-        # For regular stages, workers output to the stage output queue.
-        worker_output_queue = (
-            self._sink_manager.commit_queue_name if self._sink_manager else self._output_queue_name
-        )
         partition_column = (
-            self.stage.operator_config.get_partition_column()
-            if self._partition_queue_names
-            else None
+            self.stage.operator_config.get_partition_column() if self._num_partitions > 1 else None
         )
         output = OutputRouting(
-            queue_name=worker_output_queue,
-            partition_queue_names=self._partition_queue_names,
+            group_name=self._output_group_name,
+            num_partitions=self._num_partitions,
             partition_column=partition_column,
+            commit_queue_name=self._sink_manager.commit_queue_name if self._sink_manager else None,
         )
         self._worker_manager = WorkerManager(
             job_id=self.job_id,
@@ -188,7 +173,7 @@ class StageMaster:
             runtime=self.runtime,
             payload_store=self.payload_store,
             output=output,
-            upstream_queue_name=self.upstream_queue_name,
+            upstream=self.upstream,
         )
 
         self._recovery_manager = RecoveryManager(
@@ -198,35 +183,19 @@ class StageMaster:
         )
 
     def _has_unprocessed_messages(self) -> bool:
-        """Check if upstream queue(s) still have unprocessed messages.
-
-        For stages downstream of a shuffle, checks all upstream partition
-        queues. For normal stages, checks the single upstream queue.
-        """
-        if not self._queue_client:
-            return False
-
-        # Determine which queues to check
-        queues_to_check: list[str] = []
-        if self.runtime.upstream_partition_queue_names:
-            queues_to_check = list(self.runtime.upstream_partition_queue_names)
-        elif self.upstream_queue_name:
-            queues_to_check = [self.upstream_queue_name]
-        else:
+        """Check if upstream queue(s) still have unprocessed messages."""
+        if not self._queue_client or not self.upstream:
             return False
 
         try:
-            for queue_name in queues_to_check:
-                stats = self._queue_client.get_stats(queue_name)
-                pending = stats.get("pending_count", 0)
-                claimed = stats.get("claimed_count", 0)
-                if pending > 0 or claimed > 0:
-                    self.logger.debug(
-                        f"Stage {self.stage_id} upstream queue {queue_name}: "
-                        f"pending={pending}, claimed={claimed}"
-                    )
-                    return True
-            return False
+            if self.upstream.is_group:
+                result = self._queue_client.is_group_finished(self.upstream.name)
+                return not result.get("all_drained", False)
+
+            stats = self._queue_client.get_stats(self.upstream.name)
+            pending = stats.get("pending_count", 0)
+            claimed = stats.get("claimed_count", 0)
+            return pending > 0 or claimed > 0
         except Exception as e:
             self.logger.warning(f"Error checking upstream queue stats: {e}")
             return True
@@ -251,8 +220,9 @@ class StageMaster:
 
         # --- DirectProducer: no workers ---
         if self._source_manager and self._source_manager.is_direct_producer:
+            # DirectProducer writes to partition 0 of the output group
             await self._source_manager.run_direct_producer(
-                queue_client, self._output_queue_name, broker_endpoint
+                queue_client, f"{self._output_group_name}_p0", broker_endpoint
             )
             self._write_stage_state(status="RUNNING")
             self._running = True
@@ -273,12 +243,14 @@ class StageMaster:
         if self._sink_manager:
             self._sink_manager.create_queue_and_start_loop(queue_client)
 
-        # --- SplitPlanner: determine effective upstream before creating workers ---
+        # --- SplitPlanner: override upstream to planner queue ---
         # SplitPlanner interposes its own queue between source and workers.
         if self._source_manager is not None and not self._source_manager.is_direct_producer:
-            self.upstream_queue_name = self._source_manager.planner_queue_name
+            from _internal.runtime.queue_stats import QueueRef
 
-        # --- Init workers (uses self.upstream_queue_name, already resolved) ---
+            self.upstream = QueueRef.queue(self._source_manager.planner_queue_name)
+
+        # --- Init workers (uses self.upstream, already resolved) ---
         self._init_managers()
         assert self._worker_manager is not None
 
@@ -295,9 +267,10 @@ class StageMaster:
         # all partition queues (partition assignment uses max_parallelism as
         # modulus, so min_parallelism workers alone may leave gaps).
         min_workers = self.stage.min_parallelism
-        if self.runtime.upstream_partition_queue_names:
-            n_partitions = len(self.runtime.upstream_partition_queue_names)
-            min_workers = max(min_workers, min(n_partitions, self.stage.max_parallelism))
+        if self.runtime.upstream_num_partitions > 0:
+            min_workers = max(
+                min_workers, min(self.runtime.upstream_num_partitions, self.stage.max_parallelism)
+            )
 
         for _ in range(min_workers):
             worker_id = await self._worker_manager.spawn_worker(is_min_worker=True)
@@ -324,9 +297,9 @@ class StageMaster:
         if self._source_manager and self._source_manager.is_direct_producer:
             self._finished = True
             try:
-                queue_client.mark_queue_finished(self._output_queue_name)
+                queue_client.mark_group_finished(self._output_group_name)
             except Exception as e:
-                self.logger.warning(f"Failed to mark output queue as finished: {e}")
+                self.logger.warning(f"Failed to mark output group as finished: {e}")
             self._write_stage_state(status="COMPLETED")
             return True
 
@@ -387,13 +360,13 @@ class StageMaster:
             if self._sink_manager and not self._failed:
                 await self._sink_manager.finalize(queue_client)
 
-            # Mark output queue(s) as finished (each individually so one
-            # failure doesn't block the rest)
-            for q in [self._output_queue_name, *(self._partition_queue_names or ())]:
-                try:
-                    queue_client.mark_queue_finished(q)
-                except Exception as e:
-                    self.logger.warning(f"Failed to mark queue {q} as finished: {e}")
+            # Mark output queue(s) as finished (retry up to 3 times — failure
+            # would leave downstream waiting forever)
+            try:
+                self._mark_finished_with_retry(queue_client)
+            except Exception as mark_err:
+                self.logger.error(f"Failed to mark finished: {mark_err}")
+                # Fall through to write state and raise original failure if any
 
             self._write_stage_state(status="FAILED" if self._failed else "COMPLETED")
 
@@ -457,6 +430,25 @@ class StageMaster:
         except Exception as e:
             self.logger.debug(f"Failed to write worker state: {e}")
 
+    def _mark_finished_with_retry(self, queue_client, max_retries: int = 3) -> None:
+        """Mark output group as finished with retries to prevent downstream hangs."""
+        import time as _time
+
+        for attempt in range(max_retries):
+            try:
+                queue_client.mark_group_finished(self._output_group_name)
+                break
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    self.logger.error(
+                        f"Failed to mark group {self._output_group_name} as finished after {max_retries} attempts: {e}"
+                    )
+                    raise
+                self.logger.warning(
+                    f"Retry {attempt + 1}/{max_retries} marking group finished: {e}"
+                )
+                _time.sleep(0.5 * (attempt + 1))
+
     def _write_stage_state(self, status: str) -> None:
         """Write stage status into WorkQueue state."""
         if not self._queue_client:
@@ -490,29 +482,15 @@ class StageMaster:
         self._upstream_finished = True
         self.logger.info(f"Stage {self.stage_id} notified: upstream finished")
 
-        has_upstream = self.upstream_queue_name or self.runtime.upstream_partition_queue_names
-        if has_upstream and self._queue_client:
+        if self.upstream and self._queue_client:
             asyncio.create_task(
                 self._poll_queue_completion(),
                 name=f"poll_completion_{self.stage_id}",
             )
 
     async def _poll_queue_completion(self) -> None:
-        """Poll upstream queue(s) until it's safe for workers to exit.
-
-        For stages downstream of a shuffle, polls all upstream partition
-        queues and only signals safe_to_exit when ALL are finished.
-        """
-        if not self._queue_client:
-            return
-
-        # Determine which queues to poll
-        queues_to_poll: list[str] = []
-        if self.runtime.upstream_partition_queue_names:
-            queues_to_poll = list(self.runtime.upstream_partition_queue_names)
-        elif self.upstream_queue_name:
-            queues_to_poll = [self.upstream_queue_name]
-        else:
+        """Poll upstream queue until it's safe for workers to exit."""
+        if not self._queue_client or not self.upstream:
             return
 
         poll_interval = 0.1
@@ -521,14 +499,13 @@ class StageMaster:
 
         while self._running:
             try:
-                all_finished = True
-                for queue_name in queues_to_poll:
-                    result = self._queue_client.is_queue_finished(queue_name)
-                    if not result.get("safe_to_exit", False):
-                        all_finished = False
-                        break
+                if self.upstream.is_group:
+                    result = self._queue_client.is_group_finished(self.upstream.name)
+                else:
+                    result = self._queue_client.is_queue_finished(self.upstream.name)
+
                 consecutive_errors = 0
-                if all_finished:
+                if result.get("safe_to_exit", False):
                     self.logger.debug(
                         f"Stage {self.stage_id} upstream queue(s) drained, notifying workers"
                     )
@@ -546,32 +523,36 @@ class StageMaster:
     def get_queue_client(self) -> Optional[WorkQueueQueueClient]:
         return self._queue_client
 
-    def get_output_queue_name(self) -> str:
-        return self._output_queue_name
+    def get_output_group_name(self) -> str:
+        """Get the output QueueGroup name."""
+        return self._output_group_name
 
-    def get_partition_queue_names(self) -> Optional[tuple[str, ...]]:
-        """Get partition queue names if this is a shuffle stage."""
-        return self._partition_queue_names
+    def get_num_partitions(self) -> int:
+        """Get number of output partitions (>= 1; 1 for non-shuffle)."""
+        return self._num_partitions
 
-    def get_backpressure_input_queue_name(self) -> Optional[str]:
-        """Get the queue used as input lag signal for backpressure."""
-        if self._source_manager and not self._source_manager.is_direct_producer:
-            return self._source_manager.planner_queue_name
-        return self.runtime.upstream_queue_name
+    def get_backpressure_input(self) -> Optional["QueueRef"]:
+        """Get input queue reference for backpressure monitoring."""
+        return self.upstream
 
-    def get_backpressure_output_queue_name(self) -> str:
-        """Get the queue used as output lag signal for backpressure."""
+    def get_backpressure_output(self) -> "QueueRef":
+        """Get output queue reference for backpressure monitoring."""
+        from _internal.runtime.queue_stats import QueueRef
+
         if self._sink_manager:
-            return self._sink_manager.commit_queue_name
-        return self._output_queue_name
+            return QueueRef.queue(self._sink_manager.commit_queue_name)
+        return QueueRef.group(self._output_group_name)
 
     def get_status(self) -> StageStatus:
         output_size = 0
         if self._queue_client:
             try:
-                output_queue_name = self.get_backpressure_output_queue_name()
-                stats = self._queue_client.get_stats(output_queue_name)
-                output_size = stats.get("pending_count", 0)
+                if self._sink_manager:
+                    stats = self._queue_client.get_stats(self._sink_manager.commit_queue_name)
+                    output_size = stats.get("pending_count", 0)
+                else:
+                    stats = self._queue_client.get_group_stats(self._output_group_name)
+                    output_size = stats.get("total_pending", 0)
             except Exception:
                 pass
 

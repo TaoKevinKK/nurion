@@ -20,10 +20,10 @@ Responsibilities:
 - Exponential backoff for recovery attempts
 - Orchestrate worker recovery (spawn replacement workers)
 
-WorkQueue Model:
-- No partition assignment needed
-- Workers compete for messages via claim()
-- Simpler recovery: just respawn workers
+QueueGroup Model:
+- Workers get stable partition assignment via slot tracking
+- Respawned workers reuse the same slot (same partition IDs)
+- Claimed messages from dead workers are recovered by broker timeout
 """
 
 from __future__ import annotations
@@ -56,10 +56,9 @@ class RecoveryManager:
     - Applies exponential backoff for recovery attempts
     - Decides when to give up based on failure rate threshold
 
-    WorkQueue Model:
-    - No partition tracking needed
-    - Workers compete for messages via claim()
-    - Recovery just spawns replacement workers
+    QueueGroup Model:
+    - Respawned workers reuse the dead worker's slot for stable partition assignment
+    - Broker recovers claimed messages from dead workers after claim timeout
 
     Thread-safe: all state modifications happen in the main asyncio loop.
     """
@@ -120,12 +119,10 @@ class RecoveryManager:
     ) -> RecoveryResult:
         """Attempt to recover failed workers.
 
-        With WorkQueue model, recovery is simpler:
-        1. Remove failed workers from tracking
-        2. Spawn replacement workers
+        Recovery steps:
+        1. Remove failed workers from tracking (slot returned to free pool)
+        2. Spawn replacement workers (reuse slot for stable partition assignment)
         3. Notify new workers of upstream completion if applicable
-
-        No partition assignment needed - workers compete for messages.
 
         Args:
             failed_worker_ids: IDs of workers that failed

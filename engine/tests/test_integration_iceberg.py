@@ -224,7 +224,6 @@ class TestIcebergPipeline:
                 port=workqueue_backend.port,
                 storage_url="memory://",
             ),
-            upstream_queue_name=None,
         )
 
         payload_store = RaySplitPayloadStore(name="test-iceberg-store")

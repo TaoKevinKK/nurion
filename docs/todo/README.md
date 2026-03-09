@@ -24,10 +24,10 @@ todo/
 
 | File | Description | Last Updated |
 |------|-------------|--------------|
-| [roadmap.md](./roadmap.md) | Strategic roadmap — phases, priorities, deprioritized items | 2026-03-02 |
-| [runtime-prod-hardening.md](./runtime-prod-hardening.md) | Runtime hardening backlog (scale, correctness, operability) | 2026-03-02 |
+| [roadmap.md](./roadmap.md) | Strategic roadmap — phases, priorities, deprioritized items | 2026-03-06 |
+| [runtime-prod-hardening.md](./runtime-prod-hardening.md) | Runtime hardening backlog (scale, correctness, operability) | 2026-03-06 |
 | [serve.md](./serve.md) | Serve module — GPU scheduling, model routing, LLM operators | 2026-03-02 |
-| [dedup.md](./dedup.md) | Dedup operators and Union-Find service tracking | 2026-03-02 |
+| [dedup.md](./dedup.md) | Dedup operators and Union-Find service tracking | 2026-03-06 |
 | [dedup-and-fault-tolerance-deprecated.md](./dedup-and-fault-tolerance-deprecated.md) | Archived old CC/legacy fault-tolerance notes | 2026-02-23 (deprecated) |
 
 ## Conventions

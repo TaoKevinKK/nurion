@@ -43,6 +43,7 @@ from tests.utils import (
     get_sink_records,
     kill_random_worker,
     wait_for_progress,
+    wait_for_stage_workers,
 )
 
 logger = logging.getLogger(__name__)
@@ -157,7 +158,7 @@ class TestElasticScaling:
         When workers die, their claimed messages timeout and return to queue.
         Other workers or new workers will reclaim and process them.
         """
-        NUM_RECORDS = 2000
+        NUM_RECORDS = 5000
         EXPLODE_FACTOR = 2
         validator = DataValidator()
 
@@ -166,7 +167,7 @@ class TestElasticScaling:
 
         job = create_test_pipeline(
             num_records=NUM_RECORDS,
-            batch_size=200,
+            batch_size=50,
             min_workers=4,
             max_workers=8,
             collector_name=self.collector_name,
@@ -181,13 +182,16 @@ class TestElasticScaling:
             await runner.initialize()
             run_task = asyncio.create_task(runner.run())
 
-            # Wait for processing to start
+            # Wait for processing to start, then ensure workers are alive
             await wait_for_progress(
-                runner, min_processed=200, timeout=30, collector_name=self.collector_name
+                runner, min_processed=100, timeout=30, collector_name=self.collector_name
             )
+            await wait_for_stage_workers(runner, "transform", min_workers=2, timeout=10)
 
-            # Scale down: kill workers sequentially
-            for _ in range(2):
+            # Scale down: kill workers sequentially (retry to handle timing)
+            for _ in range(5):
+                if kills >= 2:
+                    break
                 try:
                     if await kill_random_worker(runner, stage_id="transform"):
                         kills += 1

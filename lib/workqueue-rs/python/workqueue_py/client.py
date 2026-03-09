@@ -628,6 +628,215 @@ class WorkQueueClient:
     # Queue Completion API
     # =========================================================================
 
+    # =========================================================================
+    # QueueGroup API
+    # =========================================================================
+
+    def create_queue_group(self, group_name: str, num_partitions: int) -> dict[str, Any]:
+        """Create a group of partition queues atomically.
+
+        Args:
+            group_name: Logical group name (e.g., "job123_stage2_partitions")
+            num_partitions: Number of partition queues to create
+
+        Returns:
+            Dict with queue_names, version, created
+        """
+        self._check_connected()
+
+        request = pb2.CreateQueueGroupRequest(
+            group_name=group_name,
+            num_partitions=num_partitions,
+        )
+        response = self._stub.CreateQueueGroup(request)
+        return {
+            "queue_names": list(response.queue_names),
+            "version": response.version,
+            "created": response.created,
+        }
+
+    def ack_and_scatter(
+        self,
+        upstream_queue: str,
+        upstream_msg_ids: list[str],
+        upstream_claim_tokens: list[str] | None,
+        group_name: str,
+        partition_payloads: dict[int, list[bytes]],
+        state_namespace: str | None = None,
+        state_puts: dict[str, bytes] | None = None,
+        state_deletes: list[str] | None = None,
+    ) -> list[str]:
+        """Atomically ack upstream + push to multiple partition queues.
+
+        Args:
+            upstream_queue: Queue to ack from
+            upstream_msg_ids: Message IDs to acknowledge
+            upstream_claim_tokens: Claim tokens (1:1 with upstream_msg_ids)
+            group_name: Target queue group name
+            partition_payloads: Dict of partition_id -> list of payloads
+            state_namespace: Optional namespace for state updates
+            state_puts: Optional dict of state key -> value to set
+            state_deletes: Optional list of state keys to delete
+
+        Returns:
+            List of all new downstream message IDs
+        """
+        self._check_connected()
+
+        if upstream_msg_ids:
+            if not upstream_claim_tokens or len(upstream_claim_tokens) != len(upstream_msg_ids):
+                raise ValueError(
+                    "upstream_claim_tokens must match upstream_msg_ids length"
+                )
+
+        partitions = [
+            pb2.PartitionPayload(partition_id=pid, payloads=payloads)
+            for pid, payloads in partition_payloads.items()
+        ]
+
+        request = pb2.AckAndScatterRequest(
+            upstream_queue=upstream_queue,
+            upstream_msg_ids=upstream_msg_ids,
+            upstream_claim_tokens=upstream_claim_tokens or [],
+            group_name=group_name,
+            partitions=partitions,
+            worker_id=self.worker_id,
+            lease_id=self.lease_id,
+            state_namespace=state_namespace or "",
+            state_puts=state_puts or {},
+            state_deletes=state_deletes or [],
+        )
+
+        response = self._stub.AckAndScatter(request)
+        if not response.success:
+            raise RuntimeError("AckAndScatter failed")
+        return list(response.new_msg_ids)
+
+    def claim_from_group(
+        self,
+        group_name: str,
+        batch_size: int = 1,
+        timeout_ms: int = 5000,
+        assigned_partitions: list[int] | None = None,
+        allow_steal: bool = False,
+        steal_pending_threshold: int = 0,
+    ) -> tuple[list[Message], str, int]:
+        """Claim messages from a partition group.
+
+        The broker picks the best partition (highest pending among assigned).
+        If assigned partitions are empty and allow_steal=True, steals from
+        unassigned partitions exceeding steal_pending_threshold.
+
+        Args:
+            group_name: Queue group name
+            batch_size: Max messages to claim
+            timeout_ms: Wait timeout
+            assigned_partitions: Partition indices this worker is assigned
+            allow_steal: Allow claiming from unassigned partitions
+            steal_pending_threshold: Only steal if pending > threshold
+
+        Returns:
+            Tuple of (messages, source_queue, source_partition)
+        """
+        self._check_connected()
+
+        request = pb2.ClaimFromGroupRequest(
+            group_name=group_name,
+            worker_id=self.worker_id,
+            lease_id=self.lease_id,
+            batch_size=batch_size,
+            timeout_ms=timeout_ms,
+            assigned_partitions=assigned_partitions or [],
+            allow_steal=allow_steal,
+            steal_pending_threshold=steal_pending_threshold,
+        )
+
+        response = self._stub.ClaimFromGroup(request)
+        messages = [Message.from_proto(m) for m in response.messages]
+        if messages:
+            if len(response.claim_tokens) != len(messages):
+                raise ValueError(
+                    f"ClaimFromGroup protocol error: got {len(messages)} messages "
+                    f"but {len(response.claim_tokens)} claim tokens"
+                )
+            for msg, token in zip(messages, response.claim_tokens, strict=True):
+                msg.claim_token = token
+        return messages, response.source_queue, response.source_partition
+
+    def is_group_finished(self, group_name: str) -> dict[str, Any]:
+        """Check if all queues in a group are finished and drained.
+
+        Returns:
+            Dict with all_finished, all_drained, safe_to_exit, partitions
+        """
+        self._check_connected()
+
+        request = pb2.IsGroupFinishedRequest(group_name=group_name)
+        response = self._stub.IsGroupFinished(request)
+        return {
+            "all_finished": response.all_finished,
+            "all_drained": response.all_drained,
+            "safe_to_exit": response.safe_to_exit,
+            "partitions": [
+                {
+                    "partition_id": p.partition_id,
+                    "pending_count": p.pending_count,
+                    "claimed_count": p.claimed_count,
+                    "finished": p.finished,
+                }
+                for p in response.partitions
+            ],
+        }
+
+    def get_group_stats(self, group_name: str) -> dict[str, Any]:
+        """Get stats for all partitions in a group with skew detection.
+
+        Returns:
+            Dict with partition stats, totals, and skew metrics
+        """
+        self._check_connected()
+
+        request = pb2.GetGroupStatsRequest(group_name=group_name)
+        response = self._stub.GetGroupStats(request)
+        return {
+            "partitions": [
+                {
+                    "partition_id": p.partition_id,
+                    "pending_count": p.pending_count,
+                    "claimed_count": p.claimed_count,
+                    "total_pushed": p.total_pushed,
+                    "total_acked": p.total_acked,
+                }
+                for p in response.partitions
+            ],
+            "total_pending": response.total_pending,
+            "total_claimed": response.total_claimed,
+            "skew_ratio": response.skew_ratio,
+            "hot_partitions": list(response.hot_partitions),
+            "max_partition_pending": response.max_partition_pending,
+            "median_partition_pending": response.median_partition_pending,
+            "version": response.version,
+        }
+
+    def mark_group_finished(self, group_name: str) -> dict[str, Any]:
+        """Mark all queues in a group as finished.
+
+        Returns:
+            Dict with success, queues_marked
+        """
+        self._check_connected()
+
+        request = pb2.MarkGroupFinishedRequest(group_name=group_name)
+        response = self._stub.MarkGroupFinished(request)
+        return {
+            "success": response.success,
+            "queues_marked": response.queues_marked,
+        }
+
+    # =========================================================================
+    # Queue Completion API
+    # =========================================================================
+
     def mark_queue_finished(self, queue: str) -> bool:
         """Mark a queue as finished (no more messages will be pushed).
 

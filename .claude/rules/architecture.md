@@ -39,14 +39,14 @@ WorkQueue (workqueue-rs, Rust)
   │  claim() → StageWorker (atomic, competing consumers)
   ▼
 StageWorker
-  1. claim(merge_upstream=N) → [QueueMessage × N]
+  1. claim_from_group(merge_upstream=N) → [QueueMessage × N]
   2. fetch SplitPayload from SplitPayloadStore (Arrow tables)
   3. merge payloads (Arrow concat) if N > 1
   4. operator.process_split(split, payload) → PayloadResult
   5. store output SplitPayload → SplitPayloadStore
-  6. ack_and_forward (atomic: ack upstream + push to downstream queue)
+  6. ack_and_scatter (atomic: ack upstream + push to downstream QueueGroup)
   ▼
-Next Stage's WorkQueue ...
+Next Stage's QueueGroup ...
   ▼
 Sink (write to storage)
   └── SinkManager: batched commit (e.g., LanceDB fragment → commit)
@@ -56,7 +56,9 @@ Sink (write to storage)
 
 ## Queue Model (WorkQueue)
 
-Single queue per stage (not per-partition). Workers compete via `claim()`.
+All inter-stage data flows through QueueGroup (1 partition for non-shuffle, N for shuffle).
+Source planner queues and sink commit queues remain as single queues (internal coordination).
+Workers compete via `claim_from_group()` (broker-directed partition selection).
 
 ```
 Key Schema (RocksDB via workqueue-rs):
@@ -108,7 +110,7 @@ class MyOperator(Operator):
 ```python
 # In process_split, use broker_endpoint from runtime:
 # state_get(namespace, key) / state_put(namespace, key, value)
-# These are atomic with ack_and_forward — no partial updates
+# These are atomic with ack_and_scatter — no partial updates
 ```
 
 ---
@@ -225,7 +227,7 @@ lib/workqueue-rs/
 
 1. **Queue operations are O(1)** — counters in QueueMeta, no scans in hot path
 2. **Operators are stateless** — all persistent state via WorkQueue `state_get`/`state_put`
-3. **Exactly-once semantics** — `ack_and_forward` is atomic (ack upstream + push downstream in one WriteBatch)
-4. **No partitions** — single queue per stage; workers compete via `claim()`
+3. **Exactly-once semantics** — `ack_and_scatter` is atomic (ack upstream + push to downstream QueueGroup in one WriteBatch)
+4. **Unified QueueGroup** — all inter-stage data flows through QueueGroup (1 partition for non-shuffle, N for shuffle); workers compete via `claim_from_group()`
 5. **Operator config is immutable** — frozen after `__init__`; no `set_*()` methods
 6. **Core never imports operators** — `_internal/core/` must not reference specific operator types from `_internal/operators/`. Behavior differences are expressed through `OperatorConfig` hooks (`get_output_partition_count()`, `create_source()`, etc.)

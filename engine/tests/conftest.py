@@ -72,7 +72,6 @@ def make_stage_runtime() -> StageRuntime:
     """
     return StageRuntime(
         broker_endpoint=None,
-        upstream_queue_name=None,
     )
 
 

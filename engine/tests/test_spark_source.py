@@ -551,7 +551,6 @@ class TestSparkSplitPlanner:
                 port=workqueue_backend.port,
                 storage_url="memory://",
             ),
-            upstream_queue_name=None,
         )
         master = StageMaster(
             job_id="test-full-pipeline",
