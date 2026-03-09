@@ -156,6 +156,11 @@ class StageWorker:
         self._running = False
         self._safe_to_exit = False
 
+    @property
+    def _upstream_name(self) -> Optional[str]:
+        """Upstream queue/group name, or None if not set."""
+        return self._runtime.upstream.name if self._runtime.upstream else None
+
     def _init_operator(self) -> None:
         runtime = OperatorRuntime(
             job_id=self.job_id,
@@ -366,9 +371,7 @@ class StageWorker:
         assert self.queue_client is not None
         assert self._operator is not None
 
-        upstream_queue = upstream_queue_override or (
-            self._runtime.upstream.name if self._runtime.upstream else None
-        )
+        upstream_queue = upstream_queue_override or self._upstream_name
         assert upstream_queue is not None
 
         batch = self._parse_records(records, upstream_queue=upstream_queue)
@@ -457,9 +460,7 @@ class StageWorker:
         upstream_queue: Optional[str] = None,
     ) -> Optional[_ParsedBatch]:
         """Parse claimed records, fetch payloads. Returns None if nacked."""
-        nack_queue = upstream_queue or (
-            self._runtime.upstream.name if self._runtime.upstream else None
-        )
+        nack_queue = upstream_queue or self._upstream_name
 
         msg_ids: list[str] = []
         claim_tokens: list[str] = []
@@ -518,9 +519,7 @@ class StageWorker:
     ) -> None:
         """Nack all messages with WebUI nack events."""
         assert self.queue_client is not None
-        queue = upstream_queue_override or (
-            self._runtime.upstream.name if self._runtime.upstream else None
-        )
+        queue = upstream_queue_override or self._upstream_name
         assert queue is not None
 
         ts_ns = time.time_ns()

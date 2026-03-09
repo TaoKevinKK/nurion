@@ -84,14 +84,15 @@ class SourceManager:
     async def run_direct_producer(
         self,
         queue_client: "WorkQueueQueueClient",
-        output_queue_name: str,
+        output_group_name: str,
         broker_endpoint: "QueueEndpoint",
+        partition: int = 0,
     ) -> int:
         """Run the DirectProducer. Returns number of items produced."""
         assert isinstance(self._source, DirectProducer)
         ctx = DirectProduceContext(
             queue_client=queue_client,
-            output_queue_name=output_queue_name,
+            output_queue_name=f"{output_group_name}_p{partition}",
             broker_endpoint=broker_endpoint,
             stage_id=self._stage_id,
             job_id=self._job_id,

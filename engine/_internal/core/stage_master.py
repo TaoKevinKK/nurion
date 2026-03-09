@@ -220,9 +220,8 @@ class StageMaster:
 
         # --- DirectProducer: no workers ---
         if self._source_manager and self._source_manager.is_direct_producer:
-            # DirectProducer writes to partition 0 of the output group
             await self._source_manager.run_direct_producer(
-                queue_client, f"{self._output_group_name}_p0", broker_endpoint
+                queue_client, self._output_group_name, broker_endpoint
             )
             self._write_stage_state(status="RUNNING")
             self._running = True
@@ -248,7 +247,9 @@ class StageMaster:
         if self._source_manager is not None and not self._source_manager.is_direct_producer:
             from _internal.runtime.queue_stats import QueueRef
 
-            self.upstream = QueueRef.queue(self._source_manager.planner_queue_name)
+            planner_queue = self._source_manager.planner_queue_name
+            assert planner_queue is not None
+            self.upstream = QueueRef.queue(planner_queue)
 
         # --- Init workers (uses self.upstream, already resolved) ---
         self._init_managers()
@@ -432,8 +433,6 @@ class StageMaster:
 
     def _mark_finished_with_retry(self, queue_client, max_retries: int = 3) -> None:
         """Mark output group as finished with retries to prevent downstream hangs."""
-        import time as _time
-
         for attempt in range(max_retries):
             try:
                 queue_client.mark_group_finished(self._output_group_name)
@@ -447,7 +446,7 @@ class StageMaster:
                 self.logger.warning(
                     f"Retry {attempt + 1}/{max_retries} marking group finished: {e}"
                 )
-                _time.sleep(0.5 * (attempt + 1))
+                time.sleep(0.5 * (attempt + 1))
 
     def _write_stage_state(self, status: str) -> None:
         """Write stage status into WorkQueue state."""
