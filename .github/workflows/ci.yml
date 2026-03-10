@@ -188,6 +188,8 @@ jobs:
     - name: Set up Rust
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       uses: dtolnay/rust-toolchain@stable
+      with:
+        components: llvm-tools-preview
 
     - name: Install protoc
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
@@ -201,11 +203,23 @@ jobs:
       with:
         workspaces: "lib/workqueue-rs -> target"
 
-    - name: Run Rust tests
+    - name: Install cargo-llvm-cov
+      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
+      uses: taiki-e/install-action@cargo-llvm-cov
+
+    - name: Run Rust tests with coverage
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
         cd lib/workqueue-rs
-        cargo test --release
+        cargo llvm-cov --release --codecov --output-path codecov.json
+
+    - name: Upload Rust coverage artifact
+      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-workqueue-rs
+        path: lib/workqueue-rs/codecov.json
+        retention-days: 1
 
   # ============================================================================
   # Rust code quality (clippy + rustfmt)
@@ -519,8 +533,18 @@ jobs:
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
         cd engine
-        uv run --no-sync pytest tests/ -v --tb=short -m "not integration and not distributed and not workflow and not chaos and not stability"
-    
+        uv run --no-sync pytest tests/ -v --tb=short -m "not integration and not distributed and not workflow and not chaos and not stability" --cov=_internal --cov-report=
+
+    - name: Upload coverage artifact
+      if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-engine-unit
+        path: engine/.coverage
+        include-hidden-files: true
+        retention-days: 1
+        if-no-files-found: ignore
+
     - name: Upload Ray logs on failure
       if: failure()
       uses: actions/upload-artifact@v4
@@ -611,8 +635,17 @@ jobs:
     - name: Run integration tests
       run: |
         cd engine
-        uv run --no-sync pytest tests/ -v --tb=short -m "integration"
-    
+        uv run --no-sync pytest tests/ -v --tb=short -m "integration" --cov=_internal --cov-report=
+
+    - name: Upload coverage artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-engine-integration
+        path: engine/.coverage
+        include-hidden-files: true
+        retention-days: 1
+        if-no-files-found: ignore
+
     - name: Upload Ray logs on failure
       if: failure()
       uses: actions/upload-artifact@v4
@@ -687,8 +720,19 @@ jobs:
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
         cd engine
-        uv run --no-sync pytest tests/ -v --tb=short -m "distributed"
-    
+        uv run --no-sync pytest tests/ -v --tb=short -m "distributed" --cov=_internal --cov-report=
+
+    - name: Upload coverage artifact
+      if: (steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push') && always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-engine-distributed
+        path: engine/.coverage
+        include-hidden-files: true
+        retention-days: 1
+        if-no-files-found: ignore
+        if-no-files-found: ignore
+
     - name: Upload Ray logs on failure
       if: failure()
       uses: actions/upload-artifact@v4
@@ -757,8 +801,19 @@ jobs:
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
         cd engine
-        uv run --no-sync pytest tests/ -v --tb=short -m "stability" --timeout=1200
-    
+        uv run --no-sync pytest tests/ -v --tb=short -m "stability" --timeout=1200 --cov=_internal --cov-report=
+
+    - name: Upload coverage artifact
+      if: (steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push') && always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-engine-stability
+        path: engine/.coverage
+        include-hidden-files: true
+        retention-days: 1
+        if-no-files-found: ignore
+        if-no-files-found: ignore
+
     - name: Upload Ray logs on failure
       if: failure()
       uses: actions/upload-artifact@v4
@@ -847,8 +902,19 @@ jobs:
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
         cd engine
-        uv run --no-sync pytest tests/ -v --tb=short -m "workflow" --timeout=1200
-    
+        uv run --no-sync pytest tests/ -v --tb=short -m "workflow" --timeout=1200 --cov=_internal --cov-report=
+
+    - name: Upload coverage artifact
+      if: (steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push') && always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-engine-workflow
+        path: engine/.coverage
+        include-hidden-files: true
+        retention-days: 1
+        if-no-files-found: ignore
+        if-no-files-found: ignore
+
     - name: Upload Ray logs on failure
       if: failure()
       uses: actions/upload-artifact@v4
@@ -926,8 +992,19 @@ jobs:
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
         cd engine
-        uv run --no-sync pytest tests/ -v --tb=short -m "chaos" --timeout=600
-    
+        uv run --no-sync pytest tests/ -v --tb=short -m "chaos" --timeout=600 --cov=_internal --cov-report=
+
+    - name: Upload coverage artifact
+      if: (steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push') && always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-engine-chaos
+        path: engine/.coverage
+        include-hidden-files: true
+        retention-days: 1
+        if-no-files-found: ignore
+        if-no-files-found: ignore
+
     - name: Upload Ray logs on failure
       if: failure()
       uses: actions/upload-artifact@v4
@@ -936,3 +1013,121 @@ jobs:
         path: /tmp/ray/
         retention-days: 1
         if-no-files-found: ignore
+
+  # ============================================================================
+  # Coverage report (aggregates all test jobs)
+  # ============================================================================
+
+  coverage-report:
+    name: Coverage Report
+    runs-on: ubuntu-latest
+    needs:
+      - build-raydp
+      - build-workqueue-rs
+      - test-workqueue-rs
+      - test-engine-unit
+      - test-engine-integration
+      - test-engine-distributed
+      - test-engine-stability
+      - test-engine-workflow
+      - test-engine-chaos
+    if: always() && !cancelled()
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Download all coverage artifacts
+      uses: actions/download-artifact@v4
+      with:
+        pattern: coverage-*
+        path: /tmp/coverage/
+        merge-multiple: false
+
+    - name: Download pre-built wheels
+      uses: actions/download-artifact@v4
+      with:
+        pattern: '*-wheel'
+        path: /tmp/wheels/
+        merge-multiple: true
+      continue-on-error: true
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v4
+      with:
+        version: "latest"
+        enable-cache: true
+        cache-dependency-glob: "uv.lock"
+
+    - name: Set up Python 3.12
+      run: uv python install 3.12
+
+    - name: Install dependencies
+      run: |
+        cd engine
+        uv sync --dev --python 3.12 --no-sources --find-links /tmp/wheels/
+
+    # ---- Python (engine) overall + diff coverage ----
+    - name: Combine Python coverage
+      run: |
+        cd engine
+        # Collect all .coverage files from artifacts into numbered files for combine
+        i=0
+        for f in $(find /tmp/coverage/ -name '.coverage' -type f); do
+          cp "$f" ".coverage.$i"
+          i=$((i + 1))
+        done
+        if [ "$i" -gt 0 ]; then
+          uv run --no-sync coverage combine
+          uv run --no-sync coverage xml -o coverage.xml
+          echo "## Python (engine) Overall Coverage" >> $GITHUB_STEP_SUMMARY
+          uv run --no-sync coverage report --format=markdown >> $GITHUB_STEP_SUMMARY
+        else
+          echo "## Python (engine) Coverage" >> $GITHUB_STEP_SUMMARY
+          echo "No Python coverage data collected." >> $GITHUB_STEP_SUMMARY
+        fi
+
+    - name: Python diff coverage
+      if: github.event_name == 'pull_request'
+      run: |
+        cd engine
+        if [ -f coverage.xml ]; then
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Python (engine) Diff Coverage" >> $GITHUB_STEP_SUMMARY
+          uv run --no-sync diff-cover coverage.xml \
+            --compare-branch=origin/${{ github.base_ref }} \
+            --markdown-report=/tmp/diff-cover.md \
+            --fail-under=0 || true
+          cat /tmp/diff-cover.md >> $GITHUB_STEP_SUMMARY
+        fi
+
+    # ---- Rust (workqueue-rs) coverage ----
+    - name: Rust coverage summary
+      run: |
+        if [ -f /tmp/coverage/coverage-workqueue-rs/codecov.json ]; then
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Rust (workqueue-rs) Coverage" >> $GITHUB_STEP_SUMMARY
+          echo "Rust coverage data uploaded to Codecov." >> $GITHUB_STEP_SUMMARY
+        else
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Rust (workqueue-rs) Coverage" >> $GITHUB_STEP_SUMMARY
+          echo "No Rust coverage data collected." >> $GITHUB_STEP_SUMMARY
+        fi
+
+    # ---- Upload to Codecov ----
+    - name: Upload Python coverage to Codecov
+      if: hashFiles('engine/coverage.xml') != ''
+      uses: codecov/codecov-action@v4
+      with:
+        file: ./engine/coverage.xml
+        flags: engine
+        fail_ci_if_error: false
+
+    - name: Upload Rust coverage to Codecov
+      if: hashFiles('/tmp/coverage/coverage-workqueue-rs/codecov.json') != ''
+      uses: codecov/codecov-action@v4
+      with:
+        file: /tmp/coverage/coverage-workqueue-rs/codecov.json
+        flags: workqueue-rs
+        fail_ci_if_error: false

@@ -61,6 +61,8 @@ dev = [
     "s3fs>=2024.6.0",
     "kubernetes>=32.0.0",
     "httpx>=0.27.0",
+    "pytest-cov>=6.0.0",
+    "diff-cover>=9.0.0",
 ]
 
 [build-system]
@@ -170,4 +172,24 @@ markers = [
     "benchmark: marks performance benchmark tests (skipped by default in CI)",
     "slow: marks slow tests (WorkQueue broker startup ~5s per test)",
     "timeout: marks tests with timeout (requires pytest-timeout)",
+]
+
+[tool.coverage.run]
+source = ["_internal"]
+parallel = true
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+
+[tool.coverage.paths]
+source = [
+    "_internal/",
+    "**/site-packages/_internal/",
 ]

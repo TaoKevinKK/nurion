@@ -18,5 +18,5 @@ from _internal.core.job import Job
 from _internal.core.stage import Stage
 from _internal.core.operator import Operator
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = ["Job", "Stage", "Operator"]
