@@ -482,7 +482,10 @@ class StageWorker:
             if isinstance(message, SourceQueueMessage):
                 source_message = message
             else:
-                payload = self.payload_store.get(message.payload_key)
+                payload = self.payload_store.get_with_hint(
+                    message.payload_key,
+                    message.metadata.get("payload_loc"),
+                )
                 if payload is None:
                     self.logger.error(
                         f"Payload missing for key {message.payload_key}, "
@@ -630,11 +633,15 @@ class StageWorker:
                 if partition_column not in table.column_names:
                     out_id = split_id if len(output_payloads) == 1 else f"{split_id}_{idx}"
                     self.payload_store.store(out_id, out_payload)
+                    metadata: Dict[str, Any] = {"source_stage": self.stage_id}
+                    loc = self.payload_store.get_location(out_id)
+                    if loc:
+                        metadata["payload_loc"] = loc
                     out_msg = DataQueueMessage(
                         message_id=out_id,
                         split_id=out_id,
                         payload_key=out_id,
-                        metadata={"source_stage": self.stage_id},
+                        metadata=metadata,
                     )
                     scatter.setdefault(0, []).append(out_msg.to_bytes())
                     continue
@@ -653,14 +660,18 @@ class StageWorker:
 
                     partition_payload = SplitPayload(data=partition_table, split_id=out_id)
                     self.payload_store.store(out_id, partition_payload)
+                    p_metadata: Dict[str, Any] = {
+                        "source_stage": self.stage_id,
+                        "partition_id": str(partition_id),
+                    }
+                    p_loc = self.payload_store.get_location(out_id)
+                    if p_loc:
+                        p_metadata["payload_loc"] = p_loc
                     out_msg = DataQueueMessage(
                         message_id=out_id,
                         split_id=out_id,
                         payload_key=out_id,
-                        metadata={
-                            "source_stage": self.stage_id,
-                            "partition_id": str(partition_id),
-                        },
+                        metadata=p_metadata,
                     )
                     scatter.setdefault(partition_id, []).append(out_msg.to_bytes())
         else:
@@ -668,14 +679,19 @@ class StageWorker:
             for idx, out_payload in enumerate(output_payloads):
                 out_id = split_id if len(output_payloads) == 1 else f"{split_id}_{idx}"
                 self.payload_store.store(out_id, out_payload)
+                ns_metadata: Dict[str, Any] = {"source_stage": self.stage_id}
+                ns_loc = self.payload_store.get_location(out_id)
+                if ns_loc:
+                    ns_metadata["payload_loc"] = ns_loc
                 out_msg = DataQueueMessage(
                     message_id=out_id,
                     split_id=out_id,
                     payload_key=out_id,
-                    metadata={"source_stage": self.stage_id},
+                    metadata=ns_metadata,
                 )
                 scatter.setdefault(0, []).append(out_msg.to_bytes())
 
+        self.payload_store.flush_pending_writes()
         self.queue_client.ack_and_scatter(
             upstream_queue=upstream_queue,
             upstream_msg_ids=batch.msg_ids,

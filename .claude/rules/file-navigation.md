@@ -35,6 +35,7 @@
 | Add a DB model (control) | `control/control/models/` + alembic migration | |
 | Understand full module layout | `engine/_internal/INDEX.md` | Read this first |
 | Understand execution pipeline | `.claude/rules/architecture.md` | Diagrams + key invariants |
+| Change NVMe payload store | `_internal/core/nvme_payload_store.py` | Design: `docs/design/nvme-payload-store.md` |
 | Find architecture decision | `docs/design/*.md` | Before proposing changes |
 
 ---

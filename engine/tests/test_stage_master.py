@@ -452,12 +452,16 @@ class TestStageWorkerPayloadCleanup:
 
         payload_key = "input_payload_abc"
         mock_payload_store = MagicMock()
-        mock_payload_store.get.return_value = SplitPayload(
+        test_payload = SplitPayload(
             data=pa.table({"x": [1, 2, 3]}),
             split_id="s1",
         )
+        mock_payload_store.get.return_value = test_payload
+        mock_payload_store.get_with_hint.return_value = test_payload
         mock_payload_store.delete.return_value = True
         mock_payload_store.store.return_value = payload_key
+        mock_payload_store.get_location.return_value = None
+        mock_payload_store.flush_pending_writes.return_value = None
 
         runtime = WorkerRuntime(
             worker_id="w_cleanup",
@@ -491,6 +495,7 @@ class TestStageWorkerPayloadCleanup:
 
         await worker._process_and_ack(records)
 
-        # The input payload must have been fetched, then deleted.
-        mock_payload_store.get.assert_called_once_with(payload_key)
+        # The input payload must have been fetched (via get_with_hint), then deleted.
+        mock_payload_store.get_with_hint.assert_called_once()
+        assert mock_payload_store.get_with_hint.call_args[0][0] == payload_key
         mock_payload_store.delete.assert_called_once_with(payload_key)

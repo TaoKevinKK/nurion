@@ -38,5 +38,9 @@ mvnw.cmd
 *.so
 *.dylib
 
+# Coverage
+.coverage
+htmlcov/
+
 # Test data
 engine/tests/testdata/resources/

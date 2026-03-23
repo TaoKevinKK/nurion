@@ -46,6 +46,11 @@ from _internal.core.split_payload_store import (
     RaySplitPayloadStore,
     FsspecSplitPayloadStore,
 )
+from _internal.core.nvme_payload_store import (
+    NvmeSplitPayloadStore,
+    WritePolicy,
+    parse_nvme_uri,
+)
 from _internal.queue import WorkQueueBrokerManager
 from _internal.runtime.autoscaler import SimpleAutoscaler
 from _internal.runtime.backpressure import JobBackpressureController
@@ -183,7 +188,8 @@ class RayJobRunner:
         """Create a SplitPayloadStore based on job config URI.
 
         Returns:
-            A ``RaySplitPayloadStore`` for ``ray://`` URIs (default), or a
+            A ``RaySplitPayloadStore`` for ``ray://`` URIs (default),
+            ``NvmeSplitPayloadStore`` for ``nvme://`` URIs, or a
             ``FsspecSplitPayloadStore`` for any other fsspec-compatible URI
             (e.g. ``s3://``, ``file://``).
         """
@@ -192,6 +198,18 @@ class RayJobRunner:
             store = RaySplitPayloadStore(name=f"payload_store_{self.job.job_id}")
             store.wait_ready()
             return store
+        elif uri.startswith("nvme://"):
+            root_dirs, params = parse_nvme_uri(uri)
+            write_policy = WritePolicy(params.get("write_policy", "write_back"))
+            quota_bytes = int(params["quota_gb"]) * (1024**3) if "quota_gb" in params else None
+            return NvmeSplitPayloadStore(
+                root_dirs=root_dirs,
+                job_id=self.job.job_id,
+                write_policy=write_policy,
+                s3_uri=params.get("s3_fallback"),
+                s3_options=self.job.config.payload_store_options or None,
+                quota_bytes=quota_bytes,
+            )
         else:
             return FsspecSplitPayloadStore(
                 base_uri=uri,

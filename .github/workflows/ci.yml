@@ -731,7 +731,6 @@ jobs:
         include-hidden-files: true
         retention-days: 1
         if-no-files-found: ignore
-        if-no-files-found: ignore
 
     - name: Upload Ray logs on failure
       if: failure()
@@ -811,7 +810,6 @@ jobs:
         path: engine/.coverage
         include-hidden-files: true
         retention-days: 1
-        if-no-files-found: ignore
         if-no-files-found: ignore
 
     - name: Upload Ray logs on failure
@@ -913,7 +911,6 @@ jobs:
         include-hidden-files: true
         retention-days: 1
         if-no-files-found: ignore
-        if-no-files-found: ignore
 
     - name: Upload Ray logs on failure
       if: failure()
@@ -1002,7 +999,6 @@ jobs:
         path: engine/.coverage
         include-hidden-files: true
         retention-days: 1
-        if-no-files-found: ignore
         if-no-files-found: ignore
 
     - name: Upload Ray logs on failure

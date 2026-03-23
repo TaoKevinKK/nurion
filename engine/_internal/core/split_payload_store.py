@@ -107,6 +107,44 @@ class SplitPayloadStore(ABC):
         """
         pass
 
+    # -- Optional methods with default implementations (backward-compatible) --
+
+    def get_with_hint(
+        self, key: str, location_hint: Optional[Dict[str, Any]] = None
+    ) -> Optional[SplitPayload]:
+        """Retrieve payload using an optional location hint for faster access.
+
+        Location-aware stores (e.g., NVMe) use the hint to try a remote Flight
+        endpoint or S3 path before falling back to a full lookup. The hint is
+        typically embedded in ``DataQueueMessage.metadata["payload_loc"]`` by
+        the producing worker.
+
+        Default implementation ignores the hint and delegates to :meth:`get`.
+        """
+        return self.get(key)
+
+    def get_location(self, key: str) -> Optional[Dict[str, Any]]:
+        """Return location metadata for a stored payload.
+
+        The returned dict (e.g., ``{"flight": "grpc://...", "s3": "s3://..."}``)
+        is embedded in the downstream queue message so consumers can read
+        directly without a registry lookup.
+
+        Default implementation returns ``None`` (no location tracking).
+        """
+        return None
+
+    def flush_pending_writes(self) -> None:
+        """Block until all pending async writes are durable.
+
+        Called by ``StageWorker`` before ``ack_and_scatter`` to ensure that
+        WRITE_THROUGH payloads have been confirmed by S3 before the upstream
+        messages are acknowledged.
+
+        Default implementation is a no-op.
+        """
+        pass
+
 
 # =============================================================================
 # Ray Object Store Implementation

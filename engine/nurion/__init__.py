@@ -42,6 +42,7 @@ from _internal.operators.llm import (
     ExternalLLMOperator,
     ExternalLLMOperatorConfig,
 )
+from _internal.core.nvme_payload_store import NvmeSplitPayloadStore, WritePolicy
 from _internal.serve import ModelConfig, ModelServiceManager, create_manager
 from _internal.serve.client import ModelClient
 
@@ -82,4 +83,6 @@ __all__ = [
     "ModelServiceManager",
     "create_manager",
     "ModelClient",
+    "NvmeSplitPayloadStore",
+    "WritePolicy",
 ]
