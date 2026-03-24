@@ -290,6 +290,43 @@ def minio_credentials(minio_container) -> dict:
     }
 
 
+FLIGHT_IMAGE_TAG = "nurion-test-flight:latest"
+FLIGHT_INTERNAL_PORT = 8815
+
+
+@pytest.fixture(scope="session")
+def _docker_available():
+    """Skip if Docker daemon is not reachable."""
+    try:
+        import docker  # type: ignore[import-untyped]
+
+        client = docker.from_env()
+        client.ping()
+    except Exception as exc:
+        pytest.skip(f"Docker daemon not available: {exc}")
+
+
+@pytest.fixture(scope="session")
+def flight_server_image(_docker_available):
+    """Build (or reuse) the Flight server Docker image once per session."""
+    import docker  # type: ignore[import-untyped]
+
+    client = docker.from_env()
+    try:
+        client.images.get(FLIGHT_IMAGE_TAG)
+        yield FLIGHT_IMAGE_TAG
+        return
+    except docker.errors.ImageNotFound:
+        pass
+
+    context = os.path.join(os.path.dirname(__file__), "containers")
+    if not os.path.isfile(os.path.join(context, "Dockerfile.flight")):
+        pytest.skip("tests/containers/Dockerfile.flight not found")
+
+    client.images.build(path=context, dockerfile="Dockerfile.flight", tag=FLIGHT_IMAGE_TAG, rm=True)
+    yield FLIGHT_IMAGE_TAG
+
+
 @pytest.fixture(scope="module")
 def database_url(postgres_container) -> str:
     """Get async database URL from PostgreSQL container."""

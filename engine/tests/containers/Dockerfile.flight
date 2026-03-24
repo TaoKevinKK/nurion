@@ -1,0 +1,15 @@
+FROM python:3.13-slim
+
+# Only pyarrow is needed for the standalone Flight server.
+RUN pip install --no-cache-dir "pyarrow>=18.1.0"
+
+ENV PYTHONUNBUFFERED=1
+
+COPY flight_server.py /app/flight_server.py
+
+WORKDIR /app
+
+EXPOSE 8815
+
+ENTRYPOINT ["python", "/app/flight_server.py"]
+CMD ["--data-dir", "/data", "--port", "8815"]

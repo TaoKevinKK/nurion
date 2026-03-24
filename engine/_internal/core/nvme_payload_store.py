@@ -189,7 +189,9 @@ class NvmeDisk:
             old_size = os.path.getsize(final_path)
         except FileNotFoundError:
             old_size = 0
-        tmp_path = final_path + f".tmp.{os.getpid()}"
+        # Include thread ID to avoid collisions between concurrent writes in same process
+        tid = threading.get_ident()
+        tmp_path = final_path + f".tmp.{os.getpid()}_{tid}"
         with open(tmp_path, "wb") as f:
             writer = ipc.new_file(f, payload.data.schema)
             writer.write_table(payload.data)
@@ -204,10 +206,14 @@ class NvmeDisk:
         path = self._key_to_path(key)
         if not os.path.exists(path):
             return None
-        source = pa.memory_map(path, "r")
-        reader = ipc.open_file(source)
-        table = reader.read_all()
-        return SplitPayload.from_arrow(table, split_id=key)
+        try:
+            source = pa.memory_map(path, "r")
+            reader = ipc.open_file(source)
+            table = reader.read_all()
+            return SplitPayload.from_arrow(table, split_id=key)
+        except (FileNotFoundError, OSError):
+            # Race: file deleted between exists() and open()
+            return None
 
     def delete(self, key: str) -> bool:
         path = self._key_to_path(key)
@@ -240,11 +246,24 @@ class NvmeDisk:
     # -- Cleanup -------------------------------------------------------------
 
     def _cleanup_tmp_files(self) -> None:
-        """Remove stale .tmp files left by crashed workers."""
+        """Remove stale .tmp files left by crashed workers.
+
+        Only deletes tmp files whose PID indicates a dead process,
+        to avoid deleting tmp files being actively written by concurrent workers.
+        Tmp filename format: ``key.arrow.tmp.{pid}_{tid}``
+        """
         for tmp in Path(self._job_dir).rglob("*.arrow.tmp.*"):
             try:
-                tmp.unlink()
-            except OSError:
+                # Extract PID from filename: "key.arrow.tmp.{pid}_{tid}"
+                suffix = tmp.name.rsplit(".tmp.", 1)[-1]
+                pid_str = suffix.split("_")[0]
+                pid = int(pid_str)
+                # Only delete if the process is no longer alive
+                try:
+                    os.kill(pid, 0)  # signal 0 = check existence, no actual signal
+                except OSError:
+                    tmp.unlink(missing_ok=True)  # Process dead → safe to delete
+            except (ValueError, OSError):
                 pass
 
     def clear(self) -> int:

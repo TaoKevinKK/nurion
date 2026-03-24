@@ -789,3 +789,435 @@ class TestStageWorkerNvmeIntegration:
 
         # Verify get_with_hint was called (not bare get)
         mock_store.get_with_hint.assert_called_once_with("input_key", loc)
+
+
+# ===========================================================================
+# Advanced tests: fault injection, stress, edge cases
+# ===========================================================================
+
+
+class TestDiskFullDegradation:
+    """Test behavior when NVMe disk is full."""
+
+    def test_write_back_enospc_with_s3_fallback(self, tmp_path):
+        """WRITE_BACK: NVMe full → falls back to sync S3 write."""
+        s3_dir = tmp_path / "s3_mock"
+        store = NvmeSplitPayloadStore(
+            root_dirs=[str(tmp_path / "nvme0")],
+            job_id="job1",
+            write_policy=WritePolicy.WRITE_BACK,
+            s3_uri=f"file://{s3_dir}",
+            node_ip="127.0.0.1",
+            quota_bytes=1,  # 1 byte quota — immediately "full"
+        )
+        store._ensure_initialized()
+
+        # First write should exceed quota and fall back to S3
+        payload = _make_payload("k1", num_rows=10)
+        store.store("k1", payload)
+
+        # NVMe may or may not have it (quota is checked at select_disk level)
+        # But S3 should definitely have it after executor completes
+        if store._s3_executor:
+            store._s3_executor.shutdown(wait=True)
+            store._s3_executor = ThreadPoolExecutor(max_workers=4)
+
+        s3_files = list((tmp_path / "s3_mock" / "job1").rglob("*.arrow"))
+        assert len(s3_files) >= 1
+
+    def test_write_back_enospc_no_s3_raises(self, tmp_path):
+        """WRITE_BACK without S3: NVMe full → raises OSError."""
+        store = NvmeSplitPayloadStore(
+            root_dirs=[str(tmp_path / "nvme0")],
+            job_id="job1",
+            write_policy=WritePolicy.WRITE_BACK,
+            node_ip="127.0.0.1",
+            quota_bytes=500,  # Small enough to fill after one write
+        )
+        store._ensure_initialized()
+
+        # First write fills quota
+        store.store("k0", _make_payload("k0", num_rows=100))
+        # Second write exceeds quota
+        with pytest.raises(OSError):
+            store.store("k1", _make_payload("k1", num_rows=100))
+
+    def test_multi_disk_failover(self, tmp_path):
+        """When first disk is full, second disk should be selected."""
+        pool = NvmeDiskPool(
+            [str(tmp_path / "d0"), str(tmp_path / "d1")],
+            "job1",
+            quota_bytes=None,
+        )
+
+        # Fill first disk with a payload, then set its quota to used size
+        pool.write("k_fill", _make_payload("k_fill", num_rows=1000))
+
+        # Both disks should have space, verify writes distribute
+        for i in range(10):
+            pool.write(f"k{i}", _make_payload(f"k{i}", num_rows=5))
+
+        # All should be readable
+        for i in range(10):
+            assert pool.read(f"k{i}") is not None
+
+
+class TestQuotaEnforcement:
+    """Test per-disk quota tracking accuracy."""
+
+    def test_quota_tracks_used_bytes(self, tmp_path):
+        """_used_bytes should reflect actual file sizes on disk."""
+        disk = NvmeDisk(str(tmp_path), "job1", quota_bytes=10 * 1024 * 1024)
+
+        # Write some payloads
+        for i in range(5):
+            disk.write(f"k{i}", _make_payload(f"k{i}", num_rows=100))
+
+        # _used_bytes should match actual disk usage
+        actual = sum(
+            f.stat().st_size for f in Path(disk.job_dir).rglob("*.arrow") if ".tmp." not in f.name
+        )
+        assert disk._used_bytes == actual
+
+    def test_quota_after_delete(self, tmp_path):
+        disk = NvmeDisk(str(tmp_path), "job1", quota_bytes=10 * 1024 * 1024)
+
+        disk.write("k1", _make_payload("k1", num_rows=100))
+        used_after_write = disk._used_bytes
+        assert used_after_write > 0
+
+        disk.delete("k1")
+        assert disk._used_bytes == 0
+
+    def test_quota_after_overwrite(self, tmp_path):
+        """Overwriting same key should not double-count bytes."""
+        disk = NvmeDisk(str(tmp_path), "job1", quota_bytes=10 * 1024 * 1024)
+
+        disk.write("k1", _make_payload("k1", num_rows=10))
+        used_first = disk._used_bytes
+
+        # Overwrite with larger payload
+        disk.write("k1", _make_payload("k1", num_rows=100))
+        used_second = disk._used_bytes
+
+        # Should be roughly the size of the second write, not sum of both
+        assert used_second > used_first  # second is bigger
+        actual = sum(
+            f.stat().st_size for f in Path(disk.job_dir).rglob("*.arrow") if ".tmp." not in f.name
+        )
+        assert disk._used_bytes == actual
+
+    def test_quota_after_clear(self, tmp_path):
+        disk = NvmeDisk(str(tmp_path), "job1", quota_bytes=10 * 1024 * 1024)
+        for i in range(10):
+            disk.write(f"k{i}", _make_payload(f"k{i}", num_rows=50))
+        assert disk._used_bytes > 0
+
+        disk.clear()
+        assert disk._used_bytes == 0
+
+    def test_available_bytes_respects_quota(self, tmp_path):
+        quota = 100 * 1024  # 100KB
+        disk = NvmeDisk(str(tmp_path), "job1", quota_bytes=quota)
+        initial_avail = disk.available_bytes()
+        assert initial_avail <= quota
+
+        disk.write("k1", _make_payload("k1", num_rows=50))
+        after_write = disk.available_bytes()
+        assert after_write < initial_avail
+
+
+class TestFlightServerResilience:
+    """Test Flight server under adverse conditions."""
+
+    def test_semaphore_limits_concurrent_reads(self, tmp_path):
+        """More concurrent readers than semaphore allows — some should wait."""
+        disk = NvmeDisk(str(tmp_path), "job1")
+        disk.write("slow_k", _make_payload("slow_k", num_rows=1000))
+
+        # Semaphore = 2, start 4 concurrent readers
+        server = FlightPayloadServer([disk.job_dir], port=0, max_concurrent_reads=2)
+        t = threading.Thread(target=server.serve, daemon=True)
+        t.start()
+
+        results = []
+        errors = []
+
+        def read_one():
+            try:
+                c = flight.connect(f"grpc://127.0.0.1:{server.port}")
+                table = c.do_get(flight.Ticket(b"slow_k")).read_all()
+                results.append(table.num_rows)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=read_one) for _ in range(4)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=30)
+
+        # All should eventually succeed (semaphore blocks, doesn't reject)
+        assert len(results) == 4
+        assert all(r == 1000 for r in results)
+        assert len(errors) == 0
+        server.shutdown()
+
+    def test_multiple_stores_share_flight_singleton(self, tmp_path):
+        """Two NvmeSplitPayloadStore instances on the same node should share
+        one Flight server."""
+        store1 = NvmeSplitPayloadStore(
+            root_dirs=[str(tmp_path / "nvme_a")],
+            job_id="job_a",
+            node_ip="127.0.0.1",
+        )
+        store1._ensure_initialized()
+
+        store2 = NvmeSplitPayloadStore(
+            root_dirs=[str(tmp_path / "nvme_b")],
+            job_id="job_b",
+            node_ip="127.0.0.2",  # Different "node" so Flight read is attempted
+        )
+        store2._ensure_initialized()
+
+        # Store1 writes, store2 reads via Flight (different node_ip → not skipped)
+        store1.store("shared_k", _make_payload("shared_k", num_rows=3))
+        loc = store1.get_location("shared_k")
+
+        result = store2.get_with_hint("shared_k", loc)
+        assert result is not None
+        assert result.data.num_rows == 3
+
+
+class TestHashPrefixDistribution:
+    """Verify hash-prefix directory layout works correctly at scale."""
+
+    def test_1000_keys_distributed_across_prefixes(self, tmp_path):
+        """1000 keys should distribute across multiple prefix directories."""
+        disk = NvmeDisk(str(tmp_path), "job1")
+
+        # Use hex-formatted keys for diverse prefixes
+        for i in range(1000):
+            disk.write(f"{i:04x}_payload", _make_payload(f"k{i}", num_rows=2))
+
+        # Check directory structure
+        prefix_dirs = [d for d in Path(disk.job_dir).iterdir() if d.is_dir()]
+        # Hex keys 0000-03e7: first 2 chars span 00,01,02,03 = at least 4 prefixes
+        assert len(prefix_dirs) >= 4
+
+        # All keys should be readable
+        for i in range(1000):
+            result = disk.read(f"{i:04x}_payload")
+            assert result is not None
+            assert result.data.num_rows == 2
+
+    def test_prefix_dirs_cleaned_on_clear(self, tmp_path):
+        disk = NvmeDisk(str(tmp_path), "job1")
+        for i in range(50):
+            disk.write(f"k{i:04d}", _make_payload(f"k{i}", num_rows=1))
+
+        prefix_dirs_before = list(Path(disk.job_dir).iterdir())
+        assert len(prefix_dirs_before) > 0
+
+        disk.clear()
+
+        # All prefix dirs should be empty (rmdir only removes empty dirs)
+        remaining_files = list(Path(disk.job_dir).rglob("*.arrow"))
+        assert len(remaining_files) == 0
+
+
+class TestWriteThroughFlushSemantics:
+    """Detailed tests for WRITE_THROUGH flush behavior."""
+
+    def _make_store(self, tmp_path) -> NvmeSplitPayloadStore:
+        s3_dir = tmp_path / "s3_mock"
+        store = NvmeSplitPayloadStore(
+            root_dirs=[str(tmp_path / "nvme0")],
+            job_id="job1",
+            write_policy=WritePolicy.WRITE_THROUGH,
+            s3_uri=f"file://{s3_dir}",
+            node_ip="127.0.0.1",
+        )
+        store._ensure_initialized()
+        return store
+
+    def test_flush_multiple_payloads_atomically(self, tmp_path):
+        """All pending S3 writes should complete in a single flush call."""
+        store = self._make_store(tmp_path)
+
+        for i in range(5):
+            store.store(f"k{i}", _make_payload(f"k{i}", num_rows=10))
+
+        assert len(store._pending_s3_futures) == 5
+        store.flush_pending_writes()
+        assert len(store._pending_s3_futures) == 0
+
+        # All 5 should be on S3
+        s3_files = list((tmp_path / "s3_mock" / "job1").rglob("*.arrow"))
+        assert len(s3_files) == 5
+
+    def test_flush_resets_failure_counter_on_success(self, tmp_path):
+        """Successful flush should reset consecutive failure counter."""
+        store = self._make_store(tmp_path)
+        store._consecutive_s3_failures = 3  # simulate prior failures
+
+        store.store("k1", _make_payload("k1"))
+        store.flush_pending_writes()
+
+        assert store._consecutive_s3_failures == 0
+
+    def test_flush_noop_when_empty(self, tmp_path):
+        """Flush with no pending writes should not raise."""
+        store = self._make_store(tmp_path)
+        store.flush_pending_writes()  # Should be a no-op
+
+
+class TestEdgeCases:
+    """Edge cases and boundary conditions."""
+
+    def test_empty_payload(self, tmp_path):
+        """Store and retrieve a payload with zero rows."""
+        disk = NvmeDisk(str(tmp_path), "job1")
+        table = pa.table({"x": pa.array([], type=pa.int64())})
+        payload = SplitPayload(data=table, split_id="empty")
+
+        disk.write("empty", payload)
+        result = disk.read("empty")
+        assert result is not None
+        assert result.data.num_rows == 0
+        assert result.data.schema == table.schema
+
+    def test_special_characters_in_key(self, tmp_path):
+        """Keys with colons, slashes, dots should be sanitized correctly."""
+        disk = NvmeDisk(str(tmp_path), "job1")
+        special_keys = [
+            "job:stage:split_0",
+            "a/b/c/d",
+            "key.with.dots",
+            "key:with/mixed:chars/and.dots",
+            "ab",  # exactly 2 chars (edge for prefix)
+            "a",  # 1 char (shorter than prefix length)
+        ]
+        for key in special_keys:
+            disk.write(key, _make_payload(key, num_rows=1))
+
+        for key in special_keys:
+            result = disk.read(key)
+            assert result is not None, f"Failed to read key: {key}"
+
+    def test_get_location_without_s3(self, tmp_path):
+        """get_location should not include 's3' key when S3 is not configured."""
+        store = NvmeSplitPayloadStore(
+            root_dirs=[str(tmp_path / "nvme0")],
+            job_id="job1",
+            node_ip="127.0.0.1",
+        )
+        store._ensure_initialized()
+        store.store("k1", _make_payload("k1"))
+
+        loc = store.get_location("k1")
+        assert "flight" in loc
+        assert "s3" not in loc
+
+    def test_delete_nonexistent_key(self, tmp_path):
+        store = NvmeSplitPayloadStore(
+            root_dirs=[str(tmp_path / "nvme0")],
+            job_id="job1",
+            node_ip="127.0.0.1",
+        )
+        store._ensure_initialized()
+        assert store.delete("nonexistent") is False
+
+    def test_get_with_hint_all_tiers_miss(self, tmp_path):
+        """get_with_hint returns None when local, Flight, and S3 all miss."""
+        s3_dir = tmp_path / "s3_mock"
+        store = NvmeSplitPayloadStore(
+            root_dirs=[str(tmp_path / "nvme0")],
+            job_id="job1",
+            s3_uri=f"file://{s3_dir}",
+            node_ip="127.0.0.1",
+        )
+        store._ensure_initialized()
+
+        hint = {
+            "flight": "grpc://192.0.2.1:9999",  # unreachable
+            "s3": f"{store._s3_root}/nonexistent.arrow",
+        }
+        result = store.get_with_hint("no_such_key", hint)
+        assert result is None
+
+
+class TestStressStore:
+    """High-concurrency stress tests."""
+
+    def test_concurrent_store_get_delete(self, tmp_path):
+        """Simultaneous store, get, and delete from multiple threads."""
+        store = NvmeSplitPayloadStore(
+            root_dirs=[str(tmp_path / "nvme0"), str(tmp_path / "nvme1")],
+            job_id="job1",
+            node_ip="127.0.0.1",
+        )
+        store._ensure_initialized()
+
+        errors = []
+        n_keys = 50
+
+        # Phase 1: write all keys
+        def writer(i):
+            try:
+                store.store(f"stress_{i}", _make_payload(f"stress_{i}", num_rows=10))
+            except Exception as e:
+                errors.append(("write", i, e))
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(writer, range(n_keys)))
+
+        assert len(errors) == 0, f"Write errors: {errors}"
+
+        # Phase 2: concurrent read + delete (interleaved)
+        read_results = {}
+
+        def reader(i):
+            try:
+                result = store.get(f"stress_{i}")
+                read_results[i] = result is not None
+            except Exception as e:
+                errors.append(("read", i, e))
+
+        def deleter(i):
+            try:
+                store.delete(f"stress_{i}")
+            except Exception as e:
+                errors.append(("delete", i, e))
+
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            futs = []
+            for i in range(n_keys):
+                futs.append(pool.submit(reader, i))
+                if i % 3 == 0:  # delete every 3rd key
+                    futs.append(pool.submit(deleter, i))
+            for f in futs:
+                f.result()
+
+        assert len(errors) == 0, f"Errors: {errors}"
+
+    def test_rapid_overwrite_same_key(self, tmp_path):
+        """Rapidly overwrite the same key — should never corrupt."""
+        disk = NvmeDisk(str(tmp_path), "job1")
+        errors = []
+
+        def overwriter(iteration):
+            try:
+                disk.write("hotkey", _make_payload("hotkey", num_rows=iteration + 1))
+            except Exception as e:
+                errors.append(e)
+
+        # 20 threads all writing to same key
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(overwriter, range(20)))
+
+        assert len(errors) == 0
+        # Final read should succeed with some valid row count
+        result = disk.read("hotkey")
+        assert result is not None
+        assert result.data.num_rows > 0

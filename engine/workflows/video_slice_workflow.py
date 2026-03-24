@@ -73,7 +73,11 @@ def create_job(
     # Queue and runner configuration
     workqueue_db_path = config.get("workqueue_db_path", "memory://")
 
-    job_config = JobConfig(workqueue_db_path=workqueue_db_path)
+    job_config = JobConfig(
+        workqueue_db_path=workqueue_db_path,
+        payload_store_uri=config.get("payload_store_uri", "ray://"),
+        payload_store_options=config.get("payload_store_options", {}),
+    )
 
     job = Job(job_id=job_id, config=job_config)
 
