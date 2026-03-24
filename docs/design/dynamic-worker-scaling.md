@@ -8,17 +8,17 @@ _Created: December 2025_
 
 ---
 
-## Implementation Status (Updated 2026-02-04)
+## Implementation Status (Updated 2026-03-24)
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| **SimpleAutoscaler** | ✅ Complete | `engine/autoscaler.py` |
+| **SimpleAutoscaler** | ✅ Complete | `runtime/autoscaler.py` |
 | **AutoscaleConfig** | ✅ Complete | Dataclass with threshold settings |
 | **Queue Lag Metrics** | ✅ Complete | WorkQueue pending/claimed via job-level stats client |
 | **Worker Scale Up/Down** | ✅ Complete | Via `WorkerManager` |
 | **Cooldown Period** | ✅ Complete | Prevents thrashing |
-| **Manual Override API** | ✅ Complete | `set_stage_workers()`, `freeze_stage()` |
-| **Resource-Aware Scaling** | ⚠️ Basic | Checks Ray available resources |
+| **Manual Override API** | ❌ Not Implemented | `set_stage_workers()`, `freeze_stage()` etc. do not exist |
+| **Resource-Aware Scaling** | ❌ Not Implemented | No proactive `ray.available_resources()` check; reactive only (try-then-fail) |
 | **Bottleneck Prioritization** | ❌ Not Implemented | Future work |
 
 **Current Implementation:**
@@ -432,7 +432,7 @@ The simple design should be revisited if Solstice evolves to support:
 
 ## 11. References
 
-- [Checkpoint and Recovery Design](checkpoint-and-recovery.md)
+- [Checkpoint and Recovery Design](deprecated/checkpoint-and-recovery.md) (deprecated)
 - [Architecture Overview](deprecated/architecture.md)
 - [WorkQueue Redesign](work-queue-redesign.md)
 

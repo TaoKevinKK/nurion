@@ -73,7 +73,7 @@ Track implementation status of the Union-Find Service dedup architecture.
 - [ ] **PayloadStore S3 production hardening**
   - `FsspecSplitPayloadStore` already supports `s3://` URIs
   - Pending: large-payload throughput benchmark, recovery validation, TTL/cleanup policy
-  - Align with `runtime-prod-hardening.md` durability/recovery items
+  - Align with `04-runtime-prod-hardening.md` durability/recovery items
 
 ### Medium Priority
 
@@ -125,4 +125,4 @@ The following components were removed in the Union-Find Service redesign:
 | CCIterateMaster | legacy cc master module (removed) | No iterative master needed |
 | Old workflow (v1) | `workflows/minhash_dedup.py` | 7-stage pipeline replaced by 3-stage |
 
-See `dedup-and-fault-tolerance-deprecated.md` for the old implementation status.
+Old implementation status file has been archived and removed (2026-03-24).

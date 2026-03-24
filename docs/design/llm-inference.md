@@ -57,7 +57,7 @@ For scenarios requiring multiple models, autoscaling, and service discovery.
 │  ModelServiceManager (driver)                                        │
 │  ├── ModelRegistry (Ray actor + aiohttp server)                     │
 │  │    └── HTTP API: /register, /heartbeat, /endpoints_status        │
-│  └── ModelPool (Ray actor, per model)                                │
+│  └── ModelPool (plain object, per model)                              │
 │       ├── InferenceWorker 0 (subprocess: vLLM server :8001)         │
 │       ├── InferenceWorker 1 (subprocess: vLLM server :8002)         │
 │       └── Autoscaler (background task)                               │

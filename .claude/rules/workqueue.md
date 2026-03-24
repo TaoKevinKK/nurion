@@ -82,13 +82,15 @@ def test_foo(workqueue_db_path="memory://"):
 
 ```
 lib/workqueue-rs/src/
-  queue.rs      → push, claim, ack, nack (hot path)
-  state.rs      → state_get, state_put
-  meta.rs       → QueueMeta counter management
-  gc.rs         → background GC (acked messages cleanup)
-  recovery.rs   → expire + re-enqueue claimed messages
-  lib.rs        → gRPC server entry + PyO3 bindings
-proto/          → gRPC .proto definitions
+  storage.rs    → all persistent ops: push, claim, ack, nack, state, queue meta, GC, QueueGroup
+  service.rs    → gRPC service implementation (WorkQueueService)
+  server.rs     → broker inner (start/stop server)
+  state.rs      → in-memory coordination (per-queue claim locks, lease tracking)
+  types.rs      → data structures (QueueMessage, QueueMeta, QueueGroupMeta, etc.)
+  recovery.rs   → background tasks: RecoveryTask (expire claims) + GcTask (delete acked)
+  lib.rs        → PyO3 module entry + broker lifecycle
+proto/
+  workqueue.proto → gRPC service + message definitions
 python/         → Python package (PyO3 bindings)
 ```
 

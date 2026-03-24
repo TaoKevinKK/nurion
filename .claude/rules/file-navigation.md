@@ -144,11 +144,11 @@ Check before proposing architectural changes:
 
 | Topic | File |
 |---|---|
-| Checkpoint & recovery | `docs/design/checkpoint-and-recovery.md` |
+| Checkpoint & recovery (deprecated) | `docs/design/deprecated/checkpoint-and-recovery.md` |
 | Worker auto-scaling | `docs/design/dynamic-worker-scaling.md` |
 | GPU scheduling | `docs/design/gpu-scheduling-and-routing.md` |
 | LLM inference | `docs/design/llm-inference.md` |
-| Exactly-once semantics | `docs/design/exactly-once-semantics.md` |
+| Exactly-once semantics (deprecated) | `docs/design/deprecated/exactly-once-semantics.md` |
 | WorkQueue semantics | `docs/design/workqueue-semantics.md` |
 | WorkQueue redesign | `docs/design/work-queue-redesign.md` |
 | MinHash dedup | `docs/design/minhash-dedup.md` |

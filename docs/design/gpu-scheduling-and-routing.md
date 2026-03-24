@@ -7,18 +7,18 @@ _Created: February 2026_
 
 ---
 
-## Implementation Status
+## Implementation Status (Updated 2026-03-24)
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| **GPUAllocator** | ❌ Not Implemented | `_internal/serve/allocator.py` — best-fit bin-packing, plain class owned by Manager |
-| **Manager as Ray actor** | ❌ Not Implemented | Manager becomes `@ray.remote` actor; Pool demoted to plain class inside Manager |
-| **Fractional GPU** | ❌ Not Implemented | Auto `num_gpus=0.5` when TP=1 and `gpu_memory_utilization < 0.5` |
-| **deploy_models()** | ❌ Not Implemented | Two-phase ordered deployment (large-first sequential, then small parallel) |
-| **Compaction** | ❌ Not Implemented | Manager-coordinated freeze → evict → spawn → unfreeze |
-| **Worker node reporting** | ❌ Not Implemented | `get_node_id()` via `ray.get_runtime_context()` |
-| **ModelRoutingConfig** | ❌ Not Implemented | Length-based routing config in `ExternalLLMOperatorConfig` |
-| **Per-row routing** | ❌ Not Implemented | Token estimation + group-by-model routing in operator |
+| **GPUAllocator** | ✅ Implemented | `_internal/serve/allocator.py` — best-fit bin-packing, plain class owned by Manager |
+| **Manager as Ray actor** | ✅ Implemented | Manager is `@ray.remote`; Pool is plain class inside Manager |
+| **Fractional GPU** | ✅ Implemented | `ModelConfig.get_worker_resources()` auto-infers `num_gpus=0.5` |
+| **deploy_models()** | ✅ Implemented | Merged into `deploy_model()` via type dispatch (`ModelConfig \| list`); two-phase ordering works |
+| **Compaction** | ✅ Implemented | `GPUAllocator.plan_compaction()` + auto-trigger on deploy failure |
+| **Worker node reporting** | ✅ Implemented | `InferenceWorker.get_node_id()` + per-node allocation tracking |
+| **ModelRoutingConfig** | ✅ Implemented | `RoutedChatCompletionsClient` + `ModelRoutingConfig` in `operators/llm/client.py` |
+| **Per-row routing** | ⚠️ Partial | Per-request routing via client (not batch group-by-model as designed) |
 
 ---
 

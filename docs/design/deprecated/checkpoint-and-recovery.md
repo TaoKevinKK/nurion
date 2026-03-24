@@ -10,24 +10,24 @@ _Design discussion summary - December 5-6, 2025_
 
 ---
 
-## ⚠️ Implementation Status (Updated 2026-01-19)
+## ⚠️ Implementation Status (Updated 2026-03-24)
 
-This document describes the **design intent** for checkpoint and recovery. The actual implementation status is:
+**All components below have been removed.** The Tansu/Kafka partition model was replaced by WorkQueue
+(RocksDB-backed Rust queue) in PR #35. See `workqueue-semantics.md` for the current design.
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| **Queue Backend Interface** | ✅ Complete | `QueueBackend` protocol with `MemoryBackend` and `TansuBackend` |
-| **Worker Pull Model** | ✅ Complete | Workers pull from upstream queues |
-| **Offset Tracking** | ✅ Complete | `commit_offset()` / `get_committed_offset()` in queue backends |
-| **Tansu Integration** | ✅ Complete | Embedded Tansu broker with PyO3 bindings |
-| **Checkpoint Storage** | ⚠️ Scaffolding | `FsspecCheckpointStorage` can read/write files |
-| **Checkpoint Saving** | ❌ Not Implemented | No code saves checkpoints during execution |
-| **Checkpoint Recovery** | ❌ Not Implemented | `recover_from_checkpoint()` loads data but doesn't apply it |
-| **Multi-Partition** | ✅ Complete | `PartitionManager` handles assignment and rebalance |
+| **Queue Backend Interface** | 🗑️ Removed | Tansu/Kafka code deleted; replaced by `WorkQueueBrokerManager` |
+| **Worker Pull Model** | ✅ Replaced | Workers pull via WorkQueue `claim()` / `claim_from_group()` |
+| **Offset Tracking** | 🗑️ Removed | Replaced by per-message `ack` semantics |
+| **Tansu Integration** | 🗑️ Removed | No Tansu code exists in codebase |
+| **Checkpoint Storage** | 🗑️ Removed | No `FsspecCheckpointStorage` exists |
+| **Checkpoint Saving** | ❌ Never implemented | |
+| **Checkpoint Recovery** | ❌ Never implemented | Within-run recovery via WorkQueue claim timeout |
+| **Multi-Partition** | 🗑️ Removed | Replaced by QueueGroup abstraction |
 
-**What Works Today:**
-- Queue-based stage-to-stage communication
-- Workers pull from upstream, produce to downstream
+**Current state:** WorkQueue provides within-run recovery (expired claims re-enqueued).
+No cross-run checkpoint/resume capability exists.
 - Offset commit after processing (for idempotency within a run)
 
 **What Doesn't Work:**

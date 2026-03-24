@@ -1182,7 +1182,7 @@ class RebuildPolicy(Enum):
 - [tonic gRPC](https://github.com/hyperium/tonic)
 - [PyO3 User Guide](https://pyo3.rs/)
 - Existing design: `deprecated/tansu-pyo3-binding.md`
-- Existing design: `exactly-once-semantics.md`
+- Existing design: `deprecated/exactly-once-semantics.md`
 
 ---
 

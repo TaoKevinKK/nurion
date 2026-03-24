@@ -16,8 +16,8 @@ _Created: December 2025_
 | **SparkSourceV2Config** | ✅ Complete | `operators/sources/sparkv2.py` |
 | **SparkSourceV2Master** | ✅ Complete | Custom SourceMaster |
 | **SplitPayloadStoreWriter.scala** | ✅ Complete | JVM-side writer |
-| **Arrow data in Kafka message** | ✅ Complete | `_v2arrow:` prefix encoding |
-| **Auto-convert in get()** | ✅ Complete | `SplitPayloadStore.get()` handles Arrow bytes |
+| **Arrow data in Kafka message** | ✅ Complete | `_jvm_arrow:` prefix encoding (originally designed as `_v2arrow:`) |
+| **Auto-convert in get()** | ✅ Complete | `RaySplitPayloadStore.get()` detects `_jvm_arrow:` prefix and converts Arrow IPC bytes |
 | **Cross-language actor call** | ⚠️ Changed | Uses embedded Arrow in message instead |
 | **Benchmark** | ❌ Not Done | V1 vs V2 comparison pending |
 
@@ -967,10 +967,10 @@ is not directly compatible.
 ### C.3 Files Modified/Created
 
 ```
-engine/engine/core/split_payload_store.py          # Modified: _v2arrow: prefix handling
-engine/engine/core/stage_master.py                 # Modified: host in QueueEndpoint
-engine/engine/operators/sources/sparkv2.py         # New: V2 implementation
-engine/engine/operators/sources/__init__.py        # Modified: V2 exports
+engine/_internal/core/split_payload_store.py        # Modified: _jvm_arrow: prefix handling
+engine/_internal/core/stage_master.py              # Modified: host in QueueEndpoint
+engine/_internal/operators/sources/sparkv2.py      # New: V2 implementation
+engine/_internal/operators/sources/__init__.py     # Modified: V2 exports
 
 lib/raydp/java/raydp-main/src/main/scala/org/apache/spark/sql/raydp/
 ├── SplitPayloadStoreWriter.scala                      # New: Direct Arrow data writer

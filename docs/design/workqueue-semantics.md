@@ -12,8 +12,8 @@ _Design document - February 2026_
 **Last Discussion**: 2026-02-02 - Added trade-off analysis and design evolution
 
 This document describes the semantic guarantees and recovery mechanisms for the new WorkQueue-based architecture introduced in PR #35. It supersedes:
-- `exactly-once-semantics.md` (deprecated)
-- `checkpoint-and-recovery.md` (deprecated)
+- `deprecated/exactly-once-semantics.md` (deprecated)
+- `deprecated/checkpoint-and-recovery.md` (deprecated)
 
 ---
 

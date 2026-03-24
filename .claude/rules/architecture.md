@@ -211,13 +211,15 @@ control/control/
 ```
 lib/workqueue-rs/
   src/
-    lib.rs          → gRPC server entry + PyO3 bindings
-    queue.rs        → core queue operations (push, claim, ack, nack)
-    state.rs        → state_get / state_put (atomic with ack)
-    meta.rs         → QueueMeta counters
-    gc.rs           → background GC (acked messages)
-    recovery.rs     → expire + re-enqueue claimed messages
-  proto/            → gRPC .proto definitions
+    lib.rs          → PyO3 module entry + broker lifecycle
+    storage.rs      → all persistent ops: push, claim, ack, nack, state, queue meta, GC, QueueGroup
+    service.rs      → gRPC service implementation (WorkQueueService)
+    server.rs       → broker inner (start/stop server)
+    state.rs        → in-memory coordination (per-queue claim locks, lease tracking)
+    types.rs        → data structures (QueueMessage, QueueMeta, QueueGroupMeta, etc.)
+    recovery.rs     → background tasks: RecoveryTask (expire claims) + GcTask (delete acked)
+  proto/
+    workqueue.proto → gRPC service + message definitions
   python/           → Python bindings (PyO3)
 ```
 

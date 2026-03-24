@@ -3,7 +3,7 @@
 Prioritized by **business value**, not technical elegance. Each item answers:
 "What user scenario does this unlock that we can't serve today?"
 
-> **Last Updated**: 2026-03-06
+> **Last Updated**: 2026-03-24
 > **Positioning**: Distributed data processing engine with first-class LLM inference.
 > **Competitive benchmark**: Ray Data, Spark.
 > **Future direction**: RL training loops, Agent evaluation pipelines.
@@ -69,19 +69,17 @@ Prioritized by **business value**, not technical elegance. Each item answers:
 - **Scope**: `ray_runner.py` (job-level model lifecycle), `ExternalLLMOperatorConfig` (auto-registry discovery), `ModelServiceManager` (job-scoped deployment)
 - **Design doc**: Extend `../design/llm-inference.md`
 
-### 2.2 Public API Export for LLM Operators
+### 2.2 Public API Export for LLM Operators ✅
 
-- **Status**: `EmbeddedLLMOperatorConfig` and `ExternalLLMOperatorConfig` not exported in `nurion/__init__.py`
-- **Gap**: Users must import from `_internal`, which is not a stable API
-- **Scope**: `nurion/__init__.py` — add imports + `__all__` entries
-- **Quick win**: < 1 hour
+- **Status**: **Completed** (`d5902c9`, 2026-03)
+- **Implemented**: `nurion/__init__.py` exports `EmbeddedLLMOperator`, `EmbeddedLLMOperatorConfig`, `ExternalLLMOperator`, `ExternalLLMOperatorConfig`
 
-### 2.3 Token-Length-Based Model Routing
+### 2.3 Token-Length-Based Model Routing ✅
 
-- **Status**: Design complete in `../design/gpu-scheduling-and-routing.md`; `RoutedChatCompletionsClient` skeleton exists
-- **Gap**: Token estimation + group-by-model routing not implemented
-- **Unlocks**: 30-50% inference cost reduction (short prompts → small model, long prompts → large model)
-- **Scope**: `operators/llm/client.py` (routing logic), `serve/config.py` (ModelRoutingConfig)
+- **Status**: **Completed** (`d5902c9`, 2026-03)
+- **Implemented**:
+  - `RoutedChatCompletionsClient` with `estimate_tokens()`, `pick_model()`, `next_model()`, context-length fallback
+  - `ModelRoutingConfig` dataclass for routing configuration
 
 ---
 
@@ -139,9 +137,9 @@ Items that look technically appealing but don't unlock meaningful user scenarios
 
 | File | Scope |
 |------|-------|
-| `runtime-prod-hardening.md` | Runtime correctness, scale, and operability backlog |
-| `serve.md` | Serve module (GPU scheduling, model routing, inference workers) |
-| `dedup.md` | Dedup operators, Union-Find service, MinHash pipeline |
+| `04-runtime-prod-hardening.md` | Runtime correctness, scale, and operability backlog |
+| `02-serve.md` | Serve module (GPU scheduling, model routing, inference workers) |
+| `03-dedup.md` | Dedup operators, Union-Find service, MinHash pipeline |
 | `README.md` | Directory structure and conventions |
 
 This roadmap is the **strategic layer**; per-module TODOs track **tactical items**.
