@@ -3,10 +3,9 @@ Nurion Runtime - A Ray-based distributed streaming processing framework.
 
 Features:
 - Batch and streaming hybrid execution model
-- Exactly-once checkpoint semantics
+- At-least-once delivery with atomic ack-and-forward
 - Elastic scaling with Ray actors
 - Dynamic load balancing and backpressure
-- Remote state backend (S3/DFS)
 - DAG-based task execution
 """
 

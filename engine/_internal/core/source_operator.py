@@ -22,15 +22,10 @@ from _internal.core.operator import Operator, OperatorConfig, OperatorRuntime
 
 
 class SourceOperator(Operator):
-    """Base class for source operators that read data from external systems.
-
-    Source operators maintain offset tracking for checkpoint/resume capability.
-    Subclasses should update the offset after reading data using `update_offset()`.
-    """
+    """Base class for source operators that read data from external systems."""
 
     def __init__(self, config: OperatorConfig, runtime: OperatorRuntime):
         super().__init__(config, runtime)
-        # Offset tracking for checkpoint/resume
         self._current_offset: Dict[str, Any] = {}
 
     @abstractmethod
@@ -43,10 +38,6 @@ class SourceOperator(Operator):
 
         Returns:
             SplitPayload containing the data, or None if no data available
-
-        Note:
-            Implementations should call `update_offset()` after successful reads
-            to enable checkpoint/resume functionality.
         """
         pass
 
@@ -64,32 +55,5 @@ class SourceOperator(Operator):
         return self.read(split)
 
     def update_offset(self, offset: Dict[str, Any]) -> None:
-        """Update the current read offset.
-
-        Called by subclasses after successfully reading data.
-        The offset is persisted during checkpoints for resume capability.
-
-        Args:
-            offset: Dictionary containing offset information (e.g., file position,
-                   partition offset, row number, etc.)
-        """
+        """Update the current read offset (internal bookkeeping)."""
         self._current_offset.update(offset)
-
-    def get_offset(self) -> Dict[str, Any]:
-        """Get the current read offset for checkpointing.
-
-        Returns:
-            Dictionary containing the current offset state
-        """
-        return dict(self._current_offset)
-
-    def restore_offset(self, offset: Dict[str, Any]) -> None:
-        """Restore offset from a checkpoint.
-
-        Called during job recovery to resume from a previous position.
-
-        Args:
-            offset: Dictionary containing offset information from checkpoint
-        """
-        self._current_offset = dict(offset)
-        self.logger.info(f"Restored offset: {offset}")

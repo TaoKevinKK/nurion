@@ -138,8 +138,6 @@ _FAULT_POINT_MAP: dict[str, str] = {
     "QUEUE_COMMIT": "queue.commit",
     "BEFORE_PROCESS": "operator.before_process",
     "AFTER_PROCESS": "operator.after_process",
-    "BEFORE_MARK_PROCESSED": "operator.before_mark_processed",
-    "AFTER_MARK_PROCESSED": "operator.after_mark_processed",
 }
 
 # Cache for the actor handle
@@ -266,5 +264,3 @@ FAULT_QUEUE_COMMIT = "queue.commit"
 # Operator faults
 FAULT_BEFORE_PROCESS = "operator.before_process"
 FAULT_AFTER_PROCESS = "operator.after_process"
-FAULT_BEFORE_MARK_PROCESSED = "operator.before_mark_processed"
-FAULT_AFTER_MARK_PROCESSED = "operator.after_mark_processed"

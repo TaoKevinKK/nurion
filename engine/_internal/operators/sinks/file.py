@@ -47,14 +47,7 @@ class FileSinkConfig(OperatorConfig):
 
 @operator(FileSinkConfig)
 class FileSink(SinkOperator):
-    """Sink that writes records to a local path with exactly-once support.
-
-    Implements two-phase commit for exactly-once semantics:
-    - Writes go to a staging file (.tmp suffix)
-    - On prepare_commit(), the staging file is ready
-    - On commit(), the staging file is renamed to final name
-    - On rollback(), the staging file is deleted
-    """
+    """Sink that writes records to a local file."""
 
     def __init__(self, config: FileSinkConfig, runtime: OperatorRuntime):
         super().__init__(config, runtime)
@@ -85,43 +78,6 @@ class FileSink(SinkOperator):
         if len(self.buffer) >= self.buffer_size:
             self._flush()
         return None
-
-    def prepare_commit(self, checkpoint_id: str) -> bool:
-        """Prepare for commit by flushing buffer to staging file."""
-        try:
-            self._flush()
-            self._pending_commit_id = checkpoint_id
-            self._commit_offset = {
-                "records_committed": self._records_written,
-                "checkpoint_id": checkpoint_id,
-            }
-            self.logger.info(
-                f"Prepared commit for checkpoint {checkpoint_id} ({self._records_written} records)"
-            )
-            return True
-        except Exception as e:
-            self.logger.error(f"Failed to prepare commit: {e}")
-            return False
-
-    def commit(self, checkpoint_id: str) -> bool:
-        """Commit by finalizing writes."""
-        if self._pending_commit_id != checkpoint_id:
-            self.logger.warning(
-                f"Commit checkpoint mismatch: expected {self._pending_commit_id}, got {checkpoint_id}"
-            )
-            return False
-
-        self._pending_commit_id = None
-        self.logger.info(f"Committed checkpoint {checkpoint_id}")
-        return True
-
-    def rollback(self, checkpoint_id: str) -> bool:
-        """Rollback uncommitted writes."""
-        self.logger.warning(f"Rolling back checkpoint {checkpoint_id}")
-        # For file sink, we can't easily rollback already-written data
-        # In production, you'd use staging files and rename on commit
-        self._pending_commit_id = None
-        return True
 
     def close(self) -> None:
         self._flush()

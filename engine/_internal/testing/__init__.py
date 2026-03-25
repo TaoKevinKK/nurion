@@ -25,8 +25,6 @@ from _internal.testing.fault_injection import (
     FAULT_QUEUE_COMMIT,
     FAULT_BEFORE_PROCESS,
     FAULT_AFTER_PROCESS,
-    FAULT_BEFORE_MARK_PROCESSED,
-    FAULT_AFTER_MARK_PROCESSED,
 )
 
 __all__ = [
@@ -40,6 +38,4 @@ __all__ = [
     "FAULT_QUEUE_COMMIT",
     "FAULT_BEFORE_PROCESS",
     "FAULT_AFTER_PROCESS",
-    "FAULT_BEFORE_MARK_PROCESSED",
-    "FAULT_AFTER_MARK_PROCESSED",
 ]

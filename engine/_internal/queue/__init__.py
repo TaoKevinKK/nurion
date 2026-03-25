@@ -29,7 +29,6 @@ Example:
     broker.stop()
 """
 
-from _internal.queue.backend import Record
 from _internal.queue.workqueue import (
     WorkQueueBrokerManager,
     WorkQueueQueueClient,
@@ -38,7 +37,6 @@ from _internal.queue.workqueue import (
 from _internal.queue.workqueue_storage import WorkQueueStorageReader
 
 __all__ = [
-    "Record",
     "WorkQueueBrokerManager",
     "WorkQueueQueueClient",
     "WorkQueueRecord",

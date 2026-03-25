@@ -40,7 +40,7 @@ Architecture:
     │                                                              │
     │  1. Ray.put(arrowBytes, owner=storeActor)  <- managed       │
     │  2. Produce to output_queue                <- direct write   │
-    │     payload_key = "_v2ref:{object_id_b64}"                   │
+    │     payload_key = "_jvm_arrow:{object_id_b64}"                   │
     └─────────────────────────────────────────────────────────────┘
                                │
                                ▼
@@ -49,7 +49,7 @@ Architecture:
     │                                                              │
     │  1. Consume from output_queue                                │
     │  2. payload_store.get(payload_key)                          │
-    │     -> detects _v2ref: prefix                                │
+    │     -> detects _jvm_arrow: prefix                                │
     │     -> reconstructs ObjectRef from ID                        │
     │     -> ray.get() -> auto-convert Arrow to SplitPayload       │
     └─────────────────────────────────────────────────────────────┘
@@ -133,7 +133,7 @@ class SparkDirectProducer:
 
         JVM writes directly to output_queue:
         1. Ray.put(arrowBytes, owner=storeActor) - managed lifetime
-        2. Produce to output_queue with payload_key = "_v2ref:{id}"
+        2. Produce to output_queue with payload_key = "_jvm_arrow:{id}"
 
         Returns:
             Number of splits written

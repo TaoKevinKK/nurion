@@ -26,7 +26,7 @@
 
 ### `core/source_operator.py`
 - **`SourceOperator`** — base for source stages; implement `plan_splits() -> list[Split]`
-- Config must implement `create_source()` → `SourceStrategy` (either `SplitPlanner` or `DirectProducer`)
+- Config must implement `create_source()` → `SplitPlanner` or `DirectProducer`
 
 ### `core/sink_operator.py`
 - **`SinkOperator`** — base for sink stages
@@ -36,7 +36,11 @@
 - **`Split`** — scheduling metadata: `split_id`, `stage_id`, `data_range`, `parent_split_ids`
   - `derive_output_split()` — create downstream split from parent
 - **`SplitPayload`** — `split_id`, `data: pa.Table`, `metadata: dict`
-- **`QueueMessage`** — message envelope: `msg_id`, `split_id`, `payload_ref`
+- **`SourceQueueMessage`** — message envelope for source splits
+- **`DataQueueMessage`** — message envelope for inter-stage data: `msg_id`, `split_id`, `payload_key`
+- **`MessageType`** — enum: `SOURCE`, `DATA`
+- **`Record`** — generic queue record wrapper
+- **`QueueStats`** — queue depth statistics
 - **`QueueEndpoint`** — `broker_url`, `queue_name`
 - **`StageStatus`** — enum: `PENDING`, `RUNNING`, `COMPLETED`, `FAILED`
 - **`FailurePolicy`** — enum: `FAIL_FAST`, `CONTINUE`
@@ -45,11 +49,11 @@
 - **`RawOutputBytes`** — wraps raw bytes for sink commit messages
 
 ### `core/source.py`
-- **`Source`** (Protocol) — interface for source adapters
-- **`SourceStrategy`** (Protocol) — `SplitPlanner` or `DirectProducer` variant
+- **`SplitPlanner`** (Protocol) — plans splits and pushes to queue
+- **`DirectProduceContext`** (dataclass) — context for direct producers
+- **`DirectProducer`** (Protocol) — bypasses queue, produces directly to workers
 
 ### `core/sink.py`
-- **`Sink`** (Protocol) — interface for sink adapters
 - **`SinkCommitter`** (Protocol) — commit coordinator for batched sinks
 
 ### `core/stage_master.py`
@@ -66,15 +70,33 @@
   - `merge_upstream=N`: merges N upstream messages (Arrow concat) before calling operator once
   - `invoke_operator(method, *args)` — calls `@master_callable` method on operator
 - **`WorkerRuntime`** (frozen dataclass) — StageWorker init params
+- **`OutputRouting`** — routes output to downstream queue(s)
+- **`PayloadMissingError`** — raised when payload not found in store
 
 ### `core/split_payload_store.py`
-- **`SplitPayloadStore`** (Protocol) — get/put `SplitPayload` objects
+- **`SplitPayloadStore`** (ABC) — get/put `SplitPayload` objects
 - **`RaySplitPayloadStore`** — Ray object store backend (in-cluster)
 - **`FsspecSplitPayloadStore`** — S3/GCS backend (cross-cluster / persistent)
 
+### `core/nvme_payload_store.py`
+- **`NvmeSplitPayloadStore`** — two-tier NVMe + S3 payload store
+  - `get_with_hint()` — three-tier fallback: local NVMe → remote Flight → S3
+  - `get_location()` — returns `{"flight": ..., "s3": ...}` for downstream hints
+  - `flush_pending_writes()` — wait for async S3 writes to complete
+- **`WritePolicy`** (Enum) — `WRITE_THROUGH` (S3 first), `WRITE_BACK` (NVMe first)
+- **`NvmeDisk`** — single disk: hash-prefix bucketing, atomic write (tmp+rename), mmap read
+- **`NvmeDiskPool`** — multi-disk: write to most-free, key-to-disk tracking
+- **`FlightPayloadServer`** — per-process Arrow Flight gRPC server for cross-node reads
+- **`parse_nvme_uri()`** — parse `nvme://` URI with comma-separated paths and query params
+
+### `core/partition.py`
+- **`split_table_by_column()`** — split Arrow table into partitions by column values
+
 ### `core/fault_tolerance.py`
-- **`CheckpointManager`** — write/restore operator checkpoints
-- Checkpoints stored in WorkQueue state store (atomic with ack)
+- **`NodeBlacklistConfig`** — config for node blacklisting on repeated failures
+- **`NodeBlacklist`** — track and blacklist nodes with excessive failures
+- **`TimeoutConfig`** — config for worker/split timeout monitoring
+- **`TimeoutMonitor`** — detect and handle timed-out workers/splits
 
 ### `core/managers/worker_manager.py`
 - **`WorkerManager`** — spawn/stop `StageWorker` actors, track actor handles
@@ -82,7 +104,7 @@
 - `get_active_workers()` — returns live worker handles
 
 ### `core/managers/source_manager.py`
-- **`SourceManager`** — start/stop `SourceStrategy`
+- **`SourceManager`** — start/stop source strategy
 - Handles `SplitPlanner` (push splits to queue) and `DirectProducer` (bypass queue)
 
 ### `core/managers/sink_manager.py`
@@ -101,23 +123,25 @@
 ### Transform Operators
 
 #### `operators/map.py`
-- **`MapConfig`** / **`Map`** — apply fn to each row; `fn: Callable[[dict], dict]`
-- **`MapBatchesConfig`** / **`MapBatches`** — apply fn to `pa.Table` batch
-- **`FlatMapConfig`** / **`FlatMap`** — explode rows; fn returns list
+- **`MapOperatorConfig`** / **`MapOperator`** — apply fn to each row; `fn: Callable[[dict], dict]`
+- **`MapBatchesOperatorConfig`** / **`MapBatchesOperator`** — apply fn to `pa.Table` batch
+- **`FlatMapOperatorConfig`** / **`FlatMapOperator`** — explode rows; fn returns list
 
 #### `operators/filter.py`
-- **`FilterConfig`** / **`Filter`** — predicate fn; returns None to drop
+- **`FilterOperatorConfig`** / **`FilterOperator`** — predicate fn; returns None to drop
 
 #### `operators/dedupe.py`
-- **`DedupeConfig`** / **`Dedupe`** — bucket-based dedup using Union-Find
-- Config: `key_cols: list[str]`, `similarity_threshold: float`
+- **`HashDedupeConfig`** / **`HashDedupeOperator`** — hash-based dedup (extends `ShuffleOperatorConfig`)
+- Config: `key_cols: list[str]`
 
 #### `operators/shuffle.py`
-- **`ShuffleConfig`** / **`Shuffle`** — repartition splits across workers
+- **`ShuffleOperatorConfig`** / **`ShuffleOperator`** — repartition splits across workers
+- **`RepartitionConfig`** / **`RepartitionOperator`** — change partition count
 
 #### `operators/video.py`
-- **`VideoSliceConfig`** / **`VideoSlice`** — decode video, emit frame batches
-- Config: `fps: float`, `start_sec: float`, `end_sec: float`
+- **`FFmpegSceneDetectConfig`** / **`FFmpegSceneDetectOperator`** — detect scene boundaries in video
+- **`FFmpegSliceConfig`** / **`FFmpegSliceOperator`** — slice video into segments
+- Utilities: `attach_slice_hash()`, `keep_every_n()`
 
 ### Sources (`operators/sources/`)
 
@@ -140,6 +164,16 @@
 #### `sources/sparkv2.py`
 - **`SparkSourceV2Config`** / **`SparkSourceV2`** — Spark Source V2 with predicate pushdown
 - Design doc: `docs/design/spark-source-v2.md`
+
+#### `sources/anti_join.py`
+- **`AntiJoinSourceConfig`** — wraps an inner source + exclude source with key columns
+- **`AntiJoinSplitPlanner`** — injects payload key into data_range, validates key columns
+- **`AntiJoinSourceOperator`** — DuckDB ANTI JOIN against lazily-fetched exclude table
+
+#### `sources/union.py`
+- **`UnionSourceConfig`** — wraps N source configs with schema validation
+- **`UnionSplitPlanner`** — concatenates splits from all sub-sources with globally unique IDs
+- **`UnionSourceOperator`** — dispatches reads to correct sub-source based on split_id index
 
 ### Sinks (`operators/sinks/`)
 
@@ -164,6 +198,7 @@
 
 #### `http/operator.py`
 - **`HttpOperatorConfig`** / **`HttpOperator`** — send HTTP request per split
+- **`RetryableError`** — raised for retriable HTTP failures
 - Config: `url`, `method`, `headers`, `timeout_secs`, `max_retries`
 
 #### `http/circuit_breaker.py`
@@ -175,35 +210,51 @@
 ### LLM Operator (`operators/llm/`)
 
 #### `llm/operator.py`
-- **`LlmOperatorConfig`** / **`LlmOperator`** — run LLM inference per split
-- Connects to serve module via `LlmClient`
-- Config: `model_id`, `prompt_template`, `max_tokens`, `temperature`
+- **`ExternalLLMOperatorConfig`** / **`ExternalLLMOperator`** — run LLM inference per split via external serve endpoint
+- Direct mode (`base_url`) or ModelClient mode (`use_model_client` + registry)
+- Config: `model_id`, `system_prompt`, `max_tokens`, `temperature`, `model_routing: Optional[ModelRoutingConfig]`
 
 #### `llm/client.py`
-- **`LlmClient`** — HTTP client to `InferenceWorker`; resolves URL via `ModelRegistry`
+- **`ChatCompletionsClient`** — HTTP client for OpenAI-compatible chat completions API
+  - Retry logic, context-length error detection, configurable endpoints
+- **`RoutedChatCompletionsClient`** — wraps `ChatCompletionsClient` with length-based model routing
+  - `estimate_tokens(messages)` → token count estimate
+  - `pick_model(messages)` → select model by token length
+  - Context-length fallback: on `ContextLengthError`, retry with next larger model
+- **`ModelRoutingConfig`** — routing config: list of `ModelRoute(model_id, max_tokens)`
+- **`ContextLengthError`** — raised when input exceeds model context window
 
 #### `llm/embedded.py`
-- **`EmbeddedInference`** — in-process inference (no serve actor); for single-node use
+- **`EmbeddedLLMOperatorConfig`** / **`EmbeddedLLMOperator`** — in-process inference (vLLM/SGLang offline); for single-node use
+- Config: `model_source`, `engine` (vllm/sglang), `kv_cache_dtype`, `max_model_len`
 
 #### `llm/utils.py`
-- Prompt formatting, response parsing helpers
+- OpenAI message construction and image handling utilities
+- `extract_prompts()`, `extract_messages()`, `extract_images()`
+- `build_openai_image_content()`, `build_single_image_message()`, `build_multi_image_message()`
+- `encode_image_base64()`, `extract_column()`
 
-### Dedup Utilities (`operators/dedup/`)
+### Dedup Operators (`operators/dedup/`)
 
 #### `dedup/bucket_union.py`
-- **`BucketUnionFind`** — Union-Find for merging near-duplicate buckets
+- **`BucketUnionOperatorConfig`** / **`BucketUnionOperator`** — sends (band_hash, doc_id) to UFClient for union
+- Side-effect operator: returns None (union happens in UnionFind service)
 
 #### `dedup/encoder.py`
-- **`FeatureEncoder`** — feature extraction for similarity hashing
+- **`MinHashEncoderConfig`** / **`MinHashEncoderOperator`** — compute MinHash signatures
+- xxhash64, numpy vectorization, word n-grams
+- Output: `(doc_id, bucket_id, band_hash)`
 
 #### `dedup/filter.py`
-- **`DedupeFilter`** — filter records based on Union-Find membership
+- **`DedupFilterOperatorConfig`** / **`DedupFilterOperator`** — filter records based on Union-Find cluster membership
+- Two modes: lookup (via UFClient) or preloaded (cluster_table)
 
 ### MinHash (`operators/minhash/`)
 
 #### `minhash/compute.py`
-- **`MinHashComputer`** — compute MinHash signatures (used by dedup workflow)
+- **`MinHashComputeConfig`** / **`MinHashComputeOperator`** — compute MinHash signatures (shuffle-based)
 - Config: `num_perm: int`, `ngram_size: int`
+- `jaccard_similarity()` — utility for comparing signatures
 
 ---
 
@@ -216,10 +267,11 @@
 - **`JobStatus`** — `job_id`, `is_running`, `stages`, `elapsed_time`, `error`
 
 ### `runtime/autoscaler.py`
-- **`SimpleAutoscaler`** — backpressure-driven worker scaling
+- **`SimpleAutoscaler`** — queue-depth-driven worker scaling
   - Reads queue depth from `QueueStatsClient`
-  - Calls `WorkerManager.scale_up/down()` on each tick
-  - Config: `min_workers`, `max_workers`, `scale_up_threshold`, `scale_down_threshold`
+  - Calls `StageMaster.scale_up/down()` on each tick
+- **`AutoscaleConfig`** — `enabled`, `check_interval_s`, `scale_up_lag_threshold`, `scale_down_lag_threshold`, `cooldown_s`, `max_scale_step`
+- **`StageMetrics`** — per-stage metrics snapshot for scaling decisions
 
 ### `runtime/backpressure.py`
 - **`JobBackpressureController`** — monitor queue depths across all stages
@@ -228,6 +280,7 @@
 ### `runtime/queue_stats.py`
 - **`QueueStatsClient`** — collect queue stats from WorkQueue broker
 - **`StageQueueConfig`** — queue name → stage mapping
+- **`QueueRef`** — reference to a specific queue for stats collection
 
 ---
 
@@ -237,23 +290,27 @@
 - **`WorkQueueQueueClient`** — Python client for queue operations
   - `claim(queue, timeout)` → `WorkQueueRecord`
   - `ack_and_forward(msg_id, output_queue, payload)` — atomic
+  - `ack_and_scatter(...)` — atomic ack + push to QueueGroup partitions
+  - `claim_from_group(...)` — claim from QueueGroup with work-stealing
   - `nack(msg_id)` — re-enqueue
   - `state_get(ns, key)` / `state_put(ns, key, value)`
 - **`WorkQueueBrokerManager`** — start/stop the Rust broker process
 
 ### `queue/workqueue_storage.py`
-- **`WorkQueueStorage`** — higher-level storage abstraction over WorkQueue
+- **`WorkQueueStorageReader`** — read-only access to WorkQueue storage via PyO3 bindings
 
 ### `queue/backend.py`
-- **`QueueBackend`** (Protocol) — abstract backend; `InMemoryBackend` for tests
+- **`Record`** — generic queue record dataclass
 
 ---
 
 ## Serve Module (`serve/`)
 
 ### `serve/config.py`
-- **`ModelConfig`** — `model_id: str`, `model_source: str`, `tensor_parallel_size: int`, `min_workers: int`, `max_workers: int`
+- **`ModelConfig`** — `model_id`, `model_source`, `tensor_parallel_size`, `min_workers`, `max_workers`
+  - `get_worker_resources()` — auto-infer GPU resources (fractional when TP=1 + low utilization)
 - **`AutoscaleConfig`** — `target_qps`, `scale_up_threshold`, `scale_down_threshold`
+- **`WorkerState`** (Enum) — LOADING, READY, STOPPED
 
 ### `serve/manager.py`
 - **`ModelServiceManager`** (Ray actor) — control plane
@@ -262,36 +319,58 @@
   - `shutdown()` → undeploy all
   - Two modes: attached (default) / detached (`lifetime="detached"`)
   - `ModelServiceManager.connect()` — reconnect to detached manager
+- **`create_manager()`** — factory function with optional `detached` and `broker_endpoint` params
 
 ### `serve/pool.py`
 - **`ModelPool`** (plain object) — per-model worker pool
   - `scale_up(n)` / `scale_down(n)` → spawn/stop `InferenceWorker` actors
   - `get_worker_urls()` → list of active worker HTTP URLs
+  - Built-in autoscaler as asyncio task with freeze/unfreeze
 
 ### `serve/worker.py`
 - **`InferenceWorker`** (Ray actor) — runs vLLM or SGLang server
-  - Exposes HTTP endpoint for generation requests
-  - Reports health, handles graceful shutdown
+  - Subprocess management with PR_SET_PDEATHSIG, health polling, heartbeat
+  - `get_node_id()` → node identification for allocator tracking
 
 ### `serve/allocator.py`
 - **`GPUAllocator`** (plain object) — GPU bin-packing
-  - `allocate(model_id, tp_size)` → list of GPU IDs
-  - `release(model_id)` → return GPUs to pool
-  - Anti-fragmentation: prefers filling existing nodes before spreading
+  - `suggest_nodes(gpus, count)` — best-fit allocation with random tiebreaker
+  - `suggest_workers_to_stop(ids, count)` — emptiest-node-first eviction
+  - `plan_compaction(gpus_needed)` — fewest-eviction compaction planning
+  - `reconcile(active_ids)` — prune stale placements
 
 ### `serve/registry.py`
 - **`ModelRegistry`** (Ray Named Actor) — service discovery
+  - Embedded aiohttp server for HTTP-based endpoint resolution
   - `register(model_id, urls)` / `deregister(model_id)`
   - `get_workers(model_id)` → list of URLs
-  - Actor name: `REGISTRY_ACTOR_NAME` in namespace `SERVE_NAMESPACE`
 
 ### `serve/client.py`
-- **`ModelClient`** (plain object) — HTTP client with round-robin LB
-  - `generate(prompt, max_tokens, ...)` → async HTTP POST to a worker URL
+- **`ModelClient`** (plain object) — HTTP client for model inference
+  - Async endpoint discovery with caching via `EndpointCache`
+- **`EndpointInfo`** — cached endpoint data with TTL
+- **`EndpointCache`** — TTL-based cache for registry lookups
 
 ### `serve/fake_server.py`
-- **`FakeInferenceServer`** — HTTP stub for tests; returns configurable responses
-  - Monkeypatch target: replace `InferenceWorker` in tests
+- Standalone aiohttp server script for tests — no class, just `main()` with routes
+- Monkeypatch target: replace `InferenceWorker` subprocess in tests
+
+### `serve/union_find/config.py`
+- **`UFClusterConfig`** — config for Union-Find service: `num_shards`, `checkpoint_interval`
+
+### `serve/union_find/client.py`
+- **`UFClient`** — batch operations against Union-Find shards
+  - `batch_match_and_union()` — route by `band_hash % num_shards`, send to shards
+  - `batch_find()` — resolve cluster membership
+
+### `serve/union_find/manager.py`
+- **`UnionFindServiceManager`** — lifecycle management for UF cluster
+  - `deploy()`, `resolve_cross_shard()`, `export_clusters()`, `force_checkpoint()`, `shutdown()`
+
+### `serve/union_find/shard.py`
+- **`UFShard`** (Ray actor) — one shard of the distributed Union-Find
+  - `band_hash_index` for fast lookup, cross-shard edge tracking
+  - Checkpoint/restore via PayloadStore
 
 ---
 
@@ -304,23 +383,32 @@
 - **`JobWebUI`** — per-job monitoring interface; reads state from WorkQueue
 
 ### `webui/portal.py`
-- **`PortalServer`** — multi-job dashboard; lists active and historical jobs
+- **`NurionPortal`** — multi-job dashboard; lists active and historical jobs
+- **`create_portal_app()`** / **`start_portal()`** — factory and launcher
+- **`portal_exists()`** — check if portal is already running
 
 ### `webui/history_server.py`
-- **`HistoryServer`** — historical job viewer; reads archived state
+- **`history_server()`** — click CLI command for historical job viewer
 
 ### `webui/runtime_server.py`
-- **`RuntimeServer`** / **`EmbeddedWebUIServer`** — live metrics endpoint embedded in job
+- **`EmbeddedWebUIServer`** — live metrics endpoint embedded in running job
 
 ### `webui/api/`
-- REST endpoints for frontend: job list, stage status, split events, queue stats
+- REST endpoints: `jobs.py`, `stages.py`, `workers.py`, `events.py`, `lineage.py`, `serve.py`
+- 12 endpoints total covering job/stage/worker/event/lineage/serve queries
 
 ### `webui/collectors/`
 - Metric collectors: pull queue stats and actor status from Ray
 
-### `webui/state/`
-- **`WorkQueueStateWriter`** — writes job/stage/split events to WorkQueue state store
-- **`schema.py`** — key namespace helpers: `job_namespace`, `stage_key`, `worker_key`, `split_key`, `event_key`
+### `webui/state/writer.py`
+- **`WorkQueueStateWriter`** — writes job/stage/worker/event data to WorkQueue state store
+
+### `webui/state/manager.py`
+- **`JobStateManager`** — reads job/stage/worker/event/lineage data from WorkQueue storage
+
+### `webui/state/schema.py`
+- Key namespace helpers: `job_namespace`, `job_index_key`, `stage_key`, `worker_key`, `split_key`, `event_key`
+- Serve keys: `serve_namespace`, `serve_model_key`, `serve_worker_key`, `serve_event_key`
 
 ---
 
@@ -330,13 +418,17 @@
 - **`create_ray_logger(name)`** — Ray-compatible structured logger
 
 ### `utils/network.py`
+- **`get_node_ip()`** — portable node IP detection
 - Port discovery, address formatting helpers
 
 ### `utils/remote.py`
-- Helpers for Ray remote call patterns
+- S3 configuration helpers: `get_s3_storage_options()`, `get_lance_storage_options()`
+- **`ensure_local_file()`** — download remote files to local cache
+- **`restore_s3_object()`** — restore archived S3 objects from Glacier
 
 ### `utils/union_find.py`
-- **`UnionFind`** — generic Union-Find data structure (also used in dedup)
+- **`UnionFind`** — generic Union-Find data structure with path compression and rank
+- Arrow serialization support for checkpoint/restore
 
 ---
 
@@ -349,4 +441,7 @@
 - Operator persistent state management helpers
 
 ### `testing/fault_injection.py`
-- **`check_fault()`**, `FAULT_BEFORE_PROCESS`, `FAULT_AFTER_PROCESS` — inject failures at controlled points for chaos tests
+- **`InjectedFaultError`** — exception raised by fault injection
+- **`check_fault()`** — check and trigger fault at a named point
+- **`is_fault_injection_enabled()`** / **`reset_fault_injector()`** — control fault injection state
+- Constants: `FAULT_BEFORE_PROCESS`, `FAULT_AFTER_PROCESS`, `FAULT_QUEUE_PRODUCE`, `FAULT_QUEUE_FETCH`, `FAULT_QUEUE_COMMIT`, etc.

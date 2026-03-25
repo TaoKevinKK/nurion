@@ -43,8 +43,6 @@ from _internal.testing.fault_injection import (
     FAULT_QUEUE_COMMIT,
     FAULT_BEFORE_PROCESS,
     FAULT_AFTER_PROCESS,
-    FAULT_BEFORE_MARK_PROCESSED,
-    FAULT_AFTER_MARK_PROCESSED,
 )
 
 from tests.utils import (
@@ -169,8 +167,8 @@ class TestExactlyOnceSemantics(StabilityTestBase):
         validator = DataValidator()
         source_data = generate_test_data_with_checksum(NUM_RECORDS)
 
-        # Fail before mark_processed to trigger retry
-        self.set_fault(FAULT_BEFORE_MARK_PROCESSED, after_count=10)
+        # Fail before processing to trigger retry
+        self.set_fault(FAULT_BEFORE_PROCESS, after_count=10)
 
         job = create_test_pipeline(
             num_records=NUM_RECORDS,
@@ -259,8 +257,8 @@ class TestExactlyOnceSemantics(StabilityTestBase):
             NUM_RECORDS, FILTER_MODULO, FILTER_REMAINDER
         )
 
-        # Fail AFTER mark_processed
-        self.set_fault(FAULT_AFTER_MARK_PROCESSED, after_count=8)
+        # Fail after processing
+        self.set_fault(FAULT_AFTER_PROCESS, after_count=8)
 
         job = create_test_pipeline(
             num_records=NUM_RECORDS,
@@ -959,8 +957,8 @@ class TestCombinedFaultScenarios(StabilityTestBase):
         )
 
         # Critical path faults
-        self.set_fault(FAULT_BEFORE_MARK_PROCESSED, after_count=4)
-        self.set_fault(FAULT_AFTER_MARK_PROCESSED, after_count=6)
+        self.set_fault(FAULT_BEFORE_PROCESS, after_count=4)
+        self.set_fault(FAULT_AFTER_PROCESS, after_count=6)
 
         job = create_test_pipeline(
             num_records=NUM_RECORDS,

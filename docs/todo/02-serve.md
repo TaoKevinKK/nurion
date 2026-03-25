@@ -81,9 +81,9 @@ Track implementation status of the model inference serving system.
   - Design proposes: group split rows by estimated token count → batch by model → parallel process
   - Potential 10-20% throughput improvement for mixed-length workloads
 
-- [ ] **INDEX.md consistency**
-  - LLM operator class names in `_internal/INDEX.md` are outdated
-  - `LlmOperatorConfig` → `ExternalLLMOperatorConfig`, `EmbeddedInference` → `EmbeddedLLMOperator`
+- [x] **INDEX.md consistency** ✅ (2026-03-25)
+  - Full audit and rewrite of `_internal/INDEX.md` — 30 discrepancies fixed
+  - Added 6 missing files, updated 24 incorrect entries
 
 ---
 
