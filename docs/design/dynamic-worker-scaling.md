@@ -18,7 +18,7 @@ _Created: December 2025_
 | **Worker Scale Up/Down** | ✅ Complete | Via `WorkerManager` |
 | **Cooldown Period** | ✅ Complete | Prevents thrashing |
 | **Manual Override API** | ❌ Not Implemented | `set_stage_workers()`, `freeze_stage()` etc. do not exist |
-| **Resource-Aware Scaling** | ❌ Not Implemented | No proactive `ray.available_resources()` check; reactive only (try-then-fail) |
+| **Resource-Aware Scaling** | ✅ Complete | `_check_cluster_resources()` queries `ray.available_resources()` before scale-up |
 | **Bottleneck Prioritization** | ❌ Not Implemented | Future work |
 
 **Current Implementation:**

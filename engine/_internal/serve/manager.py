@@ -34,7 +34,7 @@ from typing import Any, Optional
 import ray
 
 from _internal.serve.allocator import GPUAllocator
-from _internal.serve.config import AutoscaleConfig, ModelConfig
+from _internal.serve.config import ServeAutoscaleConfig, ModelConfig
 from _internal.serve.pool import ModelPool
 from _internal.serve.registry import REGISTRY_ACTOR_NAME, SERVE_NAMESPACE, ModelRegistry
 from _internal.webui.state.schema import encode_json, serve_model_key, serve_namespace
@@ -76,7 +76,7 @@ class ModelServiceManager:
 
     def __init__(
         self,
-        autoscale_config: Optional[AutoscaleConfig] = None,
+        autoscale_config: Optional[ServeAutoscaleConfig] = None,
         detached: bool = False,
         broker_endpoint: Optional[str] = None,
     ) -> None:
@@ -87,7 +87,7 @@ class ModelServiceManager:
             detached: Whether this manager is running in detached mode
             broker_endpoint: Optional WorkQueue broker URL for state persistence
         """
-        self._autoscale_config = autoscale_config or AutoscaleConfig()
+        self._autoscale_config = autoscale_config or ServeAutoscaleConfig()
         self._detached = detached
 
         self._pools: dict[str, ModelPool] = {}
@@ -166,7 +166,7 @@ class ModelServiceManager:
         config: ModelConfig | list[ModelConfig],
         wait_ready: bool = True,
         timeout: float = 600.0,
-        autoscale_config: Optional[AutoscaleConfig] = None,
+        autoscale_config: Optional[ServeAutoscaleConfig] = None,
     ) -> dict[str, Any] | list[dict[str, Any]]:
         """Deploy one or more models.
 
@@ -199,7 +199,7 @@ class ModelServiceManager:
         config: ModelConfig,
         wait_ready: bool,
         timeout: float,
-        autoscale_config: Optional[AutoscaleConfig] = None,
+        autoscale_config: Optional[ServeAutoscaleConfig] = None,
     ) -> dict[str, Any]:
         """Deploy a single model."""
         model_id = config.model_id
@@ -491,7 +491,7 @@ class ModelServiceManager:
 
 
 def create_manager(
-    autoscale_config: Optional[AutoscaleConfig] = None,
+    autoscale_config: Optional[ServeAutoscaleConfig] = None,
     detached: bool = False,
     broker_endpoint: Optional[str] = None,
 ) -> ray.actor.ActorHandle:

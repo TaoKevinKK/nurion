@@ -34,7 +34,7 @@ import ray
 from ray.exceptions import RayActorError
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
-from _internal.serve.config import AutoscaleConfig, ModelConfig
+from _internal.serve.config import ServeAutoscaleConfig, ModelConfig
 from _internal.serve.registry import SERVE_NAMESPACE
 from _internal.serve.worker import InferenceWorker
 from _internal.utils.network import find_free_port
@@ -85,7 +85,7 @@ class ModelPool:
         self._registry_url: Optional[str] = None
 
         # Autoscaler state
-        self._autoscale_config: Optional[AutoscaleConfig] = None
+        self._autoscale_config: Optional[ServeAutoscaleConfig] = None
         self._autoscale_task: Optional[asyncio.Task] = None
         self._autoscale_frozen = False
         self._last_idle_time = 0.0
@@ -384,9 +384,9 @@ class ModelPool:
 
     # --- Autoscaling ---
 
-    def start_autoscaler(self, config: Optional[AutoscaleConfig] = None) -> None:
+    def start_autoscaler(self, config: Optional[ServeAutoscaleConfig] = None) -> None:
         """Start the autoscaling background loop."""
-        self._autoscale_config = config or AutoscaleConfig()
+        self._autoscale_config = config or ServeAutoscaleConfig()
 
         if not self._autoscale_config.enabled:
             logger.info(f"Autoscaler disabled for {self._config.model_id}")

@@ -31,7 +31,7 @@ import httpx
 import pytest
 import ray
 
-from _internal.serve.config import AutoscaleConfig, ModelConfig
+from _internal.serve.config import ServeAutoscaleConfig, ModelConfig
 from _internal.serve.pool import ModelPool
 from _internal.serve.registry import ModelRegistry
 from _internal.utils.network import find_free_port
@@ -162,8 +162,8 @@ def _make_model_config(model_id: str = "test_model") -> ModelConfig:
     )
 
 
-def _make_autoscale_config(**overrides: Any) -> AutoscaleConfig:
-    """AutoscaleConfig with fast intervals for testing."""
+def _make_autoscale_config(**overrides: Any) -> ServeAutoscaleConfig:
+    """ServeAutoscaleConfig with fast intervals for testing."""
     defaults: dict[str, Any] = {
         "enabled": True,
         "check_interval_seconds": 0.5,
@@ -173,7 +173,7 @@ def _make_autoscale_config(**overrides: Any) -> AutoscaleConfig:
         "max_scale_step": 1,
     }
     defaults.update(overrides)
-    return AutoscaleConfig(**defaults)
+    return ServeAutoscaleConfig(**defaults)
 
 
 async def _set_metrics(http_url: str, endpoint: str, pending: int, running: int) -> None:

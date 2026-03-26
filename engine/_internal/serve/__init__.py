@@ -56,7 +56,7 @@ Example:
 
 from _internal.serve.allocator import GPUAllocator
 from _internal.serve.client import ModelClient
-from _internal.serve.config import AutoscaleConfig, ModelConfig, WorkerState
+from _internal.serve.config import ServeAutoscaleConfig, ModelConfig, WorkerState
 from _internal.serve.manager import MANAGER_ACTOR_NAME, ModelServiceManager, create_manager
 from _internal.serve.pool import ModelPool
 from _internal.serve.registry import ModelRegistry
@@ -65,7 +65,7 @@ from _internal.serve.worker import InferenceWorker
 __all__ = [
     # Config
     "ModelConfig",
-    "AutoscaleConfig",
+    "ServeAutoscaleConfig",
     "WorkerState",
     # Control Plane
     "ModelServiceManager",

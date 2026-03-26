@@ -22,7 +22,7 @@ from _internal.core.stage import Stage
 
 if TYPE_CHECKING:
     from _internal.runtime.ray_runner import RayJobRunner
-    from _internal.runtime.autoscaler import AutoscaleConfig
+    from _internal.runtime.autoscaler import StageAutoscaleConfig
 
 
 @dataclass
@@ -62,7 +62,7 @@ class JobConfig:
     claim_timeout_secs: float = 60.0  # Default: 60s before reclaiming from dead workers
     recovery_interval_secs: float = 10.0  # Default: check every 10s for expired claims
     ray_init_kwargs: Dict[str, Any] = field(default_factory=dict)
-    autoscale_config: Optional["AutoscaleConfig"] = None
+    autoscale_config: Optional["StageAutoscaleConfig"] = None
     webui: WebUIConfig = field(default_factory=WebUIConfig)
     payload_store_uri: str = "ray://"
     payload_store_options: Dict[str, Any] = field(default_factory=dict)

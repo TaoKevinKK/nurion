@@ -328,11 +328,11 @@ class TestExternalCaptioningWorkflow:
 
     async def test_end_to_end(self, ray_cluster_serve, tmp_path) -> None:
         """Deploy model via serve layer, then run the imported workflow."""
-        from _internal.serve.config import AutoscaleConfig, ModelConfig
+        from _internal.serve.config import ServeAutoscaleConfig, ModelConfig
         from _internal.serve.manager import ModelServiceManager
 
         _ManagerCls = ModelServiceManager.__ray_metadata__.modified_class
-        mgr = _ManagerCls(AutoscaleConfig(enabled=False))
+        mgr = _ManagerCls(ServeAutoscaleConfig(enabled=False))
 
         config = ModelConfig(
             model_id="test_caption",

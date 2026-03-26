@@ -31,6 +31,8 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, Optional
 
+import ray
+
 from _internal.runtime.queue_stats import QueueStatsClient, StageQueueConfig
 from _internal.utils.logging import create_ray_logger
 
@@ -39,7 +41,7 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class AutoscaleConfig:
+class StageAutoscaleConfig:
     """Configuration for the autoscaler."""
 
     enabled: bool = True
@@ -75,11 +77,11 @@ class SimpleAutoscaler:
 
     def __init__(
         self,
-        config: Optional[AutoscaleConfig] = None,
+        config: Optional[StageAutoscaleConfig] = None,
         queue_stats_client: Optional[QueueStatsClient] = None,
         stage_queue_configs: Optional[Dict[str, StageQueueConfig]] = None,
     ):
-        self.config = config or AutoscaleConfig()
+        self.config = config or StageAutoscaleConfig()
         self.logger = create_ray_logger("Autoscaler")
         self._queue_stats_client = queue_stats_client
         self._stage_queue_configs = stage_queue_configs or {}
@@ -177,12 +179,31 @@ class SimpleAutoscaler:
 
         return decisions
 
+    def _check_cluster_resources(self, num_cpus: float, num_gpus: float) -> bool:
+        """Check if the cluster has sufficient resources to spawn one worker.
+
+        Queries ``ray.available_resources()`` and compares against the per-worker
+        resource requirements.  Only CPU and GPU are checked — memory accounting
+        in Ray is less precise and not worth gating on.
+        """
+        try:
+            available = ray.available_resources()
+        except Exception:
+            # If we can't query resources (e.g. Ray not initialized), don't block scaling
+            return True
+
+        if num_cpus > 0 and num_cpus > available.get("CPU", 0):
+            return False
+        if num_gpus > 0 and num_gpus > available.get("GPU", 0):
+            return False
+        return True
+
     async def _execute_decisions(
         self,
         masters: Dict[str, "StageMaster"],
         decisions: Dict[str, int],
     ) -> None:
-        """Execute scaling decisions with cooldown protection."""
+        """Execute scaling decisions with cooldown and resource protection."""
         now = time.time()
 
         for stage_id, target in decisions.items():
@@ -198,6 +219,14 @@ class SimpleAutoscaler:
 
             try:
                 if target > current:
+                    # Proactive resource check before attempting scale-up
+                    stage = master.stage
+                    if not self._check_cluster_resources(stage.num_cpus, stage.num_gpus):
+                        self.logger.info(
+                            f"Skipping scale-up for {stage_id}: insufficient cluster resources "
+                            f"(need cpu={stage.num_cpus}, gpu={stage.num_gpus})"
+                        )
+                        continue
                     await master.scale_up(target - current)
                     self._last_scale_time[stage_id] = now
                     self.logger.info(f"Scaled UP {stage_id}: {current} -> {target}")

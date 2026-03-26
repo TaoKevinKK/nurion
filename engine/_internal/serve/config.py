@@ -167,7 +167,7 @@ class ModelConfig:
 
 
 @dataclass
-class AutoscaleConfig:
+class ServeAutoscaleConfig:
     """Configuration for autoscaling behavior.
 
     Attributes:

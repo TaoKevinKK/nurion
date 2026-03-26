@@ -34,7 +34,7 @@ import pytest
 import pytest_asyncio
 
 from _internal.serve.client import ModelClient
-from _internal.serve.config import AutoscaleConfig, ModelConfig
+from _internal.serve.config import ServeAutoscaleConfig, ModelConfig
 from _internal.serve.manager import ModelServiceManager
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
@@ -59,7 +59,7 @@ async def manager(ray_cluster_with_gpus):
     """
     _ManagerCls = ModelServiceManager.__ray_metadata__.modified_class
 
-    autoscale_config = AutoscaleConfig(enabled=False)
+    autoscale_config = ServeAutoscaleConfig(enabled=False)
     mgr = _ManagerCls(autoscale_config)
     yield mgr
 
@@ -78,7 +78,7 @@ async def manager_for_compaction(ray_cluster_with_gpus, monkeypatch):
     """
     monkeypatch.setattr("_internal.serve.pool._SPAWN_WAIT_TIMEOUT_SECONDS", 5.0)
     _ManagerCls = ModelServiceManager.__ray_metadata__.modified_class
-    autoscale_config = AutoscaleConfig(enabled=False)
+    autoscale_config = ServeAutoscaleConfig(enabled=False)
     mgr = _ManagerCls(autoscale_config)
     yield mgr
 
@@ -92,7 +92,7 @@ async def manager_for_compaction(ray_cluster_with_gpus, monkeypatch):
 async def manager_with_autoscale(ray_cluster_with_gpus):
     """Manager with autoscaling enabled (fast intervals for testing)."""
     _ManagerCls = ModelServiceManager.__ray_metadata__.modified_class
-    autoscale_config = AutoscaleConfig(
+    autoscale_config = ServeAutoscaleConfig(
         enabled=True,
         check_interval_seconds=0.5,
         scale_up_threshold=5,
@@ -128,7 +128,9 @@ async def _wait_all_workers_ready(manager: Any, model_id: str, timeout: float = 
     expected = len(pool._workers)
     deadline = time.time() + timeout
     while time.time() < deadline:
-        results = await asyncio.gather(*[info.actor.is_ready.remote() for info in pool._workers.values()])
+        results = await asyncio.gather(
+            *[info.actor.is_ready.remote() for info in pool._workers.values()]
+        )
         if all(results):
             # Also wait for registry to have all endpoints
             status = await pool.get_status()
@@ -589,7 +591,7 @@ class TestMultiModelCompaction:
 
         # Start autoscaler for model_a
         pool_a = mgr._pools["fz_model_a"]
-        pool_a.start_autoscaler(AutoscaleConfig(enabled=True, check_interval_seconds=1.0))
+        pool_a.start_autoscaler(ServeAutoscaleConfig(enabled=True, check_interval_seconds=1.0))
         assert not pool_a._autoscale_frozen
 
         config_b = _make_config("fz_model_b", tp=8, min_workers=1, max_workers=1)

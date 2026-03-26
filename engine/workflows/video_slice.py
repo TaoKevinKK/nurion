@@ -55,7 +55,7 @@ from nurion import (
     Stage,
     WebUIConfig,
 )
-from _internal.runtime.autoscaler import AutoscaleConfig
+from _internal.runtime.autoscaler import StageAutoscaleConfig
 from _internal.utils.remote import ensure_local_file, is_remote_path, restore_s3_object
 
 _OUTPUT_SCHEMA = pa.schema(
@@ -463,7 +463,7 @@ def create_job(
             webui=WebUIConfig(
                 enabled=True,
             ),
-            autoscale_config=AutoscaleConfig(
+            autoscale_config=StageAutoscaleConfig(
                 enabled=False,  # Disable autoscaling for now
             ),
         ),

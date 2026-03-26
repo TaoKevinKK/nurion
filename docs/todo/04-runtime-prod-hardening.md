@@ -45,10 +45,10 @@ Track runtime hardening gaps for production workloads at scale.
   - Also missing: `AutoscaleConfig.fixed_workers` and `frozen_stages` fields
   - **Acceptance**: Operators can pin a stage to N workers or freeze scaling during debugging
 
-- [ ] **Resource-aware scaling (proactive)**
-  - Design: `../design/dynamic-worker-scaling.md` — `can_spawn_worker()` via `ray.available_resources()`
-  - Current: reactive only (try to create worker, cancel if it fails to become ready)
-  - **Acceptance**: Autoscaler skips scale-up when cluster resources are insufficient
+- [x] **Resource-aware scaling (proactive)** ✅ (2026-03-26)
+  - `SimpleAutoscaler._check_cluster_resources()` queries `ray.available_resources()` before scale-up
+  - Checks CPU and GPU availability; skips scale-up with info log when insufficient
+  - Gracefully degrades if resource query fails (proceeds with scale-up)
 
 - [ ] **Remove central payload-store metadata hotspot**
   - `RaySplitPayloadStore` uses a single actor for key→ref mapping

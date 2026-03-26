@@ -270,7 +270,8 @@
 - **`SimpleAutoscaler`** — queue-depth-driven worker scaling
   - Reads queue depth from `QueueStatsClient`
   - Calls `StageMaster.scale_up/down()` on each tick
-- **`AutoscaleConfig`** — `enabled`, `check_interval_s`, `scale_up_lag_threshold`, `scale_down_lag_threshold`, `cooldown_s`, `max_scale_step`
+  - Proactive resource check via `ray.available_resources()` before scale-up
+- **`StageAutoscaleConfig`** — `enabled`, `check_interval_s`, `scale_up_lag_threshold`, `scale_down_lag_threshold`, `cooldown_s`, `max_scale_step`
 - **`StageMetrics`** — per-stage metrics snapshot for scaling decisions
 
 ### `runtime/backpressure.py`
@@ -309,7 +310,7 @@
 ### `serve/config.py`
 - **`ModelConfig`** — `model_id`, `model_source`, `tensor_parallel_size`, `min_workers`, `max_workers`
   - `get_worker_resources()` — auto-infer GPU resources (fractional when TP=1 + low utilization)
-- **`AutoscaleConfig`** — `target_qps`, `scale_up_threshold`, `scale_down_threshold`
+- **`ServeAutoscaleConfig`** — `enabled`, `check_interval_seconds`, `scale_up_threshold`, `scale_down_idle_seconds`, `cooldown_seconds`, `max_scale_step`
 - **`WorkerState`** (Enum) — LOADING, READY, STOPPED
 
 ### `serve/manager.py`

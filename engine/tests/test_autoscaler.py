@@ -17,8 +17,9 @@
 Tests the autoscaling functionality including:
 - Threshold-based scaling decisions
 - Cooldown periods
-- Manual overrides
-- Stage freezing
+- Metrics collection from StageMaster + QueueStatsClient
+- Scale execution (up/down with min/max bounds)
+- Resource-aware scaling (proactive cluster resource check)
 """
 
 import asyncio
@@ -27,9 +28,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from _internal.core.models import QueueStats
-from _internal.runtime.autoscaler import AutoscaleConfig, SimpleAutoscaler, StageMetrics
+from _internal.runtime.autoscaler import StageAutoscaleConfig, SimpleAutoscaler, StageMetrics
 from _internal.runtime.queue_stats import QueueRef, StageQueueConfig
-from _internal.core.stage_master import StageStatus
 
 
 # ============================================================================
@@ -47,6 +47,8 @@ class MockStageMaster:
         min_workers: int = 1,
         max_workers: int = 8,
         input_queue_lag: int = 0,
+        num_cpus: float = 0.5,
+        num_gpus: float = 0.0,
     ):
         self.stage_id = stage_id
         self._workers = {f"worker_{i}": MagicMock() for i in range(worker_count)}
@@ -58,22 +60,8 @@ class MockStageMaster:
         self.stage = MagicMock()
         self.stage.min_parallelism = min_workers
         self.stage.max_parallelism = max_workers
-
-        # For lag simulation
-        self._input_queue_lag = input_queue_lag
-
-    def get_status(self) -> StageStatus:
-        return StageStatus(
-            stage_id=self.stage_id,
-            worker_count=len(self._workers),
-            output_queue_size=0,
-            is_running=self._running,
-            is_finished=self._finished,
-        )
-
-    def get_input_queue_lag(self) -> int:
-        """Synchronous queue lag getter (matches real StageMaster)."""
-        return self._input_queue_lag
+        self.stage.num_cpus = num_cpus
+        self.stage.num_gpus = num_gpus
 
     async def scale_up(self, count: int) -> int:
         """Scale up by spawning new workers."""
@@ -93,25 +81,6 @@ class MockStageMaster:
         return to_remove
 
 
-class MockSourceMaster:
-    """Mock source master for testing (should be skipped by autoscaler)."""
-
-    def __init__(self, stage_id: str = "source_stage"):
-        self.stage_id = stage_id
-        self._workers = {"worker_0": MagicMock()}
-        self._running = True
-        self._finished = False
-
-    def get_status(self) -> StageStatus:
-        return StageStatus(
-            stage_id=self.stage_id,
-            worker_count=len(self._workers),
-            output_queue_size=100,
-            is_running=self._running,
-            is_finished=self._finished,
-        )
-
-
 class FakeQueueStatsClient:
     def __init__(self, stats: dict[str, QueueStats]) -> None:
         self._stats = stats
@@ -127,11 +96,11 @@ class FakeQueueStatsClient:
 # ============================================================================
 
 
-class TestAutoscaleConfig:
-    """Tests for AutoscaleConfig."""
+class TestStageAutoscaleConfig:
+    """Tests for StageAutoscaleConfig."""
 
     def test_default_config(self):
-        config = AutoscaleConfig()
+        config = StageAutoscaleConfig()
         assert config.enabled is True
         assert config.check_interval_s == 15.0
         assert config.scale_up_lag_threshold == 1000
@@ -140,7 +109,7 @@ class TestAutoscaleConfig:
         assert config.max_scale_step == 2
 
     def test_custom_config(self):
-        config = AutoscaleConfig(
+        config = StageAutoscaleConfig(
             enabled=False,
             check_interval_s=30.0,
             scale_up_lag_threshold=500,
@@ -176,7 +145,7 @@ class TestSimpleAutoscaler:
         assert autoscaler._running is False
 
     def test_init_with_config(self):
-        config = AutoscaleConfig(check_interval_s=10.0)
+        config = StageAutoscaleConfig(check_interval_s=10.0)
         autoscaler = SimpleAutoscaler(config)
         assert autoscaler.config.check_interval_s == 10.0
 
@@ -186,7 +155,7 @@ class TestScalingDecisions:
 
     @pytest.fixture
     def autoscaler(self):
-        config = AutoscaleConfig(
+        config = StageAutoscaleConfig(
             scale_up_lag_threshold=1000,
             scale_down_lag_threshold=100,
             max_scale_step=2,
@@ -333,7 +302,7 @@ class TestCooldown:
 
     async def test_cooldown_prevents_rapid_scaling(self):
         """Scaling should be blocked during cooldown period."""
-        config = AutoscaleConfig(cooldown_s=60.0)
+        config = StageAutoscaleConfig(cooldown_s=60.0)
         autoscaler = SimpleAutoscaler(config)
 
         master = MockStageMaster(
@@ -358,7 +327,7 @@ class TestCooldown:
 
     async def test_scaling_after_cooldown(self):
         """Scaling should work after cooldown period."""
-        config = AutoscaleConfig(cooldown_s=0.1)  # Short cooldown for testing
+        config = StageAutoscaleConfig(cooldown_s=0.1)  # Short cooldown for testing
         autoscaler = SimpleAutoscaler(config)
 
         master = MockStageMaster(
@@ -461,7 +430,7 @@ class TestScaleExecution:
         assert len(master._workers) == 5
 
     async def test_scale_down_removes_workers(self):
-        config = AutoscaleConfig(cooldown_s=0)  # No cooldown for testing
+        config = StageAutoscaleConfig(cooldown_s=0)  # No cooldown for testing
         autoscaler = SimpleAutoscaler(config)
 
         master = MockStageMaster(worker_count=5, min_workers=1)
@@ -472,7 +441,7 @@ class TestScaleExecution:
         assert len(master._workers) == 2
 
     async def test_scale_down_respects_min_workers(self):
-        config = AutoscaleConfig(cooldown_s=0)
+        config = StageAutoscaleConfig(cooldown_s=0)
         autoscaler = SimpleAutoscaler(config)
 
         master = MockStageMaster(worker_count=3, min_workers=2)
@@ -482,3 +451,101 @@ class TestScaleExecution:
 
         # Should stop at min_workers
         assert len(master._workers) == 2
+
+
+@pytest.mark.asyncio
+class TestResourceAwareScaling:
+    """Tests for proactive resource checking before scale-up."""
+
+    async def test_scale_up_skipped_when_insufficient_cpus(self, monkeypatch):
+        """Scale-up should be skipped when cluster lacks CPU resources."""
+        config = StageAutoscaleConfig(cooldown_s=0)
+        autoscaler = SimpleAutoscaler(config)
+
+        master = MockStageMaster(worker_count=2, num_cpus=2.0, num_gpus=0.0)
+        masters = {"stage_a": master}
+
+        # Cluster has only 1 CPU available — worker needs 2
+        monkeypatch.setattr("ray.available_resources", lambda: {"CPU": 1.0, "GPU": 0.0})
+
+        await autoscaler._execute_decisions(masters, {"stage_a": 4})
+
+        # Should still be 2 — scale-up skipped
+        assert len(master._workers) == 2
+
+    async def test_scale_up_skipped_when_insufficient_gpus(self, monkeypatch):
+        """Scale-up should be skipped when cluster lacks GPU resources."""
+        config = StageAutoscaleConfig(cooldown_s=0)
+        autoscaler = SimpleAutoscaler(config)
+
+        master = MockStageMaster(worker_count=2, num_cpus=0.5, num_gpus=1.0)
+        masters = {"stage_a": master}
+
+        # Cluster has CPUs but no GPUs
+        monkeypatch.setattr("ray.available_resources", lambda: {"CPU": 10.0})
+
+        await autoscaler._execute_decisions(masters, {"stage_a": 4})
+
+        assert len(master._workers) == 2
+
+    async def test_scale_up_proceeds_with_sufficient_resources(self, monkeypatch):
+        """Scale-up should proceed when cluster has enough resources."""
+        config = StageAutoscaleConfig(cooldown_s=0)
+        autoscaler = SimpleAutoscaler(config)
+
+        master = MockStageMaster(worker_count=2, num_cpus=1.0, num_gpus=1.0)
+        masters = {"stage_a": master}
+
+        monkeypatch.setattr("ray.available_resources", lambda: {"CPU": 8.0, "GPU": 4.0})
+
+        await autoscaler._execute_decisions(masters, {"stage_a": 4})
+
+        assert len(master._workers) == 4
+
+    async def test_scale_up_proceeds_when_zero_cpu_required(self, monkeypatch):
+        """Workers requiring 0 CPU should not be blocked by CPU check."""
+        config = StageAutoscaleConfig(cooldown_s=0)
+        autoscaler = SimpleAutoscaler(config)
+
+        master = MockStageMaster(worker_count=2, num_cpus=0, num_gpus=0.0)
+        masters = {"stage_a": master}
+
+        # Even with 0 available resources, 0-requirement workers should pass
+        monkeypatch.setattr("ray.available_resources", lambda: {"CPU": 0.0})
+
+        await autoscaler._execute_decisions(masters, {"stage_a": 4})
+
+        assert len(master._workers) == 4
+
+    async def test_scale_down_not_affected_by_resource_check(self, monkeypatch):
+        """Resource check should only gate scale-up, not scale-down."""
+        config = StageAutoscaleConfig(cooldown_s=0)
+        autoscaler = SimpleAutoscaler(config)
+
+        master = MockStageMaster(worker_count=4, min_workers=1, num_cpus=2.0)
+        masters = {"stage_a": master}
+
+        # No resources available — but scale-down should still work
+        monkeypatch.setattr("ray.available_resources", lambda: {"CPU": 0.0})
+
+        await autoscaler._execute_decisions(masters, {"stage_a": 2})
+
+        assert len(master._workers) == 2
+
+    async def test_resource_check_error_does_not_block_scaling(self, monkeypatch):
+        """If ray.available_resources() fails, scale-up should proceed."""
+        config = StageAutoscaleConfig(cooldown_s=0)
+        autoscaler = SimpleAutoscaler(config)
+
+        master = MockStageMaster(worker_count=2)
+        masters = {"stage_a": master}
+
+        def raise_error():
+            raise RuntimeError("Ray not initialized")
+
+        monkeypatch.setattr("ray.available_resources", raise_error)
+
+        await autoscaler._execute_decisions(masters, {"stage_a": 4})
+
+        # Should proceed despite error
+        assert len(master._workers) == 4
