@@ -128,7 +128,7 @@ async def _wait_all_workers_ready(manager: Any, model_id: str, timeout: float = 
     expected = len(pool._workers)
     deadline = time.time() + timeout
     while time.time() < deadline:
-        results = await asyncio.gather(*[w.is_ready.remote() for w in pool._workers.values()])
+        results = await asyncio.gather(*[info.actor.is_ready.remote() for info in pool._workers.values()])
         if all(results):
             # Also wait for registry to have all endpoints
             status = await pool.get_status()

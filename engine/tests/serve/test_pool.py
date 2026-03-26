@@ -84,6 +84,9 @@ class FakeInferenceWorker:
     def get_node_id(self) -> Optional[str]:
         return self._node_id
 
+    def get_endpoint(self) -> str:
+        return self._endpoint
+
     def is_ready(self) -> bool:
         return self._is_ready
 
@@ -125,12 +128,15 @@ class _TestableModelPool(ModelPool):
         )
         await worker.start.remote()
 
-        self._workers[worker_id] = worker
-        self._worker_ports[worker_id] = port
-
-        # Track node placement (mirrors real pool.py logic)
+        endpoint = f"http://127.0.0.1:{port}"
         actual_node = await worker.get_node_id.remote()
-        self._worker_nodes[worker_id] = actual_node
+
+        from _internal.serve.pool import _WorkerInfo
+
+        self._workers[worker_id] = _WorkerInfo(
+            actor=worker, port=port, endpoint=endpoint, node_id=actual_node
+        )
+
         if self._allocator is not None:
             resources = self._config.get_worker_resources()
             gpus = resources.get("num_gpus", 0)

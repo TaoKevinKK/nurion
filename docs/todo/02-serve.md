@@ -70,10 +70,9 @@ Track implementation status of the model inference serving system.
   - `InferenceWorker.get_node_id()` implemented via `ray.get_runtime_context().get_node_id()`
   - Allocator tracks GPU allocation by `node_id`
 
-- [ ] **ModelPool FAILED status on InferenceWorker crash**
-  - Design: `../design/webui-api-v2.md` — worker crash → FAILED status write
-  - Current: pool writes LOADING, READY, STOPPED but not FAILED on actor death
-  - Requires actor death callback integration
+- [x] **ModelPool FAILED status on InferenceWorker crash** ✅ (2026-03-25)
+  - `_check_worker_health()` detects dead actors via lightweight RPC, writes FAILED status
+  - Integrated into autoscale loop and `wait_ready()` poll
 
 - [ ] **Per-row group-by-model batching**
   - Design: `../design/gpu-scheduling-and-routing.md` §6.5

@@ -93,9 +93,8 @@ Track runtime hardening gaps for production workloads at scale.
   - `origin_node` metadata in queue messages, broker-side node-aware partition assignment
   - Reduces cross-node Arrow Flight reads
 
-- [ ] **Clean up dead code: `FAULT_BEFORE_MARK_PROCESSED`**
-  - Defined in `testing/fault_injection.py` but never checked in `stage_worker.py`
-  - Left over from old offset-based exactly-once design
+- [x] **Clean up dead code: `FAULT_BEFORE_MARK_PROCESSED`** ✅ (PR #69, 2026-03-25)
+  - Removed dead fault constants, checkpoint methods, `queue/backend.py`, `state/` module
 
 ### Deprioritized (Revisit When Needed)
 

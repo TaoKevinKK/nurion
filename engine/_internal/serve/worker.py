@@ -474,6 +474,10 @@ class InferenceWorker:
         """Return the Ray node_id this worker is running on."""
         return self._node_id
 
+    def get_endpoint(self) -> str:
+        """Return the HTTP endpoint URL for this worker."""
+        return self._endpoint
+
     async def start(self) -> None:
         """Start background tasks (must be called after actor creation)."""
         self._node_id = ray.get_runtime_context().get_node_id()
