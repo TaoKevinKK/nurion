@@ -60,9 +60,9 @@ Track implementation status of the model inference serving system.
 - [x] **Fractional GPU support** ✅ (`d5902c9`, 2026-03)
   - `ModelConfig.get_worker_resources()` auto-infers `num_gpus=0.5` when TP=1 and `gpu_memory_utilization < 0.5`
 
-- [ ] **Two-phase ordered deployment (`deploy_models()`)**
-  - Design: `../design/gpu-scheduling-and-routing.md` §deploy_models
-  - Large models deploy sequentially first (avoid fragmentation), then small models in parallel
+- [x] **Two-phase ordered deployment (`deploy_models()`)** ✅ (already in `d5902c9`)
+  - `_deploy_multiple()` sorts by GPU desc, deploys large models sequentially, then small in parallel
+  - Dynamic threshold: `max_node_gpus / 2`
 
 ### Low Priority — Observability and Quality
 
@@ -96,7 +96,7 @@ The design doc was written before the serve module was implemented. Current stat
 | Manager as Ray actor | ✅ Implemented | `ModelServiceManager` is `@ray.remote` |
 | Pool as plain object | ✅ Implemented | `ModelPool` is not a Ray actor |
 | Fractional GPU | ✅ Implemented | Auto `num_gpus=0.5` when TP=1 + low utilization |
-| deploy_models() ordering | ❌ Not implemented | |
+| deploy_models() ordering | ✅ Implemented | `_deploy_multiple()`: large models sequential, small parallel |
 | Compaction | ✅ Implemented | `plan_compaction()` + auto-trigger on deploy failure |
 | Node reporting | ✅ Implemented | `get_node_id()` + per-node allocation tracking |
 | ModelRoutingConfig | ✅ Implemented | `RoutedChatCompletionsClient` + `ModelRoutingConfig` |

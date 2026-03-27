@@ -17,7 +17,7 @@ _Created: December 2025_
 | **Queue Lag Metrics** | ✅ Complete | WorkQueue pending/claimed via job-level stats client |
 | **Worker Scale Up/Down** | ✅ Complete | Via `WorkerManager` |
 | **Cooldown Period** | ✅ Complete | Prevents thrashing |
-| **Manual Override API** | ❌ Not Implemented | `set_stage_workers()`, `freeze_stage()` etc. do not exist |
+| **Manual Override API** | ❌ Deprioritized | Low value for batch workloads; removed from TODO |
 | **Resource-Aware Scaling** | ✅ Complete | `_check_cluster_resources()` queries `ray.available_resources()` before scale-up |
 | **Bottleneck Prioritization** | ❌ Not Implemented | Future work |
 
