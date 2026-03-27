@@ -168,20 +168,21 @@ class LanceSink(SinkOperator):
         return RawOutputBytes(payloads=payloads)
 
     def _build_table(self, batch: SplitPayload) -> pa.Table:
-        """Build PyArrow table from batch, handling reserved columns and blob encoding."""
-        records = batch.to_pylist()
+        """Build PyArrow table from batch, handling reserved columns and blob encoding.
 
-        # Filter out reserved Lance column names
-        reserved_columns = {"_rowid", "_rowaddr"}
-        filtered = [
-            {k: v for k, v in record.items() if k not in reserved_columns} for record in records
-        ]
+        Operates directly on the Arrow table (zero-copy where possible) instead
+        of round-tripping through Python dicts.
+        """
+        table = batch.data
 
-        table = pa.Table.from_pylist(filtered)
+        # Drop reserved Lance column names (columnar drop, no row iteration)
+        reserved = [c for c in table.column_names if c in {"_rowid", "_rowaddr"}]
+        if reserved:
+            table = table.drop_columns(reserved)
 
-        # Apply blob column encoding
-        has_blob_columns = any(col in self.blob_columns for col in table.column_names)
-        if has_blob_columns:
+        # Apply blob column encoding via schema metadata
+        blob_cols = [c for c in table.column_names if c in self.blob_columns]
+        if blob_cols:
             new_fields = []
             for f in table.schema:
                 if f.name in self.blob_columns:

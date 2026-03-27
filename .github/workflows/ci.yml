@@ -465,14 +465,13 @@ jobs:
         cd control
         uv run --no-sync pytest tests/ -v
     
-    - name: Upload coverage to Codecov
+    - name: Control coverage summary
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
-      uses: codecov/codecov-action@v4
-      with:
-        file: ./control/coverage.xml
-        flags: unittests
-        name: codecov-umbrella
-        fail_ci_if_error: false
+      run: |
+        if [ -f control/coverage.xml ]; then
+          echo "## Control Plane Coverage" >> $GITHUB_STEP_SUMMARY
+          cd control && uv run --no-sync coverage report --format=markdown >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
+        fi
 
   # ============================================================================
   # Engine unit tests (no external services, fast)
@@ -1017,6 +1016,9 @@ jobs:
   coverage-report:
     name: Coverage Report
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     needs:
       - build-raydp
       - build-workqueue-rs
@@ -1086,6 +1088,8 @@ jobs:
 
     - name: Python diff coverage
       if: github.event_name == 'pull_request'
+      env:
+        GH_TOKEN: ${{ github.token }}
       run: |
         cd engine
         if [ -f coverage.xml ]; then
@@ -1096,6 +1100,30 @@ jobs:
             --markdown-report=/tmp/diff-cover.md \
             --fail-under=0 || true
           cat /tmp/diff-cover.md >> $GITHUB_STEP_SUMMARY
+
+          # Post coverage comment on PR (update existing or create new)
+          OVERALL=$(uv run --no-sync coverage report --format=total 2>/dev/null || echo "N/A")
+          {
+            echo "## Coverage Report"
+            echo ""
+            echo "**Overall**: ${OVERALL}%"
+            echo ""
+            echo "<details><summary>Diff Coverage (changed files only)</summary>"
+            echo ""
+            cat /tmp/diff-cover.md
+            echo ""
+            echo "</details>"
+          } > /tmp/pr-comment.md
+
+          # Find and update existing comment, or create new one
+          COMMENT_ID=$(gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
+            --jq '.[] | select(.body | startswith("## Coverage Report")) | .id' | head -1)
+          if [ -n "$COMMENT_ID" ]; then
+            gh api repos/${{ github.repository }}/issues/comments/$COMMENT_ID \
+              -X PATCH -F "body=@/tmp/pr-comment.md"
+          else
+            gh pr comment ${{ github.event.pull_request.number }} --body-file /tmp/pr-comment.md
+          fi
         fi
 
     # ---- Rust (workqueue-rs) coverage ----
@@ -1104,26 +1132,9 @@ jobs:
         if [ -f /tmp/coverage/coverage-workqueue-rs/codecov.json ]; then
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "## Rust (workqueue-rs) Coverage" >> $GITHUB_STEP_SUMMARY
-          echo "Rust coverage data uploaded to Codecov." >> $GITHUB_STEP_SUMMARY
+          echo "Rust coverage data available in job summary." >> $GITHUB_STEP_SUMMARY
         else
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "## Rust (workqueue-rs) Coverage" >> $GITHUB_STEP_SUMMARY
           echo "No Rust coverage data collected." >> $GITHUB_STEP_SUMMARY
         fi
-
-    # ---- Upload to Codecov ----
-    - name: Upload Python coverage to Codecov
-      if: hashFiles('engine/coverage.xml') != ''
-      uses: codecov/codecov-action@v4
-      with:
-        file: ./engine/coverage.xml
-        flags: engine
-        fail_ci_if_error: false
-
-    - name: Upload Rust coverage to Codecov
-      if: hashFiles('/tmp/coverage/coverage-workqueue-rs/codecov.json') != ''
-      uses: codecov/codecov-action@v4
-      with:
-        file: /tmp/coverage/coverage-workqueue-rs/codecov.json
-        flags: workqueue-rs
-        fail_ci_if_error: false
