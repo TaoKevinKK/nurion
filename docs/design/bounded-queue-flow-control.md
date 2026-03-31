@@ -51,7 +51,7 @@ With a bounded queue, all resource problems become self-limiting:
 | S3 bandwidth | Sink buffer bounded → write rate bounded |
 | GPU utilization | `P` prefetch batches → GPU always has data ready |
 
-**One parameter (`prefetch_factor`) replaces five monitoring dimensions.**
+**Bounded queues replace five monitoring dimensions.**
 
 ---
 
@@ -60,31 +60,132 @@ With a bounded queue, all resource problems become self-limiting:
 ### 3.1 Bounded Inter-Stage Queues
 
 ```
-Source ──push──▶ [QueueGroup: max_pending = W×P] ──claim──▶ Stage 1
-                  │                                          │
-                  │ source blocks when                       │ ack_and_scatter
-                  │ pending >= max_pending                   │
-                  ▼                                          ▼
-          (natural backpressure)              [QueueGroup: max_pending = W×P] ──▶ Stage 2
-                                                                                    │
-                                                                                    ▼
-                                                                              [Sink buffer]
-
-W = downstream stage's current worker count
-P = prefetch_factor (default: 3)
+Source ──push──▶ [bound_A] ──claim──▶ CPU Transform ──ack_and_scatter──▶ [bound_B] ──▶ GPU ──▶ [bound_C] ──▶ Sink
+                  │                                                        │
+                  │ blocks when full                                       │ blocks when full
+                  ▼                                                        ▼
+         (backpressure propagates backward from bottleneck)
 ```
 
-**How it works:**
-1. Each inter-stage QueueGroup has `max_pending = downstream_workers × prefetch_factor`
-2. `push()` / `ack_and_scatter()` blocks (or returns backpressure signal) when
-   `pending_count >= max_pending`
-3. As downstream workers `ack()`, pending decreases → upstream unblocks
-4. GPU stages are always the bottleneck → everything upstream adapts to GPU rate
+Each inter-stage QueueGroup has a `max_pending` that limits buffered messages.
+Backpressure propagates backward naturally — no global coordinator needed.
+The bottleneck stage (usually GPU) sets the pace for the entire pipeline.
 
-**Sizing rationale:**
-- `prefetch_factor = 3` means each GPU worker always has 2-3 batches queued ahead
-- If GPU takes 10s/batch and upstream takes 2s/batch, GPU never starves
-- If GPU takes 1s/batch, upstream naturally rate-matches (bounded by queue)
+**How it works:**
+1. Each QueueGroup has `max_pending` (in message count, derived from byte budget)
+2. `push()` / `ack_and_scatter()` returns `QueueFull` when `pending >= max_pending`
+3. Upstream worker waits and retries → its input queue fills → propagates further
+4. Bottleneck stage (GPU) determines steady-state throughput for the entire pipeline
+
+### 3.2 Bound Sizing: Memory Budget, Not Message Count
+
+A workflow has multiple stages with different payload sizes. Count-based bounds
+(`W × 3`) don't account for this — 12 messages of 100MB vs 12 messages of 1KB
+are very different memory footprints.
+
+**Approach: allocate a node memory budget, divide across stages, convert to
+message counts based on observed payload size.**
+
+```python
+@dataclass
+class PipelineFlowConfig:
+    buffer_memory_fraction: float = 0.4
+    # Fraction of node memory reserved for pipeline buffers.
+    # Remaining 60%: worker RSS, Ray object store, OS, GPU memory.
+    # User rarely touches this — default 0.4 works for most workloads.
+
+    min_prefetch: int = 2
+    # Minimum messages per downstream worker (prevent GPU starvation).
+    # Even if memory budget is tight, each GPU gets ≥2 batches queued.
+```
+
+**Calculation at pipeline startup (automatic, no user config per stage):**
+
+```python
+def compute_stage_bounds(stages: List[Stage], node_memory_bytes: int,
+                         config: PipelineFlowConfig) -> Dict[str, int]:
+    total_budget = int(node_memory_bytes * config.buffer_memory_fraction)
+    total_workers = sum(s.max_parallelism for s in stages if s.downstream)
+
+    bounds = {}
+    for stage in stages:
+        ds = stage.downstream_stage
+        if ds is None:
+            continue  # sink has no downstream queue
+
+        # Budget proportional to downstream worker count
+        stage_budget = total_budget * ds.max_parallelism / total_workers
+
+        # Estimate payload size from batch_size (refined at runtime)
+        est_payload = stage.batch_size * 1024  # conservative: 1KB/row
+
+        max_pending = max(
+            int(stage_budget / est_payload),
+            ds.max_parallelism * config.min_prefetch,  # floor: GPU never starves
+        )
+        bounds[stage.stage_id] = max_pending
+    return bounds
+```
+
+**Example: 32GB node, 4 stages**
+
+```
+Node memory: 32 GB, buffer_fraction: 0.4 → budget: 12.8 GB
+Stages: Source(8w) → Transform(8w) → GPU(4w) → Sink(2w)
+total_workers = 8 + 4 + 2 = 14
+
+Stage          | Workers | Budget share | Est payload | max_pending
+Source→Trans   | 8       | 7.3 GB       | 100 KB      | 73,000
+Transform→GPU  | 4       | 3.7 GB       | 50 MB       | 74
+GPU→Sink       | 2       | 1.8 GB       | 1 KB        | 1,800,000
+```
+
+Transform→GPU gets only 74 messages — but that's `4 GPUs × 18 prefetch`, more
+than enough to keep GPUs busy. GPU→Sink gets millions because output is tiny.
+**The byte budget naturally allocates more buffer where payloads are small.**
+
+### 3.3 Adaptive Refinement (Runtime)
+
+Startup estimates are rough (1KB/row). After the first few batches flow through,
+the system refines bounds based on actual payload sizes:
+
+```python
+class AdaptiveQueueBound:
+    def __init__(self, budget_bytes: int, min_pending: int):
+        self._budget = budget_bytes
+        self._min = min_pending
+        self._avg_size_ema = 0.0
+        self._samples = 0
+
+    def observe(self, payload_bytes: int):
+        """Called on each push. Updates exponential moving average."""
+        self._samples += 1
+        alpha = min(0.1, 2.0 / (self._samples + 1))
+        self._avg_size_ema = alpha * payload_bytes + (1 - alpha) * self._avg_size_ema
+
+    @property
+    def max_pending(self) -> int:
+        if self._avg_size_ema <= 0:
+            return self._min * 10  # unknown size → conservative
+        return max(int(self._budget / self._avg_size_ema), self._min)
+```
+
+After ~50 messages, the bound stabilizes. If payload sizes change mid-pipeline
+(e.g., filter removes 90% of rows), the EMA adapts within ~20 messages.
+
+### 3.4 Different Stage Types
+
+The byte-budget approach automatically handles mixed workloads:
+
+| Stage type | Typical payload | Effect |
+|-----------|----------------|--------|
+| Source → CPU transform | Large (raw data, 10-100MB) | Small max_pending (memory-limited) |
+| CPU → GPU inference | Medium (preprocessed, 1-50MB) | Moderate max_pending |
+| GPU → CPU postprocess | Small (embeddings, 1KB-1MB) | Large max_pending (count-limited by min_prefetch) |
+| CPU → Sink | Small-medium | Large max_pending |
+
+**No per-stage configuration needed.** The byte budget plus payload size
+observation handles everything automatically.
 
 ### 3.2 Source Rate Control
 
@@ -288,22 +389,30 @@ class NvmeNodeService:
 
 ```python
 @dataclass
-class StageConfig:
-    # Existing
-    min_parallelism: int = 1
-    max_parallelism: int = 4
-    batch_size: int = 100
+class PipelineFlowConfig:
+    buffer_memory_fraction: float = 0.4
+    # Fraction of node memory for pipeline buffers.
+    # Default 0.4 means: 40% buffers, 60% for workers + Ray + OS + GPU.
+    # Increase to 0.5-0.6 for pipelines with many stages or large payloads.
+    # Decrease to 0.2-0.3 for GPU-heavy pipelines (GPU memory needs more room).
 
-    # New: flow control
-    prefetch_factor: int = 3  # queue bound = downstream_workers × prefetch_factor
-    # Most users never touch this. Default 3 works for:
-    #   - GPU stages (3 batches ahead = GPU never starves)
-    #   - CPU stages (3 batches ahead = good overlap)
-    #   - Source stages: N/A (source is producer, not consumer)
+    min_prefetch: int = 2
+    # Minimum buffered messages per downstream worker.
+    # Prevents GPU starvation even when memory budget is tight.
+    # Increase to 4 for very fast GPU operators (< 100ms/batch).
+
+# Usage:
+job = Job(
+    stages=[...],
+    flow_config=PipelineFlowConfig(),  # default works for most workloads
+)
 ```
 
-**No resource budgets. No bandwidth limits. No thresholds to tune.**
-The only knob is `prefetch_factor`, and the default works for most workloads.
+**Users configure zero to two parameters.** The system automatically:
+1. Reads node memory at startup
+2. Computes per-stage byte budgets (proportional to downstream workers)
+3. Estimates initial max_pending from batch_size
+4. Refines at runtime via payload size EMA
 
 ---
 
@@ -318,10 +427,12 @@ The only knob is `prefetch_factor`, and the default works for most workloads.
 | Add `max_pending` to QueueGroup metadata | `lib/anvil-rs/src/storage.rs` | S |
 | `push_messages` returns `QueueFull` when at bound | `lib/anvil-rs/src/storage.rs` | S |
 | `ack_and_scatter` respects downstream bound | `lib/anvil-rs/src/storage.rs` | M |
+| `PipelineFlowConfig` dataclass | `core/job.py` | S |
+| `compute_stage_bounds()` at pipeline startup | `runtime/ray_runner.py` | M |
+| `AdaptiveQueueBound` (payload size EMA) | `core/managers/source_manager.py` | S |
 | SourceManager push loop respects bound | `core/managers/source_manager.py` | S |
 | StageWorker retries on `QueueFull` | `core/stage_worker.py` | S |
-| `prefetch_factor` in StageConfig | `core/job.py` | S |
-| Calculate `max_pending` at stage start | `core/stage_master.py` | S |
+| Set `max_pending` on QueueGroup at stage start | `core/stage_master.py` | S |
 
 ### Phase 2: Autoscaler Signal Update (P1)
 
@@ -403,11 +514,42 @@ Bounded queues solve all of these:
 - No interaction effects (one bound controls everything)
 - GPU-centric (prefetch_factor sized for GPU consumption rate)
 
-## Appendix B: Prefetch Factor Sizing Guide
+## Appendix B: Configuration Guide
 
-| Workload | GPU time/batch | Upstream time/batch | Recommended P | Why |
-|----------|---------------|--------------------|----|-----|
-| LLM inference | 5-30s | 0.5-2s | 2 | GPU is slow, small prefetch enough |
-| Video encoding | 2-10s | 0.5-1s | 3 | Default, good overlap |
-| Image transform | 0.1-1s | 0.1-0.5s | 4 | GPU fast, need deeper buffer |
-| CPU-only pipeline | N/A | varies | 3 | Default works |
+### When to adjust `buffer_memory_fraction`
+
+| Scenario | Adjust to | Why |
+|----------|-----------|-----|
+| Default (most pipelines) | 0.4 | Balanced: 40% buffers, 60% compute |
+| Many stages (5+) or large payloads (>100MB) | 0.5-0.6 | More stages = more queues competing for memory |
+| GPU-heavy (large models, high VRAM) | 0.2-0.3 | Leave room for GPU memory + CUDA context |
+| CPU-only pipeline | 0.5 | No GPU memory pressure |
+
+### When to adjust `min_prefetch`
+
+| GPU operator speed | Recommended | Why |
+|-------------------|-------------|-----|
+| Slow (>5s/batch, LLM inference) | 2 (default) | Plenty of time to fill buffer |
+| Medium (1-5s/batch, video encoding) | 2-3 | Default works |
+| Fast (<1s/batch, image transforms) | 4 | GPU drains buffer quickly, need deeper prefetch |
+
+### Multi-stage memory budget example
+
+```
+32GB node, buffer_fraction=0.4 → 12.8GB budget
+
+Pipeline: Source → Resize(8w) → Embed[GPU](4w) → Dedup(4w) → Lance[Sink](2w)
+
+Queue              | DS workers | Budget  | Payload  | max_pending | Effective prefetch
+Source→Resize      | 8          | 5.7 GB  | 2 MB     | 2,850       | 356 per worker
+Resize→Embed[GPU]  | 4          | 2.8 GB  | 10 MB    | 280         | 70 per GPU ✓
+Embed→Dedup        | 4          | 2.8 GB  | 50 KB    | 56,000      | 14,000 per worker
+Dedup→Lance        | 2          | 1.4 GB  | 50 KB    | 28,000      | 14,000 per worker
+
+Total buffered: ≤ 12.8 GB (guaranteed by budget)
+GPU prefetch: 70 batches (more than enough — GPU never starves)
+```
+
+Note: the GPU input queue (Resize→Embed) gets only 2.8GB but that's 280 messages
+of 10MB each — 70 per GPU. Even if GPU processes 1 batch/sec, that's 70 seconds
+of runway. The system is self-balancing without per-stage tuning.
