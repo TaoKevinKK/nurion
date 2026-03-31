@@ -1,6 +1,12 @@
 # Multi-Resource Backpressure Design
 
-_Status: Proposal_
+> **DEPRECATED (March 2026)**: Superseded by
+> [`bounded-queue-flow-control.md`](bounded-queue-flow-control.md).
+> Monitoring N resource dimensions is complex and fragile. Bounding the
+> inter-stage queue solves all resource problems implicitly. See Appendix A
+> of the new design for rationale.
+
+_Status: ~~Proposal~~ Deprecated_
 _Created: March 2026_
 
 ## Problem

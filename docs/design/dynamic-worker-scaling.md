@@ -2,6 +2,11 @@
 
 > NOTE: The current implementation uses the embedded Anvil backend. See
 > `work-queue-redesign.md`.
+>
+> **Next evolution**: [`bounded-queue-flow-control.md`](bounded-queue-flow-control.md)
+> unifies autoscaling + backpressure. Autoscaler signals will change from
+> queue-depth to `source_blocked_ratio` / `worker_idle_ratio` under bounded
+> queues. AIMD structure and cooldowns are retained.
 
 _Design document for Nurion Engine auto-scaling feature_
 _Created: December 2025_

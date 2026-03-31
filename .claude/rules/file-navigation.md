@@ -152,7 +152,8 @@ Check before proposing architectural changes:
 | Anvil semantics | `docs/design/anvil-semantics.md` |
 | Anvil redesign | `docs/design/work-queue-redesign.md` |
 | MinHash dedup | `docs/design/minhash-dedup.md` |
-| Backpressure | `docs/design/deprecated/partition-backpressure-improvements.md` |
+| Backpressure & flow control | `docs/design/bounded-queue-flow-control.md` |
+| Backpressure (deprecated) | `docs/design/deprecated/partition-backpressure-improvements.md` |
 | Multi-upstream join | `docs/design/multi-upstream-join.md` |
 | WebUI v1 / v2 | `docs/design/webui.md`, `webui-api-v2.md` |
 | Spark Source V2 | `docs/design/spark-source-v2.md` |
