@@ -51,10 +51,10 @@ def test_serve(ray_cluster_with_gpus):
     manager = create_manager()
     ...
 
-# In-memory WorkQueue (fast, no disk)
+# In-memory Anvil (fast, no disk)
 def test_queue():
-    queue = WorkQueue(db_path="memory://")
-    # or pass workqueue_db_path="memory://" to fixtures that accept it
+    queue = Anvil(db_path="memory://")
+    # or pass anvil_db_path="memory://" to fixtures that accept it
 ```
 
 ---

@@ -217,7 +217,7 @@ def test_video_slice_workflow_with_ray(ray_cluster, store_type, request):
             "filter_modulo": filter_modulo,
             "scene_threshold": 0.4,
             "split_size": 2,  # 2 rows per split = 5 splits for 10 videos
-            "workqueue_db_path": "memory://",  # Use memory for WorkQueue
+            "anvil_db_path": "memory://",  # Use memory for Anvil
             # Elastic worker counts (min=2, max=4) to test multi-worker scenarios
             # with resource backoff on limited CPU environments
             "scene_parallelism": (2, 4),

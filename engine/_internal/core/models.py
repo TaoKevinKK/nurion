@@ -562,7 +562,7 @@ class StageStatus:
 
 @dataclass(frozen=True)
 class QueueStats:
-    """WorkQueue stats snapshot for a single queue."""
+    """Anvil stats snapshot for a single queue."""
 
     pending_count: int = 0
     claimed_count: int = 0
@@ -581,7 +581,7 @@ class QueueEndpoint:
 
     host: str = "localhost"
     port: int = 50051
-    storage_url: str = "file:///tmp/workqueue"
+    storage_url: str = "file:///tmp/anvil"
 
     def to_dict(self) -> Dict[str, Any]:
         return {

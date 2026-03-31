@@ -33,8 +33,8 @@ from _internal.core.split_payload_store import RaySplitPayloadStore
 from _internal.core.operator import OperatorRuntime
 from _internal.core.stage import StageRuntime
 from _internal.queue import (
-    WorkQueueBrokerManager,
-    WorkQueueQueueClient,
+    AnvilBrokerManager,
+    AnvilQueueClient,
 )
 from _internal.utils.network import find_free_port
 
@@ -136,10 +136,10 @@ RAY_RUNTIME_EXCLUDES = [
 ]
 
 
-class WorkQueueTestBackend:
-    """Wrapper combining WorkQueueBrokerManager + WorkQueueQueueClient for tests."""
+class AnvilTestBackend:
+    """Wrapper combining AnvilBrokerManager + AnvilQueueClient for tests."""
 
-    def __init__(self, broker: WorkQueueBrokerManager, client: WorkQueueQueueClient):
+    def __init__(self, broker: AnvilBrokerManager, client: AnvilQueueClient):
         self.broker = broker
         self.client = client
         # Delegate common methods to client for compatibility
@@ -163,14 +163,14 @@ class WorkQueueTestBackend:
 
 
 @pytest_asyncio.fixture
-async def workqueue_backend():
-    """Start a WorkQueue broker and client wrapped for easy testing."""
+async def anvil_backend():
+    """Start a Anvil broker and client wrapped for easy testing."""
     port = find_free_port()
-    broker = WorkQueueBrokerManager(db_path="memory://", port=port, startup_timeout=5.0)
+    broker = AnvilBrokerManager(db_path="memory://", port=port, startup_timeout=5.0)
     broker.start()
-    client = WorkQueueQueueClient(broker.get_broker_url(), worker_id="test-worker")
+    client = AnvilQueueClient(broker.get_broker_url(), worker_id="test-worker")
     client.start()
-    backend = WorkQueueTestBackend(broker, client)
+    backend = AnvilTestBackend(broker, client)
     try:
         yield backend
     finally:
@@ -180,25 +180,25 @@ async def workqueue_backend():
 
 
 # ============================================================================
-# WorkQueue fixtures for persistence tests
+# Anvil fixtures for persistence tests
 # ============================================================================
 
 
 @pytest.fixture
-def workqueue_storage_path(tmp_path):
-    """Provide a file storage path for persistent WorkQueue storage.
+def anvil_storage_path(tmp_path):
+    """Provide a file storage path for persistent Anvil storage.
 
     Usage:
-        def test_persistence(workqueue_storage_path):
-            broker = WorkQueueBrokerManager(db_path=workqueue_storage_path, ...)
+        def test_persistence(anvil_storage_path):
+            broker = AnvilBrokerManager(db_path=anvil_storage_path, ...)
     """
-    db_path = tmp_path / "workqueue"
+    db_path = tmp_path / "anvil"
     yield f"file://{db_path}"
 
 
 @pytest.fixture
-def workqueue_broker_and_client(tmp_path):
-    """Provide a WorkQueue broker and client pair with file storage."""
+def anvil_broker_and_client(tmp_path):
+    """Provide a Anvil broker and client pair with file storage."""
     import socket
 
     # Find a free port dynamically
@@ -207,14 +207,14 @@ def workqueue_broker_and_client(tmp_path):
         port = s.getsockname()[1]
 
     # Use temp file storage
-    db_path = f"file://{tmp_path}/workqueue"
+    db_path = f"file://{tmp_path}/anvil"
 
     # Start broker with shorter timeout for tests
-    broker = WorkQueueBrokerManager(db_path=db_path, port=port, startup_timeout=10.0)
+    broker = AnvilBrokerManager(db_path=db_path, port=port, startup_timeout=10.0)
     broker.start()
 
     # Create and start client
-    client = WorkQueueQueueClient(broker.get_broker_url(), worker_id="test-worker")
+    client = AnvilQueueClient(broker.get_broker_url(), worker_id="test-worker")
     client.start()
 
     yield broker, client

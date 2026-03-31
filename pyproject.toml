@@ -17,8 +17,8 @@ dev = [
 ]
 
 [tool.ruff]
-extend-exclude = ["**/workqueue_pb2.py", "**/workqueue_pb2_grpc.py"]
+extend-exclude = ["**/anvil_pb2.py", "**/anvil_pb2_grpc.py"]
 
 [tool.ruff.lint.per-file-ignores]
-"**/workqueue_pb2.py" = ["E501"]
-"**/workqueue_pb2_grpc.py" = ["E501"]
+"**/anvil_pb2.py" = ["E501"]
+"**/anvil_pb2_grpc.py" = ["E501"]

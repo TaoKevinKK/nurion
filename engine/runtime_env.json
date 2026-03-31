@@ -33,7 +33,7 @@
     "jinja2",
     "prometheus-client",
     "nurion-raydp",
-    "nurion-workqueue",
+    "nurion-anvil",
     "httpx",
     "aiohttp",
     "vllm==0.15.1",

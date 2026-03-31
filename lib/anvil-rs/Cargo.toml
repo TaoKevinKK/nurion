@@ -1,12 +1,12 @@
 [package]
-name = "workqueue-rs"
+name = "anvil-rs"
 version = "0.1.0"
 edition = "2021"
 description = "Single-queue multi-consumer work queue with gRPC interface"
 license = "Apache-2.0"
 
 [lib]
-name = "workqueue_py"
+name = "anvil_py"
 crate-type = ["cdylib"]
 
 [dependencies]

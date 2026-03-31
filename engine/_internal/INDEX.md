@@ -9,7 +9,7 @@
 
 ### `core/job.py`
 - **`Job`** — top-level pipeline definition; `job.run()` submits to `RayJobRunner`
-- **`JobConfig`** — dataclass: `job_id`, `max_workers`, `failure_policy`, `workqueue_db_path`
+- **`JobConfig`** — dataclass: `job_id`, `max_workers`, `failure_policy`, `anvil_db_path`
 - **`WebUIConfig`** — dataclass: WebUI host/port settings
 
 ### `core/stage.py`
@@ -281,7 +281,7 @@
   - Sends `BackpressureSignal` to upstream `StageMaster` to pause/resume source
 
 ### `runtime/queue_stats.py`
-- **`QueueStatsClient`** — collect queue stats from WorkQueue broker
+- **`QueueStatsClient`** — collect queue stats from Anvil broker
 - **`StageQueueConfig`** — queue name → stage mapping
 - **`QueueRef`** — reference to a specific queue for stats collection
 
@@ -289,18 +289,18 @@
 
 ## Queue (`queue/`)
 
-### `queue/workqueue.py`
-- **`WorkQueueQueueClient`** — Python client for queue operations
-  - `claim(queue, timeout)` → `WorkQueueRecord`
+### `queue/anvil.py`
+- **`AnvilQueueClient`** — Python client for queue operations
+  - `claim(queue, timeout)` → `AnvilRecord`
   - `ack_and_forward(msg_id, output_queue, payload)` — atomic
   - `ack_and_scatter(...)` — atomic ack + push to QueueGroup partitions
   - `claim_from_group(...)` — claim from QueueGroup with work-stealing
   - `nack(msg_id)` — re-enqueue
   - `state_get(ns, key)` / `state_put(ns, key, value)`
-- **`WorkQueueBrokerManager`** — start/stop the Rust broker process
+- **`AnvilBrokerManager`** — start/stop the Rust broker process
 
-### `queue/workqueue_storage.py`
-- **`WorkQueueStorageReader`** — read-only access to WorkQueue storage via PyO3 bindings
+### `queue/anvil_storage.py`
+- **`AnvilStorageReader`** — read-only access to Anvil storage via PyO3 bindings
 
 ### `queue/backend.py`
 - **`Record`** — generic queue record dataclass
@@ -383,7 +383,7 @@
 - **`create_webui_app()`** — FastAPI factory for WebUI server
 
 ### `webui/job_webui.py`
-- **`JobWebUI`** — per-job monitoring interface; reads state from WorkQueue
+- **`JobWebUI`** — per-job monitoring interface; reads state from Anvil
 
 ### `webui/portal.py`
 - **`NurionPortal`** — multi-job dashboard; lists active and historical jobs
@@ -404,10 +404,10 @@
 - Metric collectors: pull queue stats and actor status from Ray
 
 ### `webui/state/writer.py`
-- **`WorkQueueStateWriter`** — writes job/stage/worker/event data to WorkQueue state store
+- **`AnvilStateWriter`** — writes job/stage/worker/event data to Anvil state store
 
 ### `webui/state/manager.py`
-- **`JobStateManager`** — reads job/stage/worker/event/lineage data from WorkQueue storage
+- **`JobStateManager`** — reads job/stage/worker/event/lineage data from Anvil storage
 
 ### `webui/state/schema.py`
 - Key namespace helpers: `job_namespace`, `job_index_key`, `stage_key`, `worker_key`, `split_key`, `event_key`

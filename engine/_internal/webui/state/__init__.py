@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""WorkQueue-backed WebUI state utilities."""
+"""Anvil-backed WebUI state utilities."""
 
 from _internal.webui.state.manager import JobStateManager
-from _internal.webui.state.writer import WorkQueueStateWriter
+from _internal.webui.state.writer import AnvilStateWriter
 
-__all__ = ["JobStateManager", "WorkQueueStateWriter"]
+__all__ = ["JobStateManager", "AnvilStateWriter"]

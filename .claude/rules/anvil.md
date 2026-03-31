@@ -1,10 +1,10 @@
 ---
 globs:
-  - lib/workqueue-rs/**
+  - lib/anvil-rs/**
   - engine/_internal/queue/**
 ---
 
-# WorkQueue
+# Anvil
 
 > Rust-backed distributed queue. **All hot-path changes must maintain O(1) complexity.**
 
@@ -52,8 +52,8 @@ state:{namespace}:{key}      → bytes
 ## Python Frontend
 
 ```python
-# engine/_internal/queue/workqueue.py
-client = WorkQueueQueueClient(endpoint)
+# engine/_internal/queue/anvil.py
+client = AnvilQueueClient(endpoint)
 msg = await client.claim(queue_name, timeout_secs=30)
 await client.ack_and_forward(msg.msg_id, output_queue, output_payload)
 await client.nack(msg.msg_id)  # re-enqueue for retry
@@ -69,10 +69,10 @@ value = await client.state_get(namespace="job_123", key="cursor")
 
 ```python
 # In-memory queue for unit tests (no disk, no server process)
-queue = WorkQueue(db_path="memory://")
+queue = Anvil(db_path="memory://")
 
 # Or via fixture parameter:
-def test_foo(workqueue_db_path="memory://"):
+def test_foo(anvil_db_path="memory://"):
     ...
 ```
 
@@ -81,17 +81,17 @@ def test_foo(workqueue_db_path="memory://"):
 ## Rust Source Layout
 
 ```
-lib/workqueue-rs/src/
+lib/anvil-rs/src/
   storage.rs    → all persistent ops: push, claim, ack, nack, state, queue meta, GC, QueueGroup
-  service.rs    → gRPC service implementation (WorkQueueService)
+  service.rs    → gRPC service implementation (AnvilService)
   server.rs     → broker inner (start/stop server)
   state.rs      → in-memory coordination (per-queue claim locks, lease tracking)
   types.rs      → data structures (QueueMessage, QueueMeta, QueueGroupMeta, etc.)
   recovery.rs   → background tasks: RecoveryTask (expire claims) + GcTask (delete acked)
   lib.rs        → PyO3 module entry + broker lifecycle
 proto/
-  workqueue.proto → gRPC service + message definitions
+  anvil.proto → gRPC service + message definitions
 python/         → Python package (PyO3 bindings)
 ```
 
-See `lib/workqueue-rs/AGENTS.md` for full constraints and future work (push_with_dedup).
+See `lib/anvil-rs/AGENTS.md` for full constraints and future work (push_with_dedup).

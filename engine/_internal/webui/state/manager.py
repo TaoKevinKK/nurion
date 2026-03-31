@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Job state reader backed by WorkQueue storage (pyO3).
+"""Job state reader backed by Anvil storage (pyO3).
 
 v2: Worker metadata read from persistent state (not event scanning).
     Serve models/workers read from serve namespace.
@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from _internal.queue import WorkQueueStorageReader
+from _internal.queue import AnvilStorageReader
 from _internal.utils.logging import create_ray_logger
 from _internal.webui.state.schema import (
     config_key,
@@ -40,13 +40,11 @@ from _internal.webui.state.schema import (
 class JobStateManager:
     """Read-only state access for WebUI (no state queue, no SlateDB)."""
 
-    def __init__(
-        self, db_path: Optional[str] = None, storage: Optional[WorkQueueStorageReader] = None
-    ):
+    def __init__(self, db_path: Optional[str] = None, storage: Optional[AnvilStorageReader] = None):
         if storage is None:
             if db_path is None:
                 raise ValueError("db_path is required when storage is not provided")
-            storage = WorkQueueStorageReader(db_path)
+            storage = AnvilStorageReader(db_path)
         self.db_path = db_path or ""
         self._storage = storage
         self.logger = create_ray_logger("JobStateManager")

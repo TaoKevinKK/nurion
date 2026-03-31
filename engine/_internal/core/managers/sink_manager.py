@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from _internal.core.sink import SinkCommitter
-    from _internal.queue import WorkQueueQueueClient
+    from _internal.queue import AnvilQueueClient
 
 
 class SinkManager:
@@ -50,7 +50,7 @@ class SinkManager:
     def commit_queue_name(self) -> str:
         return self._commit_queue_name
 
-    def create_queue_and_start_loop(self, queue_client: "WorkQueueQueueClient") -> None:
+    def create_queue_and_start_loop(self, queue_client: "AnvilQueueClient") -> None:
         """Create the commit queue and start the background commit loop."""
         queue_client.create_queue(self._commit_queue_name)
         self._logger.info(f"Created commit queue: {self._commit_queue_name}")
@@ -59,7 +59,7 @@ class SinkManager:
             name=f"commit_loop_{self._commit_queue_name}",
         )
 
-    async def finalize(self, queue_client: "WorkQueueQueueClient") -> None:
+    async def finalize(self, queue_client: "AnvilQueueClient") -> None:
         """Cancel the background loop and do the final commit."""
         if self._commit_task:
             self._commit_task.cancel()
@@ -83,7 +83,7 @@ class SinkManager:
                 pass
             self._commit_task = None
 
-    async def _run_loop_safe(self, queue_client: "WorkQueueQueueClient") -> None:
+    async def _run_loop_safe(self, queue_client: "AnvilQueueClient") -> None:
         """Wrapper with error handling for the commit loop."""
         try:
             await self._committer.run_commit_loop(queue_client, self._commit_queue_name)

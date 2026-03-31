@@ -61,7 +61,7 @@ class TestSparkSourceV2Integration:
     """
 
     @pytest.mark.asyncio
-    async def test_v2_writes_to_output_queue(self, ray_cluster, workqueue_backend):
+    async def test_v2_writes_to_output_queue(self, ray_cluster, anvil_backend):
         """Test that V2 writes directly to output_queue."""
         test_path = str(TEST_DATA_100)
 
@@ -82,7 +82,7 @@ class TestSparkSourceV2Integration:
         runtime = StageRuntime(
             broker_endpoint=QueueEndpoint(
                 host="localhost",
-                port=workqueue_backend.port,
+                port=anvil_backend.port,
                 storage_url="memory://",
             ),
         )
@@ -132,7 +132,7 @@ class TestSparkSourceV2Integration:
             await master.stop()
 
     @pytest.mark.asyncio
-    async def test_v2_with_parallelism(self, ray_cluster, workqueue_backend):
+    async def test_v2_with_parallelism(self, ray_cluster, anvil_backend):
         """Test V2 with custom parallelism."""
         test_path = str(TEST_DATA_100)
 
@@ -154,7 +154,7 @@ class TestSparkSourceV2Integration:
         runtime = StageRuntime(
             broker_endpoint=QueueEndpoint(
                 host="localhost",
-                port=workqueue_backend.port,
+                port=anvil_backend.port,
                 storage_url="memory://",
             ),
         )
@@ -180,7 +180,7 @@ class TestSparkSourceV2Integration:
             await master.stop()
 
     @pytest.mark.asyncio
-    async def test_v2_large_dataset(self, ray_cluster, workqueue_backend):
+    async def test_v2_large_dataset(self, ray_cluster, anvil_backend):
         """Test V2 with larger dataset."""
         test_path = str(TEST_DATA_1000)
 
@@ -201,7 +201,7 @@ class TestSparkSourceV2Integration:
         runtime = StageRuntime(
             broker_endpoint=QueueEndpoint(
                 host="localhost",
-                port=workqueue_backend.port,
+                port=anvil_backend.port,
                 storage_url="memory://",
             ),
         )

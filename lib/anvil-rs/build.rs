@@ -15,7 +15,7 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
         .build_server(true)
-        .build_client(false) // We use Python grpcio for client
-        .compile_protos(&["proto/workqueue.proto"], &["proto/"])?;
+        .build_client(true) // Rust tonic client exposed via PyO3
+        .compile_protos(&["proto/anvil.proto"], &["proto/"])?;
     Ok(())
 }

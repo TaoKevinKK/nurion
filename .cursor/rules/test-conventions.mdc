@@ -35,5 +35,5 @@ uv run pytest tests/ -v --tb=short -m "not integration and not distributed and n
 uv run pytest tests/ -v --tb=short -m "integration"        # integration
 ```
 
-## WorkQueue in Tests
-Use `workqueue_db_path="memory://"` for in-memory queue (no persistence).
+## Anvil in Tests
+Use `anvil_db_path="memory://"` for in-memory queue (no persistence).

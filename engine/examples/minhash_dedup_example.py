@@ -106,7 +106,7 @@ async def run_example():
             "hashes_per_bucket": 4,
             "ngram_size": 3,
             "num_shards": 4,
-            "workqueue_db_path": "memory://",
+            "anvil_db_path": "memory://",
             "output_format": "lance",
             "num_partitions": 4,
         }

@@ -17,7 +17,7 @@
 Architecture:
 - Workers claim messages from upstream queues (competing consumers)
 - Masters manage their output queue
-- Message ID-based recovery via WorkQueue
+- Message ID-based recovery via Anvil
 - Optional autoscaling for dynamic worker management
 """
 
@@ -51,12 +51,12 @@ from _internal.core.nvme_payload_store import (
     WritePolicy,
     parse_nvme_uri,
 )
-from _internal.queue import WorkQueueBrokerManager
+from _internal.queue import AnvilBrokerManager
 from _internal.runtime.autoscaler import SimpleAutoscaler
 from _internal.runtime.backpressure import JobBackpressureController
 from _internal.runtime.queue_stats import QueueRef, QueueStatsClient, StageQueueConfig
 from _internal.utils.logging import create_ray_logger
-from _internal.webui.state.writer import WorkQueueStateWriter
+from _internal.webui.state.writer import AnvilStateWriter
 
 
 @dataclass
@@ -77,7 +77,7 @@ class RayJobRunner:
     Features:
     - StageMaster for simplified, output-queue only management
     - Workers claim from upstream queues (competing consumers)
-    - Message ID-based recovery via WorkQueue
+    - Message ID-based recovery via Anvil
     - Async-first design
 
     Example:
@@ -102,7 +102,7 @@ class RayJobRunner:
 
         # Read configuration from job.config
         config = job.config
-        self.workqueue_db_path = config.workqueue_db_path
+        self.anvil_db_path = config.anvil_db_path
         self._ray_init_kwargs = config.ray_init_kwargs or {}
 
         self.logger = create_ray_logger(f"RayJobRunner-{job.job_id}")
@@ -123,10 +123,10 @@ class RayJobRunner:
         self._webui_server: Optional["EmbeddedWebUIServer"] = None
         self._webui_port: Optional[int] = None
         self._webui_storage: Optional[Any] = None
-        self._state_writer: Optional[WorkQueueStateWriter] = None
+        self._state_writer: Optional[AnvilStateWriter] = None
 
-        # Shared WorkQueue broker for all stages (reduces resource usage and improves stability)
-        self._shared_broker: Optional[WorkQueueBrokerManager] = None
+        # Shared Anvil broker for all stages (reduces resource usage and improves stability)
+        self._shared_broker: Optional[AnvilBrokerManager] = None
         self._broker_endpoint: Optional[QueueEndpoint] = None
         self._queue_stats_client: Optional[QueueStatsClient] = None
         self._backpressure_controller: Optional[JobBackpressureController] = None
@@ -147,7 +147,7 @@ class RayJobRunner:
             ray.init(ignore_reinit_error=True, **self._ray_init_kwargs)
 
     async def _create_shared_broker(self) -> None:
-        """Create a single shared WorkQueue broker for all stages.
+        """Create a single shared Anvil broker for all stages.
 
         This improves stability by having one broker process instead of one per stage.
         All stages connect to this broker and create their own queues.
@@ -155,8 +155,8 @@ class RayJobRunner:
         from _internal.utils.network import get_node_ip
 
         config = self.job.config
-        self._shared_broker = WorkQueueBrokerManager(
-            db_path=self.workqueue_db_path or "memory://",
+        self._shared_broker = AnvilBrokerManager(
+            db_path=self.anvil_db_path or "memory://",
             host=get_node_ip(),  # Use actual IP instead of 127.0.0.1 for cross-node access
             claim_timeout_secs=config.claim_timeout_secs,
             recovery_interval_secs=config.recovery_interval_secs,
@@ -169,13 +169,13 @@ class RayJobRunner:
         self._broker_endpoint = QueueEndpoint(
             host=host,
             port=int(port_str),
-            storage_url=self.workqueue_db_path or "memory://",
+            storage_url=self.anvil_db_path or "memory://",
         )
 
-        self.logger.info(f"Created shared WorkQueue broker at {broker_url}")
+        self.logger.info(f"Created shared Anvil broker at {broker_url}")
 
     async def _stop_shared_broker(self) -> None:
-        """Stop the shared WorkQueue broker."""
+        """Stop the shared Anvil broker."""
         if self._shared_broker:
             try:
                 self._shared_broker.stop()
@@ -229,19 +229,19 @@ class RayJobRunner:
         self._payload_store = self._create_payload_store()
         self.logger.info(f"Created SplitPayloadStore for job {self.job.job_id}")
 
-        # Create shared WorkQueue broker for all stages (if using WorkQueue)
+        # Create shared Anvil broker for all stages (if using Anvil)
         await self._create_shared_broker()
 
         # Initialize state writer (gRPC) for WebUI metadata
         if self.job.config.webui.enabled and self._broker_endpoint:
-            self._state_writer = WorkQueueStateWriter(
+            self._state_writer = AnvilStateWriter(
                 job_id=self.job.job_id,
                 broker_endpoint=self._broker_endpoint,
                 claim_timeout_secs=self.job.config.claim_timeout_secs,
             )
             self._state_writer.start()
 
-        # Create storage for WebUI (WorkQueue reader)
+        # Create storage for WebUI (Anvil reader)
         if self.job.config.webui.enabled:
             self._webui_storage = await self._create_webui_storage()
 
@@ -352,7 +352,7 @@ class RayJobRunner:
         }
 
     def _write_job_state(self, status: str, end_time: Optional[float] = None) -> None:
-        """Write job state and index into WorkQueue state."""
+        """Write job state and index into Anvil state."""
         if not self._state_writer:
             return
         start_time = self._start_time or time.time()
@@ -657,26 +657,26 @@ class RayJobRunner:
     # === WebUI Integration ===
 
     async def _create_webui_storage(self):
-        """Create WorkQueue-backed storage for WebUI."""
+        """Create Anvil-backed storage for WebUI."""
         from _internal.webui.state.manager import JobStateManager
 
-        db_path = self.workqueue_db_path or "memory://"
+        db_path = self.anvil_db_path or "memory://"
         reader = self._shared_broker.get_storage_reader() if self._shared_broker else None
         self._webui_storage = JobStateManager(db_path, storage=reader)
-        self.logger.info(f"WebUI storage using WorkQueue db: {db_path}")
+        self.logger.info(f"WebUI storage using Anvil db: {db_path}")
         return self._webui_storage
 
     async def _initialize_webui(self) -> None:
         """Initialize WebUI components.
 
-        - Creates JobWebUI instance using WorkQueue storage
+        - Creates JobWebUI instance using Anvil storage
         - Starts embedded WebUI server
         """
         try:
             from _internal.webui.job_webui import JobWebUI
             from _internal.webui.runtime_server import EmbeddedWebUIServer
 
-            # Create JobWebUI using WorkQueue storage
+            # Create JobWebUI using Anvil storage
             assert self._webui_storage is not None, "webui_storage not initialized"
             self._webui = JobWebUI(self, state_writer=self._state_writer)
 

@@ -112,8 +112,8 @@ Nurion's LLM workflows (image captioning, multi-OCR fusion) are offline batch jo
 
 - [ ] Enable batch job resume from last checkpoint after crash or spot instance preemption
 - **Ray Data LLM approach**: Pipeline resumes from last successful block stored in local or cloud storage. Critical for spot instance cost savings.
-- **Nurion status**: WorkQueue ack provides split-level durability (acked splits survive restart). But no job-level "resume from where we left off" — a restarted job re-processes all splits.
-- **Implementation path**: On job restart, scan WorkQueue for already-acked splits and skip them in source planner. Thin wrapper over existing ack state.
+- **Nurion status**: Anvil ack provides split-level durability (acked splits survive restart). But no job-level "resume from where we left off" — a restarted job re-processes all splits.
+- **Implementation path**: On job restart, scan Anvil for already-acked splits and skip them in source planner. Thin wrapper over existing ack state.
 - **Scope**: `runtime/ray_runner.py` (restart logic), `core/managers/source_manager.py` (skip acked splits)
 - **Estimated impact**: Enables spot instances (3-5x cheaper), tolerates transient failures in multi-hour jobs
 
@@ -123,7 +123,7 @@ Nurion's LLM workflows (image captioning, multi-OCR fusion) are offline batch jo
 
 > DJ's execution model (dataset.map() chain) is inferior to Nurion's multi-stage pipeline.
 > DJ's code quality is poor — do not port code directly. Borrow design ideas only.
-> Nurion advantages: exactly-once semantics, Arrow zero-copy, Rust WorkQueue, pull-based backpressure.
+> Nurion advantages: exactly-once semantics, Arrow zero-copy, Rust Anvil, pull-based backpressure.
 
 ### P1 — Sample-Level Tracer
 
@@ -134,7 +134,7 @@ Nurion's LLM workflows (image captioning, multi-OCR fusion) are offline batch jo
   - **Stats tier (zero cost)**: Every split records `SplitTrace{input_rows, output_rows, columns_added, columns_removed}` — always on
   - **Row tier (sampled)**: At `lineage_sample_rate > 0`, sample N rows and record which were filtered/modified. Uses existing `WebUIConfig.lineage_sample_rate` infrastructure
   - **Value tier (debug only)**: Record before/after values for sampled rows. Only in explicit debug mode
-- **Storage**: Write to WebUI state (`_write_worker_state` mechanism) or WorkQueue state namespace `lineage:{job_id}`
+- **Storage**: Write to WebUI state (`_write_worker_state` mechanism) or Anvil state namespace `lineage:{job_id}`
 - **Scope**: `core/stage_worker.py` (hook around `process_split`), `core/models.py` (`SplitTrace` dataclass)
 
 ### P1 — Data Profiler CLI
@@ -170,7 +170,7 @@ Documented to prevent re-evaluation.
 | **Rescheduler / continuous rebalancing** | Llumnix | Offline: route new requests well instead of migrating existing ones |
 | **Predictor-enhanced scheduling** | Llumnix | Offline: steady load makes staleness correction unnecessary |
 | **Softmax worker selection** | Dynamo | Round-robin (or memory-aware) + vLLM continuous batching is effective |
-| **Three-plane separation** | Dynamo | Architectural reference, but Ray + WorkQueue covers offline needs |
+| **Three-plane separation** | Dynamo | Architectural reference, but Ray + Anvil covers offline needs |
 | **Priority routing / agent hints** | Dynamo | Offline splits are homogeneous; no priority differentiation needed |
 | **Agentic inference** | Dynamo | Online interactive scenario only |
 | **CRIU checkpoint/restore** | Dynamo | Too invasive for current deployment model |

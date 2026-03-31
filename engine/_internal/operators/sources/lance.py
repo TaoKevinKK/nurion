@@ -38,7 +38,7 @@ class LanceTableSourceConfig(OperatorConfig):
     This unified config is used by both the operator (for reading splits)
     and the planner (for planning splits via create_source()).
 
-    Note: queue_type and workqueue_db_path are configured via JobConfig,
+    Note: queue_type and anvil_db_path are configured via JobConfig,
     not here. The runner passes these to the master via StageRuntime.
     """
 

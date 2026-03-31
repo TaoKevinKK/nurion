@@ -15,7 +15,7 @@ Goal: Streamline to 12 endpoints (9 pipeline + 3 serve), ensure data accuracy, a
 1. **Write on occurrence, read on demand**: Worker lifecycle is written when it happens, not reconstructed by scanning at read time
 2. **O(1) first**: Throughput uses QueueStats counters (O(1)), no event scanning to compute rates
 3. **Single responsibility**: Each endpoint does one thing — no scan-filter-aggregate in a single endpoint
-4. **Unified pipeline + serve**: Both subsystems write monitoring data to WorkQueue state
+4. **Unified pipeline + serve**: Both subsystems write monitoring data to Anvil state
 
 ## Storage Schema Changes
 
@@ -101,13 +101,13 @@ for mid in msg_ids:
 self.queue_client.nack(..., state_puts=nack_puts)
 ```
 
-The `nack()` method already supports the `state_puts` parameter (workqueue.py:308) — no changes needed.
+The `nack()` method already supports the `state_puts` parameter (anvil.py:308) — no changes needed.
 
 ### 3. ModelPool Writes InferenceWorker Lifecycle
 
 **File**: `engine/_internal/serve/pool.py`
 
-ModelPool accepts an optional `state_writer: WorkQueueQueueClient` (injected by ModelServiceManager).
+ModelPool accepts an optional `state_writer: AnvilQueueClient` (injected by ModelServiceManager).
 
 Trigger points:
 
@@ -124,7 +124,7 @@ Trigger points:
 
 - `deploy_model()` → writes `model:{model_id}` with status=DEPLOYED
 - `undeploy_model()` → writes `model:{model_id}` with status=UNDEPLOYED
-- `__init__` accepts optional `broker_endpoint`, creates WorkQueueQueueClient passed to Pool
+- `__init__` accepts optional `broker_endpoint`, creates AnvilQueueClient passed to Pool
 
 ## API Changes
 

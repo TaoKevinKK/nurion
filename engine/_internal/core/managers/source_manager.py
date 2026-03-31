@@ -39,7 +39,7 @@ from _internal.testing.fault_injection import InjectedFaultError
 if TYPE_CHECKING:
     from _internal.core.managers import WorkerManager
     from _internal.core.models import QueueEndpoint
-    from _internal.queue import WorkQueueQueueClient
+    from _internal.queue import AnvilQueueClient
 
 _RETRYABLE_EXCEPTIONS = (OSError, TimeoutError, InjectedFaultError)
 
@@ -83,7 +83,7 @@ class SourceManager:
 
     async def run_direct_producer(
         self,
-        queue_client: "WorkQueueQueueClient",
+        queue_client: "AnvilQueueClient",
         output_group_name: str,
         broker_endpoint: "QueueEndpoint",
         partition: int = 0,
@@ -114,7 +114,7 @@ class SourceManager:
 
     def start_split_production(
         self,
-        queue_client: "WorkQueueQueueClient",
+        queue_client: "AnvilQueueClient",
         worker_manager: "WorkerManager",
         backpressure_fn: Callable[[], Awaitable[bool]],
         running_fn: Callable[[], bool],
@@ -170,7 +170,7 @@ class SourceManager:
 
     async def _run_production(
         self,
-        queue_client: "WorkQueueQueueClient",
+        queue_client: "AnvilQueueClient",
         worker_manager: "WorkerManager",
         backpressure_fn: Callable[[], Awaitable[bool]],
         running_fn: Callable[[], bool],
@@ -198,7 +198,7 @@ class SourceManager:
 
     async def _produce_splits(
         self,
-        queue_client: "WorkQueueQueueClient",
+        queue_client: "AnvilQueueClient",
         backpressure_fn: Callable[[], Awaitable[bool]],
         running_fn: Callable[[], bool],
     ) -> None:
@@ -245,7 +245,7 @@ class SourceManager:
 
         self._logger.info(f"Source {self._stage_id} produced {idx} splits to queue")
 
-    def _mark_queue_finished(self, queue_client: "WorkQueueQueueClient") -> None:
+    def _mark_queue_finished(self, queue_client: "AnvilQueueClient") -> None:
         assert self._planner_queue_name is not None
         try:
             queue_client.mark_queue_finished(self._planner_queue_name)
@@ -255,7 +255,7 @@ class SourceManager:
 
     async def _poll_queue_drained(
         self,
-        queue_client: "WorkQueueQueueClient",
+        queue_client: "AnvilQueueClient",
         worker_manager: "WorkerManager",
         running_fn: Callable[[], bool],
     ) -> None:
@@ -285,7 +285,7 @@ class SourceManager:
 
     async def _produce_split_with_retry(
         self,
-        queue_client: "WorkQueueQueueClient",
+        queue_client: "AnvilQueueClient",
         split: Split,
         idx: int,
     ) -> None:

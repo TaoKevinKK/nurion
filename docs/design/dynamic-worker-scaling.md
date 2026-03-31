@@ -1,6 +1,6 @@
 # Dynamic Worker Scaling Design
 
-> NOTE: The current implementation uses the embedded WorkQueue backend. See
+> NOTE: The current implementation uses the embedded Anvil backend. See
 > `work-queue-redesign.md`.
 
 _Design document for Nurion Engine auto-scaling feature_
@@ -14,7 +14,7 @@ _Created: December 2025_
 |-----------|--------|-------|
 | **SimpleAutoscaler** | ✅ Complete | `runtime/autoscaler.py` |
 | **AutoscaleConfig** | ✅ Complete | Dataclass with threshold settings |
-| **Queue Lag Metrics** | ✅ Complete | WorkQueue pending/claimed via job-level stats client |
+| **Queue Lag Metrics** | ✅ Complete | Anvil pending/claimed via job-level stats client |
 | **Worker Scale Up/Down** | ✅ Complete | Via `WorkerManager` |
 | **Cooldown Period** | ✅ Complete | Prevents thrashing |
 | **Manual Override API** | ❌ Deprioritized | Low value for batch workloads; removed from TODO |
@@ -24,13 +24,13 @@ _Created: December 2025_
 | **Bottleneck Prioritization** | ❌ Not Implemented | Future work |
 
 **Current Implementation:**
-- Threshold-based scaling using WorkQueue pending/claimed
+- Threshold-based scaling using Anvil pending/claimed
 - Resource-aware step sizing via `_get_spawnable_count()` (quantitative, not boolean)
 - Eager fill on startup to immediately use available cluster capacity
 - AIMD cooldowns: aggressive scale-up (15s), conservative scale-down (60s)
 - Scale down only when pending is low and claimed == 0
 - Configurable check interval (default 10s)
-- Backpressure is evaluated by a job-level controller using WorkQueue stats
+- Backpressure is evaluated by a job-level controller using Anvil stats
 
 ---
 
@@ -93,7 +93,7 @@ Nurion Engine is an **offline/batch processing** framework, not a real-time stre
 │         │                 │                 │                            │
 │         └─────────────────┴─────────────────┘                            │
 │                           │                                              │
-│                 WorkQueue (SlateDB-backed)                               │
+│                 Anvil (SlateDB-backed)                               │
 │                 • Data flow between stages                               │
 │                 • Pending/claimed counters                               │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -107,7 +107,7 @@ Nurion Engine is an **offline/batch processing** framework, not a real-time stre
 
 3. **Slow-paced decisions**: Scaling decisions are made every 15-30 seconds, not continuously. This is sufficient for batch workloads and reduces system overhead.
 
-4. **Direct control path**: `StageMaster` is in-process for scaling actions; metrics are fetched from WorkQueue.
+4. **Direct control path**: `StageMaster` is in-process for scaling actions; metrics are fetched from Anvil.
 
 ## 4. Detailed Design
 
@@ -136,7 +136,7 @@ class AutoscaleConfig:
 
 ### 4.2 Metrics Collection
 
-Metrics are collected via a job-level WorkQueue stats client; StageMaster is used
+Metrics are collected via a job-level Anvil stats client; StageMaster is used
 only for worker counts and control actions.
 
 ```python
@@ -146,15 +146,15 @@ class StageMetrics:
     worker_count: int
     min_workers: int
     max_workers: int
-    input_queue_lag: int      # WorkQueue pending_count
-    input_queue_claimed: int  # WorkQueue claimed_count (in-flight)
+    input_queue_lag: int      # Anvil pending_count
+    input_queue_claimed: int  # Anvil claimed_count (in-flight)
     output_queue_size: int    # Messages in output queue
     is_running: bool
     is_finished: bool
     is_source: bool
 ```
 
-Queue stats are sourced from WorkQueue (`pending_count`, `claimed_count`, `total_pushed`, `total_acked`)
+Queue stats are sourced from Anvil (`pending_count`, `claimed_count`, `total_pushed`, `total_acked`)
 through a single job-level client. Worker/master/operator progress counters are not used
 for autoscaling decisions.
 
@@ -256,7 +256,7 @@ for worker_id, task in list(self._worker_tasks.items()):
 ### 5.2 StageMaster Failure
 
 If a `StageMaster` fails, the entire stage is restarted by `RayJobRunner`. The stage resumes
-from WorkQueue storage state; pending/claimed counts determine remaining work.
+from Anvil storage state; pending/claimed counts determine remaining work.
 
 ### 5.3 Coordinator Failure
 
@@ -270,7 +270,7 @@ If `RayJobRunner` (and thus `SimpleAutoscaler`) fails:
 
 - Batch jobs are expected to run for minutes/hours
 - Re-running scaling decisions is cheap
-- Critical queue state is persisted in WorkQueue storage
+- Critical queue state is persisted in Anvil storage
 
 ## 6. Resource Management
 
@@ -437,7 +437,7 @@ The simple design should be revisited if Solstice evolves to support:
 
 - [Checkpoint and Recovery Design](deprecated/checkpoint-and-recovery.md) (deprecated)
 - [Architecture Overview](deprecated/architecture.md)
-- [WorkQueue Redesign](work-queue-redesign.md)
+- [Anvil Redesign](work-queue-redesign.md)
 
 ---
 

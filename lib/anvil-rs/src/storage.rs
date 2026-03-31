@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// SlateDB storage layer for WorkQueue — atomic counter model
+// SlateDB storage layer for Anvil — atomic counter model
 //
 // Key Schema:
 //   seq_push:{queue}                -> u64 LE  (next push sequence)
@@ -88,8 +88,8 @@ pub struct AckOptions<'a> {
     pub worker_id: Option<&'a str>,
 }
 
-/// WorkQueue storage backed by SlateDB with in-memory atomic counters
-pub struct WorkQueueStorage {
+/// Anvil storage backed by SlateDB with in-memory atomic counters
+pub struct AnvilStorage {
     db: Db,
     /// Per-queue atomic counters (in-memory cache, persisted to DB on each op)
     counters: DashMap<String, Arc<QueueCounters>>,
@@ -97,7 +97,7 @@ pub struct WorkQueueStorage {
     steal_rr: std::sync::Mutex<HashMap<String, u64>>,
 }
 
-impl WorkQueueStorage {
+impl AnvilStorage {
     pub async fn new(db_path: &str) -> Result<Self, StorageError> {
         let object_store = Db::resolve_object_store(db_path)?;
         let db = Db::open("/", object_store).await?;
@@ -438,7 +438,8 @@ impl WorkQueueStorage {
         Ok(())
     }
 
-    /// Push a single message (convenience wrapper)
+    /// Push a single message (convenience wrapper, used in tests)
+    #[allow(dead_code)]
     pub async fn push_message(&self, queue: &str, msg: &Message) -> Result<(), StorageError> {
         self.push_messages(queue, std::slice::from_ref(msg)).await
     }
@@ -1566,11 +1567,11 @@ mod tests {
 
     static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-    async fn create_temp_storage() -> WorkQueueStorage {
+    async fn create_temp_storage() -> AnvilStorage {
         let counter = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let temp_dir = std::env::temp_dir().join(format!("workqueue_test_{}", counter));
+        let temp_dir = std::env::temp_dir().join(format!("anvil_test_{}", counter));
         let _ = std::fs::remove_dir_all(&temp_dir);
-        WorkQueueStorage::new(&format!("file://{}", temp_dir.display()))
+        AnvilStorage::new(&format!("file://{}", temp_dir.display()))
             .await
             .unwrap()
     }

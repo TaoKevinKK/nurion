@@ -16,7 +16,7 @@
 
 Tests the full pipeline flow:
 1. Create Lance dataset (local or S3)
-2. Run StageMaster (with LanceSplitPlanner) through full pipeline with WorkQueue queue
+2. Run StageMaster (with LanceSplitPlanner) through full pipeline with Anvil queue
 3. Verify data is processed correctly
 """
 
@@ -177,18 +177,16 @@ class TestLanceSourceS3:
 
 
 # ============================================================================
-# Full Pipeline Tests (requires workqueue)
+# Full Pipeline Tests (requires anvil)
 # ============================================================================
 
 
 class TestLancePipeline:
-    """Integration tests for full Lance pipeline with WorkQueue."""
+    """Integration tests for full Lance pipeline with Anvil."""
 
     @pytest.mark.asyncio
-    async def test_full_pipeline_with_queue(
-        self, lance_dataset_local, ray_cluster, workqueue_backend
-    ):
-        """Test complete LanceSource pipeline with WorkQueue queue.
+    async def test_full_pipeline_with_queue(self, lance_dataset_local, ray_cluster, anvil_backend):
+        """Test complete LanceSource pipeline with Anvil queue.
 
         This test verifies the full flow:
         1. StageMaster (with LanceSplitPlanner) starts and creates planner queue
@@ -211,7 +209,7 @@ class TestLancePipeline:
         runtime = StageRuntime(
             broker_endpoint=QueueEndpoint(
                 host="localhost",
-                port=workqueue_backend.port,
+                port=anvil_backend.port,
                 storage_url="memory://",
             ),
         )
@@ -257,7 +255,7 @@ class TestLancePipeline:
         minio_credentials,
         s3_storage_options,
         ray_cluster,
-        workqueue_backend,
+        anvil_backend,
     ):
         """Test Lance pipeline with S3 dataset using testcontainers MinIO."""
         unique_id = str(uuid.uuid4())[:8]
@@ -295,7 +293,7 @@ class TestLancePipeline:
         runtime = StageRuntime(
             broker_endpoint=QueueEndpoint(
                 host="localhost",
-                port=workqueue_backend.port,
+                port=anvil_backend.port,
                 storage_url="memory://",
             ),
         )

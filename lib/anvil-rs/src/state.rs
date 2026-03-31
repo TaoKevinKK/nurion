@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// In-memory state for WorkQueue - minimal coordination layer
+// In-memory state for Anvil - minimal coordination layer
 //
 // With atomic counters + CAS in storage, state only provides:
 // - Queue registry: track known queues for stats
@@ -23,15 +23,15 @@ use std::collections::HashMap;
 
 use crate::types::now_secs;
 
-/// WorkQueue coordination state - minimal, no message storage
-pub struct WorkQueueState {
+/// Anvil coordination state - minimal, no message storage
+pub struct AnvilState {
     /// Known queue names (for stats listing)
     queues: DashMap<String, ()>,
     /// Lease last-seen timestamps (seconds since epoch)
     leases: DashMap<String, f64>,
 }
 
-impl WorkQueueState {
+impl AnvilState {
     pub fn new() -> Self {
         Self {
             queues: DashMap::new(),
@@ -74,7 +74,7 @@ impl WorkQueueState {
     }
 }
 
-impl Default for WorkQueueState {
+impl Default for AnvilState {
     fn default() -> Self {
         Self::new()
     }
@@ -86,7 +86,7 @@ mod tests {
 
     #[test]
     fn test_queue_state_creation() {
-        let state = WorkQueueState::new();
+        let state = AnvilState::new();
 
         state.get_or_create_queue("test-queue");
         assert!(state.queue_exists("test-queue"));
@@ -98,7 +98,7 @@ mod tests {
 
     #[test]
     fn test_delete_queue() {
-        let state = WorkQueueState::new();
+        let state = AnvilState::new();
 
         state.get_or_create_queue("test-queue");
         assert!(state.queue_exists("test-queue"));
@@ -110,7 +110,7 @@ mod tests {
 
     #[test]
     fn test_list_queues() {
-        let state = WorkQueueState::new();
+        let state = AnvilState::new();
 
         state.get_or_create_queue("queue-a");
         state.get_or_create_queue("queue-b");

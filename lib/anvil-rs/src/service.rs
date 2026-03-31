@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// gRPC WorkQueue Service Implementation
+// gRPC Anvil Service Implementation (Protocol v2)
 //
-// Storage-only model: All operations go directly to storage.
-// State is only used for:
-// 1. Claim locks (serialize concurrent claims per queue)
-// 2. Lease management (track worker heartbeats)
+// Hot-path RPCs unified:
+//   Claim:            queue + group claims
+//   Complete:         ack + nack + forward + scatter
+//   Push:             single + batch
+//   ClaimAndComplete: combined claim + complete (halves round trips)
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -29,314 +30,432 @@ use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
 
 #[allow(unused_imports)]
-use crate::state::WorkQueueState;
-use crate::storage::WorkQueueStorage;
+use crate::state::AnvilState;
+use crate::storage::AnvilStorage;
 use crate::types::Message;
 
 // Generated protobuf types
 pub mod proto {
-    tonic::include_proto!("workqueue");
+    tonic::include_proto!("anvil");
 }
 
-use proto::work_queue_server::WorkQueue;
+use proto::anvil_server::Anvil;
 use proto::*;
 
-/// WorkQueue gRPC service implementation
-pub struct WorkQueueService {
-    state: Arc<WorkQueueState>,
-    storage: Arc<WorkQueueStorage>,
+/// Anvil gRPC service implementation
+pub struct AnvilService {
+    state: Arc<AnvilState>,
+    storage: Arc<AnvilStorage>,
 }
 
-impl WorkQueueService {
-    pub fn new(state: Arc<WorkQueueState>, storage: Arc<WorkQueueStorage>) -> Self {
+impl AnvilService {
+    pub fn new(state: Arc<AnvilState>, storage: Arc<AnvilStorage>) -> Self {
         Self { state, storage }
     }
 
-    /// Convert internal Message to proto Message
-    fn to_proto_message(msg: &Message) -> proto::Message {
-        proto::Message {
+    /// Convert internal Message to slim ClaimMessage (no queue, no created_at)
+    fn to_claim_message(msg: &Message, claim_token: String) -> ClaimMessage {
+        ClaimMessage {
             msg_id: msg.msg_id.clone(),
-            queue: msg.queue.clone(),
             payload: msg.payload.clone(),
-            created_at: msg.created_at,
             metadata: msg.metadata.clone(),
+            claim_token,
         }
     }
-}
 
-#[tonic::async_trait]
-impl WorkQueue for WorkQueueService {
-    // =========================================================================
-    // Consumer API
-    // =========================================================================
+    /// Execute a Complete operation (shared by `complete` and `claim_and_complete`)
+    async fn execute_complete(&self, req: CompleteRequest) -> Result<CompleteResponse, Status> {
+        if !req.msg_ids.is_empty() && req.claim_tokens.len() != req.msg_ids.len() {
+            return Err(Status::invalid_argument(
+                "claim_tokens length must match msg_ids",
+            ));
+        }
 
-    async fn claim(
-        &self,
-        request: Request<ClaimRequest>,
-    ) -> Result<Response<ClaimResponse>, Status> {
-        let req = request.into_inner();
+        let has_state = req.state.as_ref().is_some_and(|s| {
+            !s.namespace.is_empty() && (!s.puts.is_empty() || !s.deletes.is_empty())
+        });
+        let state_ns = req
+            .state
+            .as_ref()
+            .map(|s| s.namespace.as_str())
+            .unwrap_or("");
+        let state_puts: HashMap<String, Vec<u8>> = req
+            .state
+            .as_ref()
+            .map(|s| s.puts.clone())
+            .unwrap_or_default();
+        let state_deletes: Vec<String> = req
+            .state
+            .as_ref()
+            .map(|s| s.deletes.clone())
+            .unwrap_or_default();
 
+        match req.action {
+            // --- Ack: just acknowledge, no downstream ---
+            Some(complete_request::Action::Ack(_)) => {
+                let result = if has_state {
+                    self.storage
+                        .ack_with_state(
+                            &req.upstream_queue,
+                            &req.msg_ids,
+                            &req.claim_tokens,
+                            &req.worker_id,
+                            &req.lease_id,
+                            state_ns,
+                            &state_puts,
+                            &state_deletes,
+                        )
+                        .await
+                } else {
+                    self.storage
+                        .ack_messages(
+                            &req.upstream_queue,
+                            &req.msg_ids,
+                            &req.claim_tokens,
+                            &req.worker_id,
+                            &req.lease_id,
+                        )
+                        .await
+                };
+                match result {
+                    Ok(()) => Ok(CompleteResponse {
+                        success: true,
+                        processed_count: req.msg_ids.len() as i32,
+                        new_msg_ids: vec![],
+                    }),
+                    Err(e) => {
+                        tracing::error!("Complete(ack) failed: {}", e);
+                        Err(Status::internal("Storage error"))
+                    }
+                }
+            }
+
+            // --- Nack: return messages to queue ---
+            Some(complete_request::Action::Nack(_)) => {
+                let result = if has_state {
+                    self.storage
+                        .nack_messages_with_state(
+                            &req.upstream_queue,
+                            &req.msg_ids,
+                            &req.claim_tokens,
+                            &req.worker_id,
+                            &req.lease_id,
+                            state_ns,
+                            &state_puts,
+                            &state_deletes,
+                        )
+                        .await
+                } else {
+                    self.storage
+                        .nack_messages(
+                            &req.upstream_queue,
+                            &req.msg_ids,
+                            &req.claim_tokens,
+                            &req.worker_id,
+                            &req.lease_id,
+                        )
+                        .await
+                };
+                match result {
+                    Ok(()) => Ok(CompleteResponse {
+                        success: true,
+                        processed_count: req.msg_ids.len() as i32,
+                        new_msg_ids: vec![],
+                    }),
+                    Err(e) => {
+                        tracing::error!("Complete(nack) failed: {}", e);
+                        Err(Status::internal("Storage error"))
+                    }
+                }
+            }
+
+            // --- Forward: ack upstream + push to single downstream queue ---
+            Some(complete_request::Action::Forward(fwd)) => {
+                let downstream_messages: Vec<Message> = fwd
+                    .payloads
+                    .iter()
+                    .map(|payload| Message::new(fwd.downstream_queue.clone(), payload.clone()))
+                    .collect();
+                let new_msg_ids: Vec<String> = downstream_messages
+                    .iter()
+                    .map(|m| m.msg_id.clone())
+                    .collect();
+
+                let result = if has_state {
+                    self.storage
+                        .ack_forward_with_state(
+                            &req.upstream_queue,
+                            &req.msg_ids,
+                            &req.claim_tokens,
+                            &req.worker_id,
+                            &req.lease_id,
+                            &fwd.downstream_queue,
+                            &downstream_messages,
+                            state_ns,
+                            &state_puts,
+                            &state_deletes,
+                        )
+                        .await
+                } else {
+                    self.storage
+                        .ack_and_forward(
+                            &req.upstream_queue,
+                            &req.msg_ids,
+                            &req.claim_tokens,
+                            &req.worker_id,
+                            &req.lease_id,
+                            &fwd.downstream_queue,
+                            &downstream_messages,
+                        )
+                        .await
+                };
+                match result {
+                    Ok(()) => Ok(CompleteResponse {
+                        success: true,
+                        processed_count: req.msg_ids.len() as i32,
+                        new_msg_ids,
+                    }),
+                    Err(e) => {
+                        tracing::error!("Complete(forward) failed: {}", e);
+                        Ok(CompleteResponse {
+                            success: false,
+                            processed_count: 0,
+                            new_msg_ids: vec![],
+                        })
+                    }
+                }
+            }
+
+            // --- Scatter: ack upstream + push to partition group ---
+            Some(complete_request::Action::Scatter(sct)) => {
+                if sct.group_name.is_empty() {
+                    return Err(Status::invalid_argument("scatter group_name is required"));
+                }
+
+                let mut partition_msgs: Vec<(u32, Vec<Message>)> = Vec::new();
+                for pp in &sct.partitions {
+                    let messages: Vec<Message> = pp
+                        .payloads
+                        .iter()
+                        .map(|payload| {
+                            let queue_name = format!("{}_p{}", sct.group_name, pp.partition_id);
+                            Message::new(queue_name, payload.clone())
+                        })
+                        .collect();
+                    partition_msgs.push((pp.partition_id as u32, messages));
+                }
+
+                match self
+                    .storage
+                    .ack_and_scatter(
+                        &req.upstream_queue,
+                        &req.msg_ids,
+                        &req.claim_tokens,
+                        &req.worker_id,
+                        &req.lease_id,
+                        &sct.group_name,
+                        &partition_msgs,
+                        if has_state { Some(state_ns) } else { None },
+                        if has_state { Some(&state_puts) } else { None },
+                        if has_state {
+                            Some(&state_deletes)
+                        } else {
+                            None
+                        },
+                    )
+                    .await
+                {
+                    Ok(new_msg_ids) => Ok(CompleteResponse {
+                        success: true,
+                        processed_count: req.msg_ids.len() as i32,
+                        new_msg_ids,
+                    }),
+                    Err(e) => {
+                        tracing::error!("Complete(scatter) failed: {}", e);
+                        Ok(CompleteResponse {
+                            success: false,
+                            processed_count: 0,
+                            new_msg_ids: vec![],
+                        })
+                    }
+                }
+            }
+
+            None => Err(Status::invalid_argument(
+                "action is required (ack, nack, forward, or scatter)",
+            )),
+        }
+    }
+
+    /// Execute a Claim operation (shared by `claim` and `claim_and_complete`)
+    async fn execute_claim(&self, req: ClaimRequest) -> Result<ClaimResponse, Status> {
         let batch_size = if req.batch_size > 0 {
             req.batch_size as usize
         } else {
             1
         };
 
-        // CAS-based claim in storage — no external lock needed
-        let claimed = match self
-            .storage
-            .claim_messages(&req.queue, batch_size, &req.worker_id, &req.lease_id)
-            .await
-        {
-            Ok(msgs) => msgs,
-            Err(e) => {
-                tracing::error!("Failed to claim: {}", e);
-                return Err(Status::internal("Storage error"));
+        match req.source {
+            // --- Plain queue claim ---
+            Some(claim_request::Source::Queue(queue)) => {
+                let claimed = self
+                    .storage
+                    .claim_messages(&queue, batch_size, &req.worker_id, &req.lease_id)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("Claim failed: {}", e);
+                        Status::internal("Storage error")
+                    })?;
+
+                let messages: Vec<ClaimMessage> = claimed
+                    .iter()
+                    .map(|c| Self::to_claim_message(&c.message, c.claim_token.clone()))
+                    .collect();
+
+                let has_more = match self.storage.get_queue_stats(&queue).await {
+                    Ok(meta) => meta.claim_seq < meta.push_seq,
+                    Err(_) => false,
+                };
+
+                Ok(ClaimResponse {
+                    messages,
+                    has_more,
+                    source_queue: String::new(),
+                    source_partition: 0,
+                })
             }
-        };
 
-        let proto_messages: Vec<proto::Message> = claimed
-            .iter()
-            .map(|c| Self::to_proto_message(&c.message))
-            .collect();
-        let claim_tokens: Vec<String> = claimed.iter().map(|c| c.claim_token.clone()).collect();
+            // --- Group claim ---
+            Some(claim_request::Source::Group(group)) => {
+                if group.group_name.is_empty() {
+                    return Err(Status::invalid_argument("group_name is required"));
+                }
 
-        // Check if there are more messages
-        let has_more = match self.storage.get_queue_stats(&req.queue).await {
-            Ok(meta) => meta.claim_seq < meta.push_seq,
-            Err(_) => false,
-        };
+                let assigned: Vec<u32> = group
+                    .assigned_partitions
+                    .iter()
+                    .map(|&p| p as u32)
+                    .collect();
 
-        Ok(Response::new(ClaimResponse {
-            messages: proto_messages,
-            has_more,
-            claim_tokens,
-        }))
-    }
+                let (claimed, source_queue, source_partition) = self
+                    .storage
+                    .claim_from_group(
+                        &group.group_name,
+                        batch_size,
+                        &req.worker_id,
+                        &req.lease_id,
+                        &assigned,
+                        group.allow_steal,
+                        group.steal_pending_threshold as u64,
+                    )
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("ClaimFromGroup failed: {}", e);
+                        Status::internal("Storage error")
+                    })?;
 
-    async fn ack(&self, request: Request<AckRequest>) -> Result<Response<AckResponse>, Status> {
-        let req = request.into_inner();
+                let messages: Vec<ClaimMessage> = claimed
+                    .iter()
+                    .map(|c| Self::to_claim_message(&c.message, c.claim_token.clone()))
+                    .collect();
 
-        // Check if we have state updates
-        let has_state_updates = !req.state_namespace.is_empty()
-            && (!req.state_puts.is_empty() || !req.state_deletes.is_empty());
-
-        if !req.msg_ids.is_empty() && req.claim_tokens.len() != req.msg_ids.len() {
-            return Err(Status::invalid_argument(
-                "claim_tokens length must match msg_ids",
-            ));
-        }
-
-        // Ack directly in storage
-        let result = if has_state_updates {
-            let state_puts: HashMap<String, Vec<u8>> = req.state_puts.into_iter().collect();
-            self.storage
-                .ack_with_state(
-                    &req.queue,
-                    &req.msg_ids,
-                    &req.claim_tokens,
-                    &req.worker_id,
-                    &req.lease_id,
-                    &req.state_namespace,
-                    &state_puts,
-                    &req.state_deletes,
-                )
-                .await
-        } else {
-            self.storage
-                .ack_messages(
-                    &req.queue,
-                    &req.msg_ids,
-                    &req.claim_tokens,
-                    &req.worker_id,
-                    &req.lease_id,
-                )
-                .await
-        };
-
-        match result {
-            Ok(()) => Ok(Response::new(AckResponse {
-                acked_count: req.msg_ids.len() as i32,
-                failed_ids: vec![],
-            })),
-            Err(e) => {
-                tracing::error!("Failed to ack: {}", e);
-                Err(Status::internal("Storage error"))
+                Ok(ClaimResponse {
+                    messages,
+                    has_more: false,
+                    source_queue,
+                    source_partition: source_partition as i32,
+                })
             }
+
+            None => Err(Status::invalid_argument(
+                "source is required (queue or group)",
+            )),
         }
     }
+}
 
-    async fn nack(&self, request: Request<NackRequest>) -> Result<Response<NackResponse>, Status> {
-        let req = request.into_inner();
+#[tonic::async_trait]
+impl Anvil for AnvilService {
+    // =========================================================================
+    // Unified Hot Path
+    // =========================================================================
 
-        if !req.msg_ids.is_empty() && req.claim_tokens.len() != req.msg_ids.len() {
-            return Err(Status::invalid_argument(
-                "claim_tokens length must match msg_ids",
-            ));
-        }
-
-        let has_state_updates = !req.state_namespace.is_empty()
-            && (!req.state_puts.is_empty() || !req.state_deletes.is_empty());
-
-        // Nack directly in storage (returns messages to pending at tail)
-        let result = if has_state_updates {
-            self.storage
-                .nack_messages_with_state(
-                    &req.queue,
-                    &req.msg_ids,
-                    &req.claim_tokens,
-                    &req.worker_id,
-                    &req.lease_id,
-                    &req.state_namespace,
-                    &req.state_puts,
-                    &req.state_deletes,
-                )
-                .await
-        } else {
-            self.storage
-                .nack_messages(
-                    &req.queue,
-                    &req.msg_ids,
-                    &req.claim_tokens,
-                    &req.worker_id,
-                    &req.lease_id,
-                )
-                .await
-        };
-
-        match result {
-            Ok(()) => Ok(Response::new(NackResponse {
-                nacked_count: req.msg_ids.len() as i32,
-            })),
-            Err(e) => {
-                tracing::error!("Failed to nack: {}", e);
-                Err(Status::internal("Storage error"))
-            }
-        }
-    }
-
-    async fn ack_and_forward(
+    async fn claim(
         &self,
-        request: Request<AckAndForwardRequest>,
-    ) -> Result<Response<AckAndForwardResponse>, Status> {
-        let req = request.into_inner();
-
-        if !req.upstream_msg_ids.is_empty()
-            && req.upstream_claim_tokens.len() != req.upstream_msg_ids.len()
-        {
-            return Err(Status::invalid_argument(
-                "upstream_claim_tokens length must match upstream_msg_ids",
-            ));
-        }
-
-        // Build downstream messages
-        let downstream_messages: Vec<Message> = req
-            .downstream_payloads
-            .iter()
-            .map(|payload| Message::new(req.downstream_queue.clone(), payload.clone()))
-            .collect();
-
-        let new_msg_ids: Vec<String> = downstream_messages
-            .iter()
-            .map(|m| m.msg_id.clone())
-            .collect();
-
-        // Check if we have state updates
-        let has_state_updates = !req.state_namespace.is_empty()
-            && (!req.state_puts.is_empty() || !req.state_deletes.is_empty());
-
-        // Atomic persist
-        let result = if has_state_updates {
-            let state_puts: HashMap<String, Vec<u8>> = req.state_puts.into_iter().collect();
-            self.storage
-                .ack_forward_with_state(
-                    &req.upstream_queue,
-                    &req.upstream_msg_ids,
-                    &req.upstream_claim_tokens,
-                    &req.worker_id,
-                    &req.lease_id,
-                    &req.downstream_queue,
-                    &downstream_messages,
-                    &req.state_namespace,
-                    &state_puts,
-                    &req.state_deletes,
-                )
-                .await
-        } else {
-            self.storage
-                .ack_and_forward(
-                    &req.upstream_queue,
-                    &req.upstream_msg_ids,
-                    &req.upstream_claim_tokens,
-                    &req.worker_id,
-                    &req.lease_id,
-                    &req.downstream_queue,
-                    &downstream_messages,
-                )
-                .await
-        };
-
-        match result {
-            Ok(()) => Ok(Response::new(AckAndForwardResponse {
-                new_msg_ids,
-                success: true,
-            })),
-            Err(e) => {
-                tracing::error!("Failed ack_and_forward: {}", e);
-                Ok(Response::new(AckAndForwardResponse {
-                    new_msg_ids: vec![],
-                    success: false,
-                }))
-            }
-        }
+        request: Request<ClaimRequest>,
+    ) -> Result<Response<ClaimResponse>, Status> {
+        self.execute_claim(request.into_inner())
+            .await
+            .map(Response::new)
     }
 
-    // =========================================================================
-    // Producer API
-    // =========================================================================
+    async fn complete(
+        &self,
+        request: Request<CompleteRequest>,
+    ) -> Result<Response<CompleteResponse>, Status> {
+        self.execute_complete(request.into_inner())
+            .await
+            .map(Response::new)
+    }
 
     async fn push(&self, request: Request<PushRequest>) -> Result<Response<PushResponse>, Status> {
         let req = request.into_inner();
 
-        let msg = Message::with_metadata(req.queue.clone(), req.payload, req.metadata);
-        let msg_id = msg.msg_id.clone();
-
-        // Push directly to storage
-        match self.storage.push_message(&req.queue, &msg).await {
-            Ok(()) => Ok(Response::new(PushResponse { msg_id })),
-            Err(e) => {
-                tracing::error!("Failed to push: {}", e);
-                Err(Status::internal("Storage error"))
-            }
+        if req.payloads.is_empty() {
+            return Err(Status::invalid_argument("at least one payload is required"));
         }
-    }
-
-    async fn push_batch(
-        &self,
-        request: Request<PushBatchRequest>,
-    ) -> Result<Response<PushBatchResponse>, Status> {
-        let req = request.into_inner();
 
         let messages: Vec<Message> = req
             .payloads
             .iter()
-            .map(|payload| Message::new(req.queue.clone(), payload.clone()))
+            .map(|payload| {
+                if req.metadata.is_empty() {
+                    Message::new(req.queue.clone(), payload.clone())
+                } else {
+                    Message::with_metadata(req.queue.clone(), payload.clone(), req.metadata.clone())
+                }
+            })
             .collect();
 
         let msg_ids: Vec<String> = messages.iter().map(|m| m.msg_id.clone()).collect();
 
-        // Push batch directly to storage
         match self.storage.push_messages(&req.queue, &messages).await {
-            Ok(()) => Ok(Response::new(PushBatchResponse { msg_ids })),
+            Ok(()) => Ok(Response::new(PushResponse { msg_ids })),
             Err(e) => {
-                tracing::error!("Failed to push batch: {}", e);
+                tracing::error!("Push failed: {}", e);
                 Err(Status::internal("Storage error"))
             }
         }
     }
 
+    async fn claim_and_complete(
+        &self,
+        request: Request<ClaimAndCompleteRequest>,
+    ) -> Result<Response<ClaimAndCompleteResponse>, Status> {
+        let req = request.into_inner();
+
+        // Execute complete first (if provided)
+        let complete_result = if let Some(complete_req) = req.complete {
+            Some(self.execute_complete(complete_req).await?)
+        } else {
+            None
+        };
+
+        // Then claim
+        let claim_result = if let Some(claim_req) = req.claim {
+            Some(self.execute_claim(claim_req).await?)
+        } else {
+            None
+        };
+
+        Ok(Response::new(ClaimAndCompleteResponse {
+            complete_result,
+            claim_result,
+        }))
+    }
+
     // =========================================================================
-    // State API
+    // State API (unchanged)
     // =========================================================================
 
     async fn state_get(
@@ -391,7 +510,7 @@ impl WorkQueue for WorkQueueService {
     }
 
     // =========================================================================
-    // Heartbeat (simplified - no lease tracking for now)
+    // Heartbeat (unchanged)
     // =========================================================================
 
     type HeartbeatStreamStream = Pin<Box<dyn Stream<Item = Result<HeartbeatPong, Status>> + Send>>;
@@ -401,29 +520,23 @@ impl WorkQueue for WorkQueueService {
         request: Request<Streaming<HeartbeatPing>>,
     ) -> Result<Response<Self::HeartbeatStreamStream>, Status> {
         let mut stream = request.into_inner();
-
         let (tx, rx) = mpsc::channel(16);
         let state = self.state.clone();
 
-        // Heartbeat receive timeout: close connection if no ping received within 30s
         const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 
         tokio::spawn(async move {
-            // Generate a lease ID for this connection
             let lease_id = uuid::Uuid::now_v7().to_string();
 
             loop {
-                // Wait for next ping with timeout
                 match timeout(HEARTBEAT_TIMEOUT, stream.next()).await {
                     Ok(Some(Ok(_ping))) => {
                         state.update_lease(&lease_id);
-                        // Simple pong response - always use the generated lease_id
                         let pong = HeartbeatPong {
                             lease_id: lease_id.clone(),
                             ok: true,
                             next_ping_ms: 5000,
                         };
-
                         if tx.send(Ok(pong)).await.is_err() {
                             break;
                         }
@@ -432,12 +545,8 @@ impl WorkQueue for WorkQueueService {
                         tracing::warn!("Heartbeat stream error: {}", e);
                         break;
                     }
-                    Ok(None) => {
-                        // Stream ended normally
-                        break;
-                    }
+                    Ok(None) => break,
                     Err(_) => {
-                        // Timeout - no heartbeat received within timeout period
                         tracing::debug!("Heartbeat timeout, closing connection");
                         break;
                     }
@@ -445,12 +554,11 @@ impl WorkQueue for WorkQueueService {
             }
         });
 
-        let output_stream = ReceiverStream::new(rx);
-        Ok(Response::new(Box::pin(output_stream)))
+        Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
     }
 
     // =========================================================================
-    // Admin API
+    // Admin API (unchanged)
     // =========================================================================
 
     async fn create_queue(
@@ -458,11 +566,8 @@ impl WorkQueue for WorkQueueService {
         request: Request<CreateQueueRequest>,
     ) -> Result<Response<CreateQueueResponse>, Status> {
         let req = request.into_inner();
-
-        // Create in storage
         match self.storage.create_queue(&req.queue).await {
             Ok(()) => {
-                // Register in state (for stats listing)
                 self.state.get_or_create_queue(&req.queue);
                 Ok(Response::new(CreateQueueResponse { created: true }))
             }
@@ -478,11 +583,8 @@ impl WorkQueue for WorkQueueService {
         request: Request<DeleteQueueRequest>,
     ) -> Result<Response<DeleteQueueResponse>, Status> {
         let req = request.into_inner();
-
-        // Delete from storage
         match self.storage.delete_queue(&req.queue).await {
             Ok(deleted) => {
-                // Also delete from state
                 self.state.delete_queue(&req.queue);
                 Ok(Response::new(DeleteQueueResponse {
                     deleted: deleted > 0,
@@ -502,7 +604,6 @@ impl WorkQueue for WorkQueueService {
     ) -> Result<Response<GetStatsResponse>, Status> {
         let req = request.into_inner();
 
-        // Get stats from storage
         let queues_to_check: Vec<String> = if req.queue.is_empty() {
             self.state.list_queues()
         } else {
@@ -510,7 +611,6 @@ impl WorkQueue for WorkQueueService {
         };
 
         let mut queues: HashMap<String, QueueStats> = HashMap::new();
-
         for queue in queues_to_check {
             match self.storage.get_queue_stats(&queue).await {
                 Ok(meta) => {
@@ -534,13 +634,13 @@ impl WorkQueue for WorkQueueService {
 
         Ok(Response::new(GetStatsResponse {
             queues,
-            total_workers: 0, // Not tracking workers in this simplified model
+            total_workers: 0,
             uptime_secs: 0,
         }))
     }
 
     // =========================================================================
-    // Queue Completion API
+    // Queue Completion API (unchanged)
     // =========================================================================
 
     async fn mark_queue_finished(
@@ -548,11 +648,9 @@ impl WorkQueue for WorkQueueService {
         request: Request<MarkQueueFinishedRequest>,
     ) -> Result<Response<MarkQueueFinishedResponse>, Status> {
         let req = request.into_inner();
-
         if req.queue.is_empty() {
             return Err(Status::invalid_argument("queue is required"));
         }
-
         match self.storage.mark_queue_finished(&req.queue).await {
             Ok(()) => Ok(Response::new(MarkQueueFinishedResponse { success: true })),
             Err(e) => {
@@ -567,11 +665,9 @@ impl WorkQueue for WorkQueueService {
         request: Request<IsQueueFinishedRequest>,
     ) -> Result<Response<IsQueueFinishedResponse>, Status> {
         let req = request.into_inner();
-
         if req.queue.is_empty() {
             return Err(Status::invalid_argument("queue is required"));
         }
-
         match self.storage.check_queue_completion(&req.queue).await {
             Ok((finished, drained, pending_count, claimed_count)) => {
                 Ok(Response::new(IsQueueFinishedResponse {
@@ -590,7 +686,7 @@ impl WorkQueue for WorkQueueService {
     }
 
     // =========================================================================
-    // QueueGroup API
+    // QueueGroup API (unchanged)
     // =========================================================================
 
     async fn create_queue_group(
@@ -598,7 +694,6 @@ impl WorkQueue for WorkQueueService {
         request: Request<CreateQueueGroupRequest>,
     ) -> Result<Response<CreateQueueGroupResponse>, Status> {
         let req = request.into_inner();
-
         if req.group_name.is_empty() {
             return Err(Status::invalid_argument("group_name is required"));
         }
@@ -606,7 +701,6 @@ impl WorkQueue for WorkQueueService {
             return Err(Status::invalid_argument("num_partitions must be positive"));
         }
 
-        // Check if already exists to set `created` flag
         let existed = self
             .storage
             .get_group_meta(&req.group_name)
@@ -623,7 +717,6 @@ impl WorkQueue for WorkQueueService {
             .await
         {
             Ok(meta) => {
-                // Register partition queues in state (for stats listing)
                 for queue_name in &meta.partition_queues {
                     self.state.get_or_create_queue(queue_name);
                 }
@@ -640,162 +733,11 @@ impl WorkQueue for WorkQueueService {
         }
     }
 
-    async fn ack_and_scatter(
-        &self,
-        request: Request<AckAndScatterRequest>,
-    ) -> Result<Response<AckAndScatterResponse>, Status> {
-        let req = request.into_inner();
-
-        if req.group_name.is_empty() {
-            return Err(Status::invalid_argument("group_name is required"));
-        }
-        if !req.upstream_msg_ids.is_empty()
-            && req.upstream_claim_tokens.len() != req.upstream_msg_ids.len()
-        {
-            return Err(Status::invalid_argument(
-                "upstream_claim_tokens length must match upstream_msg_ids",
-            ));
-        }
-
-        // Validate partition IDs are non-negative
-        if req.partitions.iter().any(|pp| pp.partition_id < 0) {
-            return Err(Status::invalid_argument(
-                "partition_id must be non-negative",
-            ));
-        }
-
-        // Build partition payloads: Vec<(partition_id, Vec<Message>)>
-        let mut partition_msgs: Vec<(u32, Vec<Message>)> = Vec::new();
-        for pp in &req.partitions {
-            let messages: Vec<Message> = pp
-                .payloads
-                .iter()
-                .map(|payload| {
-                    let queue_name = format!("{}_p{}", req.group_name, pp.partition_id);
-                    Message::new(queue_name, payload.clone())
-                })
-                .collect();
-            partition_msgs.push((pp.partition_id as u32, messages));
-        }
-
-        let has_state = !req.state_namespace.is_empty()
-            && (!req.state_puts.is_empty() || !req.state_deletes.is_empty());
-
-        let state_puts_map: HashMap<String, Vec<u8>> = req.state_puts.into_iter().collect();
-
-        match self
-            .storage
-            .ack_and_scatter(
-                &req.upstream_queue,
-                &req.upstream_msg_ids,
-                &req.upstream_claim_tokens,
-                &req.worker_id,
-                &req.lease_id,
-                &req.group_name,
-                &partition_msgs,
-                if has_state {
-                    Some(req.state_namespace.as_str())
-                } else {
-                    None
-                },
-                if has_state {
-                    Some(&state_puts_map)
-                } else {
-                    None
-                },
-                if has_state {
-                    Some(&req.state_deletes)
-                } else {
-                    None
-                },
-            )
-            .await
-        {
-            Ok(new_msg_ids) => Ok(Response::new(AckAndScatterResponse {
-                success: true,
-                new_msg_ids,
-            })),
-            Err(e) => {
-                tracing::error!("Failed ack_and_scatter: {}", e);
-                Ok(Response::new(AckAndScatterResponse {
-                    success: false,
-                    new_msg_ids: vec![],
-                }))
-            }
-        }
-    }
-
-    async fn claim_from_group(
-        &self,
-        request: Request<ClaimFromGroupRequest>,
-    ) -> Result<Response<ClaimFromGroupResponse>, Status> {
-        let req = request.into_inner();
-
-        if req.group_name.is_empty() {
-            return Err(Status::invalid_argument("group_name is required"));
-        }
-
-        let batch_size = if req.batch_size > 0 {
-            req.batch_size as usize
-        } else {
-            1
-        };
-
-        if req.assigned_partitions.iter().any(|&p| p < 0) {
-            return Err(Status::invalid_argument(
-                "assigned_partitions must be non-negative",
-            ));
-        }
-        if req.steal_pending_threshold < 0 {
-            return Err(Status::invalid_argument(
-                "steal_pending_threshold must be non-negative",
-            ));
-        }
-
-        let assigned: Vec<u32> = req.assigned_partitions.iter().map(|&p| p as u32).collect();
-
-        match self
-            .storage
-            .claim_from_group(
-                &req.group_name,
-                batch_size,
-                &req.worker_id,
-                &req.lease_id,
-                &assigned,
-                req.allow_steal,
-                req.steal_pending_threshold as u64,
-            )
-            .await
-        {
-            Ok((claimed, source_queue, source_partition)) => {
-                let proto_messages: Vec<proto::Message> = claimed
-                    .iter()
-                    .map(|c| Self::to_proto_message(&c.message))
-                    .collect();
-                let claim_tokens: Vec<String> =
-                    claimed.iter().map(|c| c.claim_token.clone()).collect();
-
-                Ok(Response::new(ClaimFromGroupResponse {
-                    messages: proto_messages,
-                    claim_tokens,
-                    source_queue,
-                    source_partition: source_partition as i32,
-                    has_more: false, // simplified; caller can check group stats
-                }))
-            }
-            Err(e) => {
-                tracing::error!("Failed claim_from_group: {}", e);
-                Err(Status::internal("Storage error"))
-            }
-        }
-    }
-
     async fn is_group_finished(
         &self,
         request: Request<IsGroupFinishedRequest>,
     ) -> Result<Response<IsGroupFinishedResponse>, Status> {
         let req = request.into_inner();
-
         if req.group_name.is_empty() {
             return Err(Status::invalid_argument("group_name is required"));
         }
@@ -811,7 +753,6 @@ impl WorkQueue for WorkQueueService {
                         finished: *finished,
                     })
                     .collect();
-
                 Ok(Response::new(IsGroupFinishedResponse {
                     all_finished,
                     all_drained,
@@ -831,7 +772,6 @@ impl WorkQueue for WorkQueueService {
         request: Request<GetGroupStatsRequest>,
     ) -> Result<Response<GetGroupStatsResponse>, Status> {
         let req = request.into_inner();
-
         if req.group_name.is_empty() {
             return Err(Status::invalid_argument("group_name is required"));
         }
@@ -854,7 +794,6 @@ impl WorkQueue for WorkQueueService {
                             max_pending = pending;
                         }
                         pending_values.push(pending);
-
                         PartitionStats {
                             partition_id: *pid as i32,
                             pending_count: pending,
@@ -865,21 +804,17 @@ impl WorkQueue for WorkQueueService {
                     })
                     .collect();
 
-                // Compute median and skew
                 pending_values.sort();
                 let median = if pending_values.is_empty() {
                     0
                 } else {
                     pending_values[pending_values.len() / 2]
                 };
-
                 let skew_ratio = if median > 0 {
                     max_pending as f32 / median as f32
                 } else {
                     0.0
                 };
-
-                // Hot partitions: pending > 5x median (and median > 0)
                 let hot_partitions: Vec<i32> = if median > 0 {
                     stats
                         .iter()
@@ -919,11 +854,9 @@ impl WorkQueue for WorkQueueService {
         request: Request<MarkGroupFinishedRequest>,
     ) -> Result<Response<MarkGroupFinishedResponse>, Status> {
         let req = request.into_inner();
-
         if req.group_name.is_empty() {
             return Err(Status::invalid_argument("group_name is required"));
         }
-
         match self.storage.mark_group_finished(&req.group_name).await {
             Ok(count) => Ok(Response::new(MarkGroupFinishedResponse {
                 success: true,

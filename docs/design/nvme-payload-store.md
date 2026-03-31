@@ -773,7 +773,7 @@ def clear(self) -> int:
 
 **For WRITE_THROUGH: S3 always has the data before ack.** No recovery mechanism needed.
 
-**For WRITE_BACK: S3 may not have the data.** Existing WorkQueue nack + upstream
+**For WRITE_BACK: S3 may not have the data.** Existing Anvil nack + upstream
 recompute handles this (same as any operator crash — the message is re-enqueued).
 
 ### 9.2 Failure Scenarios
@@ -799,7 +799,7 @@ No identity tracking needed because the system self-heals through message flow.
 
 **Micro-lineage:** WRITE_THROUGH ensures S3 always has the data before ack.
 WRITE_BACK accepts the small risk of recompute via standard nack semantics.
-No special recompute mechanism needed beyond what WorkQueue already provides.
+No special recompute mechanism needed beyond what Anvil already provides.
 
 ### 9.4 Flight Port Conflict (Multi-Job)
 

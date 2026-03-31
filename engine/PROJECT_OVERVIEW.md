@@ -8,9 +8,9 @@ Nurion Runtime is a Ray-based **high-throughput batch processing framework** who
 
 - **Streaming-Style Execution**: Pull-based data flow, no stage barriers
 - **Elastic Workers**: Dynamic worker scaling based on queue lag
-- **Queue-Based Communication**: WorkQueue (embedded broker; `memory://` or `file://` storage)
+- **Queue-Based Communication**: Anvil (embedded broker; `memory://` or `file://` storage)
 - **Fault-Tolerant Design**: Message ID-based recovery (scaffolding implemented)
-- **Minimal Dependencies**: Ray plus embedded WorkQueue broker
+- **Minimal Dependencies**: Ray plus embedded Anvil broker
 
 ## Directory Structure
 
@@ -34,7 +34,7 @@ engine/
 │   │   └── queue_stats.py   # QueueStatsClient
 │   ├── queue/               # Queue backend
 │   │   ├── backend.py       # Record data structures
-│   │   └── workqueue.py     # WorkQueue broker + client
+│   │   └── anvil.py     # Anvil broker + client
 │   ├── operators/           # Built-in operators
 │   │   ├── sources/         # Source operators
 │   │   ├── sinks/           # Sink operators
@@ -60,7 +60,7 @@ engine/
 
 # Shared libraries (in nurion/lib/)
 lib/
-├── workqueue-rs/            # WorkQueue broker + Python client
+├── anvil-rs/            # Anvil broker + Python client
 └── raydp/                   # Spark on Ray integration
     ├── raydp/               # Python package
     └── java/                # Scala/Java Spark components
@@ -77,7 +77,7 @@ from nurion import Job, JobConfig
 job = Job(
     job_id='my_pipeline',
     config=JobConfig(
-        workqueue_db_path="file:///tmp/workqueue",
+        anvil_db_path="file:///tmp/anvil",
     ),
 )
 ```
@@ -138,7 +138,7 @@ MyOperatorConfig.operator_class = MyOperator
 ### 4. Queue Backend
 
 Where messages flow between stages:
-- `WorkQueue`: Embedded broker with claim/ack semantics
+- `Anvil`: Embedded broker with claim/ack semantics
 
 ## Built-in Operators
 
@@ -201,7 +201,7 @@ Use for:
 │ (StageMaster, StageWorker)              │
 ├─────────────────────────────────────────┤
 │ Layer 1: Queue                          │
-│ (WorkQueue embedded broker)             │
+│ (Anvil embedded broker)             │
 ├─────────────────────────────────────────┤
 │ Layer 0: Ray                            │
 │ (Actors, Object Store)                  │
@@ -217,7 +217,7 @@ StageMaster delegates to specialized managers:
 | `WorkerManager` | Worker lifecycle (spawn, stop, status) |
 | `RecoveryManager` | Failure tracking and worker recovery |
 
-Backpressure/autoscaling use job-level WorkQueue stats (see `engine/backpressure.py`).
+Backpressure/autoscaling use job-level Anvil stats (see `engine/backpressure.py`).
 
 ## Running a Pipeline
 
@@ -234,7 +234,7 @@ from nurion import (
 # 1. Create job
 job = Job(
     job_id='my_job',
-    config=JobConfig(workqueue_db_path="memory://"),
+    config=JobConfig(anvil_db_path="memory://"),
 )
 
 # 2. Add stages
@@ -273,7 +273,7 @@ asyncio.run(main())
 | No External Deps | ✅ (Ray only) | ❌ (Kafka, ZK) | ❌ (HDFS) |
 | Lance Integration | ✅ | ❌ | ❌ |
 | Python-First | ✅ | ❌ | ✅ |
-| Queue Backend | WorkQueue (embedded) | Kafka | HDFS/Kafka |
+| Queue Backend | Anvil (embedded) | Kafka | HDFS/Kafka |
 
 ## Current Implementation Status
 

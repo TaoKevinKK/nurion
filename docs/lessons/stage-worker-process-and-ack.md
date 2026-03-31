@@ -54,7 +54,7 @@ The `_build_event_puts` method was written for the original single-record path. 
 class _ParsedBatch(NamedTuple):
     msg_ids: list[str]
     claim_tokens: list[str]
-    records: list[WorkQueueRecord]       # full list, needed by _build_event_puts
+    records: list[AnvilRecord]       # full list, needed by _build_event_puts
     tables: list[pa.Table]
     parent_split_ids: list[str]
     consumed_payload_keys: list[str]
@@ -67,7 +67,7 @@ Why NamedTuple instead of dataclass: immutable, lightweight, unpacks naturally i
 ### Fix `_build_event_puts` to emit one event per record
 
 ```python
-def _build_event_puts(self, records: list[WorkQueueRecord], ...):
+def _build_event_puts(self, records: list[AnvilRecord], ...):
     for i, record in enumerate(records):
         queue_wait_ms = max(0.0, (now - record.created_at) * 1000.0)
         event = {"event_type": "ack", "queue_wait_ms": queue_wait_ms, ...}

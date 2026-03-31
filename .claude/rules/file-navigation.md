@@ -24,9 +24,9 @@
 | Change source lifecycle | `core/managers/source_manager.py` | |
 | Change sink commit loop | `core/managers/sink_manager.py` | |
 | Change public API exports | `engine/nurion/__init__.py` | Only file users import from |
-| Change WorkQueue hot path | `lib/workqueue-rs/src/queue.rs` | Must stay O(1) — see workqueue.md |
-| Change WorkQueue state ops | `lib/workqueue-rs/src/state.rs` | Atomic with ack |
-| Change WorkQueue GC / recovery | `lib/workqueue-rs/src/gc.rs`, `recovery.rs` | O(n) is OK here |
+| Change Anvil hot path | `lib/anvil-rs/src/queue.rs` | Must stay O(1) — see anvil.md |
+| Change Anvil state ops | `lib/anvil-rs/src/state.rs` | Atomic with ack |
+| Change Anvil GC / recovery | `lib/anvil-rs/src/gc.rs`, `recovery.rs` | O(n) is OK here |
 | Change serve model lifecycle | `_internal/serve/manager.py` | |
 | Change serve GPU allocation | `_internal/serve/allocator.py` | Bin-packing logic |
 | Change serve service discovery | `_internal/serve/registry.py` | Named actor |
@@ -91,13 +91,13 @@
 5. Service discovery → `serve/registry.py`
 6. Test: use `ray_cluster_with_gpus` fixture; monkeypatch `InferenceWorker` with `FakeInferenceServer`
 
-### Modify WorkQueue Hot Path
+### Modify Anvil Hot Path
 
-1. Identify the operation in `lib/workqueue-rs/src/queue.rs` or `state.rs`
+1. Identify the operation in `lib/anvil-rs/src/queue.rs` or `state.rs`
 2. **Verify O(1) complexity**: must not introduce scans; use counters in `meta.rs`
 3. Atomicity: use `WriteBatch` for multi-key updates
-4. Rebuild: `cd lib/workqueue-rs && cargo build` + Python bindings
-5. See `lib/workqueue-rs/AGENTS.md` for full constraints
+4. Rebuild: `cd lib/anvil-rs && cargo build` + Python bindings
+5. See `lib/anvil-rs/AGENTS.md` for full constraints
 
 ### Debug a Stage That's Stuck
 
@@ -132,8 +132,8 @@ cd control && uv run uvicorn control.app:create_app --factory --reload
 # Control: tests
 cd control && uv run pytest tests/ -v --cov=control
 
-# WorkQueue: build Rust
-cd lib/workqueue-rs && cargo build --release
+# Anvil: build Rust
+cd lib/anvil-rs && cargo build --release
 ```
 
 ---
@@ -149,8 +149,8 @@ Check before proposing architectural changes:
 | GPU scheduling | `docs/design/gpu-scheduling-and-routing.md` |
 | LLM inference | `docs/design/llm-inference.md` |
 | Exactly-once semantics (deprecated) | `docs/design/deprecated/exactly-once-semantics.md` |
-| WorkQueue semantics | `docs/design/workqueue-semantics.md` |
-| WorkQueue redesign | `docs/design/work-queue-redesign.md` |
+| Anvil semantics | `docs/design/anvil-semantics.md` |
+| Anvil redesign | `docs/design/work-queue-redesign.md` |
 | MinHash dedup | `docs/design/minhash-dedup.md` |
 | Backpressure | `docs/design/deprecated/partition-backpressure-improvements.md` |
 | Multi-upstream join | `docs/design/multi-upstream-join.md` |
@@ -170,4 +170,4 @@ Check before proposing architectural changes:
 | New common task pattern | This file (`file-navigation.md`) |
 | New test fixture or marker | `test-conventions.md` |
 | Serve component responsibilities change | `serve-module.md` |
-| WorkQueue complexity or schema change | `workqueue.md` |
+| Anvil complexity or schema change | `anvil.md` |

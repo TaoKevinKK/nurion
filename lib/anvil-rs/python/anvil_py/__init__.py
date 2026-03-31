@@ -1,24 +1,32 @@
-"""WorkQueue Python bindings - single-queue multi-consumer work queue."""
+"""Anvil Python bindings - single-queue multi-consumer work queue."""
 
 # Import Rust implementations
-from workqueue_py.workqueue_py import (  # type: ignore
+from anvil_py.anvil_py import (  # type: ignore
     BrokerConfig as _BrokerConfig,
 )
-from workqueue_py.workqueue_py import (
+from anvil_py.anvil_py import (
     BrokerError as _BrokerError,
 )
-from workqueue_py.workqueue_py import (
-    WorkQueueBroker as _WorkQueueBroker,
+from anvil_py.anvil_py import (
+    AnvilBroker as _AnvilBroker,
 )
-from workqueue_py.workqueue_py import (
-    WorkQueueStorageReader as _WorkQueueStorageReader,
+from anvil_py.anvil_py import (
+    AnvilStorageReader as _AnvilStorageReader,
+)
+from anvil_py.anvil_py import (
+    AnvilRustClient as _AnvilRustClient,
+)
+from anvil_py.anvil_py import (
+    RustMessage as _RustMessage,
 )
 
 # Re-export for better IDE support
 BrokerConfig = _BrokerConfig
 BrokerError = _BrokerError
-WorkQueueBroker = _WorkQueueBroker
-WorkQueueStorageReader = _WorkQueueStorageReader
+AnvilBroker = _AnvilBroker
+AnvilStorageReader = _AnvilStorageReader
+AnvilRustClient = _AnvilRustClient
+RustMessage = _RustMessage
 
 
 class BrokerEventHandler:
@@ -35,7 +43,7 @@ class BrokerEventHandler:
                 print(f"Fatal error: {error}")
 
         handler = MyHandler()
-        broker = WorkQueueBroker(config, event_handler=handler)
+        broker = AnvilBroker(config, event_handler=handler)
         broker.start()
     """
 
@@ -71,7 +79,9 @@ class BrokerEventHandler:
 __all__ = [
     "BrokerConfig",
     "BrokerError",
-    "WorkQueueBroker",
-    "WorkQueueStorageReader",
+    "AnvilBroker",
+    "AnvilStorageReader",
+    "AnvilRustClient",
+    "RustMessage",
     "BrokerEventHandler",
 ]

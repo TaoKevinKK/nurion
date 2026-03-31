@@ -1,4 +1,4 @@
-# WorkQueue Semantics: Data Consistency, Fault Tolerance, and Recovery
+# Anvil Semantics: Data Consistency, Fault Tolerance, and Recovery
 
 _Design document - February 2026_
 
@@ -11,7 +11,7 @@ _Design document - February 2026_
 **Created**: 2026-02-02
 **Last Discussion**: 2026-02-02 - Added trade-off analysis and design evolution
 
-This document describes the semantic guarantees and recovery mechanisms for the new WorkQueue-based architecture introduced in PR #35. It supersedes:
+This document describes the semantic guarantees and recovery mechanisms for the new Anvil-based architecture introduced in PR #35. It supersedes:
 - `deprecated/exactly-once-semantics.md` (deprecated)
 - `deprecated/checkpoint-and-recovery.md` (deprecated)
 
@@ -20,7 +20,7 @@ This document describes the semantic guarantees and recovery mechanisms for the 
 ## Table of Contents
 
 1. [Background: Why New Design](#1-background-why-new-design)
-2. [WorkQueue Model Overview](#2-workqueue-model-overview)
+2. [Anvil Model Overview](#2-anvil-model-overview)
 3. [Semantic Guarantees](#3-semantic-guarantees)
 4. [Fault Tolerance Mechanisms](#4-fault-tolerance-mechanisms)
 5. [Recovery Scenarios](#5-recovery-scenarios)
@@ -44,13 +44,13 @@ The previous Tansu/Kafka partition model had fundamental issues:
 | Partition rebalancing | Complex coordinator logic, failure-prone |
 | No true round-robin | Hot partitions cause load imbalance |
 
-### 1.2 New WorkQueue Model
+### 1.2 New Anvil Model
 
-WorkQueue uses a **single-queue multi-consumer** model:
+Anvil uses a **single-queue multi-consumer** model:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                   WorkQueue Server (Rust)                    │
+│                   Anvil Server (Rust)                    │
 │  ┌──────────┐   ┌──────────┐   ┌──────────┐                 │
 │  │ PENDING  │──▶│ CLAIMED  │──▶│  ACKED   │──▶ GC (delete)  │
 │  │ (queue)  │   │(leased)  │   │(retained)│                 │
@@ -74,7 +74,7 @@ Key differences:
 
 ---
 
-## 2. WorkQueue Model Overview
+## 2. Anvil Model Overview
 
 ### 2.1 Message States
 
@@ -186,7 +186,7 @@ True exactly-once requires handling two aspects:
 
 **Option A: Message ID Deduplication**
 
-Store processed message IDs in WorkQueue state:
+Store processed message IDs in Anvil state:
 
 ```python
 async def process_with_dedup(self, msg):
@@ -382,12 +382,12 @@ async def run(self):
 Job-level recovery (resume after driver crash) requires:
 1. Persisting job state (stage progress, queue positions)
 2. Reconstructing stage masters on restart
-3. Reconnecting to existing WorkQueue broker
+3. Reconnecting to existing Anvil broker
 
 **Future design considerations:**
-- WorkQueue data is persisted in SlateDB (survives restarts)
+- Anvil data is persisted in SlateDB (survives restarts)
 - Need to persist: job config, stage topology, completion status
-- Option: Store job state in WorkQueue state API
+- Option: Store job state in Anvil state API
 
 ---
 
@@ -441,11 +441,11 @@ Current behavior: Job fails, need manual restart
 Future: Job-level recovery could resume
 ```
 
-### 5.4 Scenario: WorkQueue Broker Crash
+### 5.4 Scenario: Anvil Broker Crash
 
 ```
 Timeline:
-  t1: WorkQueue broker running
+  t1: Anvil broker running
   t2: [Broker CRASH]
   t3: All workers lose connection
   t4: Workers retry connection (grpc retry)
@@ -495,7 +495,7 @@ Result: Message processed twice
 **Decision**: Use message ID or key-based deduplication instead of offsets.
 
 **Rationale:**
-1. **No global ordering**: WorkQueue doesn't guarantee message order
+1. **No global ordering**: Anvil doesn't guarantee message order
 2. **Work-stealing**: Any worker can process any message
 3. **Simpler model**: No need to track "last processed offset" per partition
 
@@ -518,7 +518,7 @@ Result: Message processed twice
 
 ### 6.4 Why Single Broker Per Job
 
-**Decision**: Each job gets its own WorkQueue broker instance.
+**Decision**: Each job gets its own Anvil broker instance.
 
 **Rationale:**
 1. **Isolation**: Jobs don't interfere with each other
@@ -535,7 +535,7 @@ Result: Message processed twice
 
 ### Phase 1: Core Semantics (Current)
 
-- [x] WorkQueue broker with claim/ack/nack
+- [x] Anvil broker with claim/ack/nack
 - [x] Atomic ack_and_forward
 - [x] State API (state_get/state_put)
 - [x] Automatic claim timeout recovery
@@ -543,7 +543,7 @@ Result: Message processed twice
 
 ### Phase 2: Exactly-Once Support
 
-- [ ] `push_with_dedup` API in WorkQueue server (business_key based dedup)
+- [ ] `push_with_dedup` API in Anvil server (business_key based dedup)
 - [ ] Source-level dedup integration (Lance Source with rowid, Spark Source with user-specified key)
 - [x] Fix `stage_worker.py` to use `ack_and_forward` instead of separate push+ack ✅
 - [ ] Idempotent sink implementations
@@ -700,7 +700,7 @@ def make_split_id(job_id: str, stage_id: str, msg_id: str) -> str:
     return f"{job_id}/{stage_id}/{msg_id}"
 ```
 
-**Finding**: `msg_id` is WorkQueue's internal UUID (non-deterministic), while `split_id` is derived from it. This means:
+**Finding**: `msg_id` is Anvil's internal UUID (non-deterministic), while `split_id` is derived from it. This means:
 - Each message push generates a NEW `msg_id` (UUID)
 - If Source replays data, the SAME data gets a DIFFERENT `msg_id`
 - Split-level dedup using `msg_id` is ineffective for Source replay
@@ -877,9 +877,9 @@ When designing for exactly-once, consider this decision framework:
 ## Appendix A: Configuration Reference
 
 ```python
-# WorkQueue Broker Config
-WorkQueueBrokerManager(
-    db_path="file:///tmp/workqueue",  # SlateDB path (or s3://...)
+# Anvil Broker Config
+AnvilBrokerManager(
+    db_path="file:///tmp/anvil",  # SlateDB path (or s3://...)
     claim_timeout_secs=60.0,           # Claimed message timeout
     recovery_interval_secs=10.0,       # How often to check for timeouts
     acked_retention_secs=3600.0,       # How long to keep acked messages

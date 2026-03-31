@@ -37,7 +37,7 @@ from _internal.core.models import Split
 
 if TYPE_CHECKING:
     from _internal.core.models import QueueEndpoint
-    from _internal.queue import WorkQueueQueueClient
+    from _internal.queue import AnvilQueueClient
 
 
 @runtime_checkable
@@ -70,7 +70,7 @@ class DirectProduceContext:
     write data directly to the output queue.
     """
 
-    queue_client: WorkQueueQueueClient
+    queue_client: AnvilQueueClient
     output_queue_name: str
     broker_endpoint: QueueEndpoint
     stage_id: str

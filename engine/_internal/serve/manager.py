@@ -85,7 +85,7 @@ class ModelServiceManager:
         Args:
             autoscale_config: Default autoscaling config for all models
             detached: Whether this manager is running in detached mode
-            broker_endpoint: Optional WorkQueue broker URL for state persistence
+            broker_endpoint: Optional Anvil broker URL for state persistence
         """
         self._autoscale_config = autoscale_config or ServeAutoscaleConfig()
         self._detached = detached
@@ -98,9 +98,9 @@ class ModelServiceManager:
         # Optional state writer for serve monitoring
         self._state_writer: Optional[Any] = None
         if broker_endpoint:
-            from _internal.queue import WorkQueueQueueClient
+            from _internal.queue import AnvilQueueClient
 
-            self._state_writer = WorkQueueQueueClient(
+            self._state_writer = AnvilQueueClient(
                 broker_endpoint,
                 worker_id="serve-manager",
             )
@@ -141,7 +141,7 @@ class ModelServiceManager:
         return self._registry  # type: ignore[return-value]
 
     def _write_model_state(self, model_id: str, status: str) -> None:
-        """Write model lifecycle metadata into WorkQueue state."""
+        """Write model lifecycle metadata into Anvil state."""
         if self._state_writer is None:
             return
         import time
@@ -500,7 +500,7 @@ def create_manager(
     Args:
         autoscale_config: Default autoscaling config for all models
         detached: If True, create detached actor that survives job exit
-        broker_endpoint: Optional WorkQueue broker URL for state persistence
+        broker_endpoint: Optional Anvil broker URL for state persistence
 
     Returns:
         Actor handle for the ModelServiceManager

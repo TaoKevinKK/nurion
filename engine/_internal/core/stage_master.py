@@ -42,7 +42,7 @@ from _internal.core.models import (
 )
 from _internal.core.split_payload_store import SplitPayloadStore
 from _internal.core.stage_worker import StageWorker
-from _internal.queue import WorkQueueQueueClient
+from _internal.queue import AnvilQueueClient
 from _internal.utils.logging import create_ray_logger
 from _internal.webui.state.schema import encode_json, job_namespace, stage_key, worker_key
 
@@ -102,7 +102,7 @@ class StageMaster:
         self.payload_store = payload_store
 
         # Queue client and output group
-        self._queue_client: Optional[WorkQueueQueueClient] = None
+        self._queue_client: Optional[AnvilQueueClient] = None
 
         # All inter-stage output uses QueueGroup: 1 partition for non-shuffle, N for shuffle
         self._output_group_name = f"{job_id}_{self.stage_id}_output"
@@ -145,9 +145,9 @@ class StageMaster:
         assert self.runtime.broker_endpoint is not None, "broker_endpoint is required"
 
         broker_url = f"{self.runtime.broker_endpoint.host}:{self.runtime.broker_endpoint.port}"
-        from _internal.queue.workqueue import _compute_heartbeat_interval
+        from _internal.queue.anvil import _compute_heartbeat_interval
 
-        self._queue_client = WorkQueueQueueClient(
+        self._queue_client = AnvilQueueClient(
             broker_url,
             worker_id=f"master-{self.stage_id}",
             heartbeat_interval_secs=_compute_heartbeat_interval(self.runtime.claim_timeout_secs),
@@ -442,7 +442,7 @@ class StageMaster:
             return False
 
     def _write_worker_state(self, worker_id: str, status: str, **extra: Any) -> None:
-        """Write worker lifecycle metadata into WorkQueue state."""
+        """Write worker lifecycle metadata into Anvil state."""
         if not self._queue_client:
             return
         data: Dict[str, Any] = {
@@ -482,7 +482,7 @@ class StageMaster:
                 time.sleep(0.5 * (attempt + 1))
 
     def _write_stage_state(self, status: str) -> None:
-        """Write stage status into WorkQueue state."""
+        """Write stage status into Anvil state."""
         if not self._queue_client:
             return
         operator_class = self.stage.operator_config.operator_class
@@ -552,7 +552,7 @@ class StageMaster:
 
             await asyncio.sleep(poll_interval)
 
-    def get_queue_client(self) -> Optional[WorkQueueQueueClient]:
+    def get_queue_client(self) -> Optional[AnvilQueueClient]:
         return self._queue_client
 
     def get_output_group_name(self) -> str:

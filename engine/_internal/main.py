@@ -213,10 +213,10 @@ def run_job(
 
 @cli.command(name="history-server")
 @click.option(
-    "--workqueue-db-path",
+    "--anvil-db-path",
     "-s",
     required=True,
-    help="WorkQueue storage path (e.g., file:///tmp/workqueue.db)",
+    help="Anvil storage path (e.g., file:///tmp/anvil.db)",
 )
 @click.option(
     "--host",
@@ -236,11 +236,11 @@ def run_job(
     is_flag=True,
     help="Enable auto-reload for development",
 )
-def history_server_cmd(workqueue_db_path: str, host: str, port: int, reload: bool):
+def history_server_cmd(anvil_db_path: str, host: str, port: int, reload: bool):
     """Start History Server for viewing completed jobs.
 
     Example:
-        nurion history-server -s file:///tmp/workqueue.db -p 8080
+        nurion history-server -s file:///tmp/anvil.db -p 8080
     """
     from _internal.webui.history_server import history_server as hs_func
 
@@ -249,8 +249,8 @@ def history_server_cmd(workqueue_db_path: str, host: str, port: int, reload: boo
 
     sys.argv = [
         "history-server",
-        "--workqueue-db-path",
-        workqueue_db_path,
+        "--anvil-db-path",
+        anvil_db_path,
         "--host",
         host,
         "--port",
@@ -260,7 +260,7 @@ def history_server_cmd(workqueue_db_path: str, host: str, port: int, reload: boo
         sys.argv.append("--reload")
 
     assert hs_func.callback is not None
-    hs_func.callback(workqueue_db_path, host, port, reload)
+    hs_func.callback(anvil_db_path, host, port, reload)
 
 
 def main():

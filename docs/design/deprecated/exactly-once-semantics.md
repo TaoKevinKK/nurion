@@ -1,8 +1,8 @@
 # Exactly-Once Semantics Design
 
 > ⚠️ **DEPRECATED** - This document describes the offset-based exactly-once design for the old Tansu/Kafka partition model.
-> With the new WorkQueue (single-queue multi-consumer) model introduced in PR #35, this design is no longer applicable.
-> See `workqueue-semantics.md` for the new design.
+> With the new Anvil (single-queue multi-consumer) model introduced in PR #35, this design is no longer applicable.
+> See `anvil-semantics.md` for the new design.
 >
 > _Deprecated: 2026-02-02_
 
@@ -12,14 +12,14 @@ _Design document - January 2026_
 
 ## Implementation Status (Updated 2026-03-24)
 
-**All components below have been removed.** The offset-based dedup model was replaced by WorkQueue
-claim/ack semantics in PR #35. See `workqueue-semantics.md` for the current design.
+**All components below have been removed.** The offset-based dedup model was replaced by Anvil
+claim/ack semantics in PR #35. See `anvil-semantics.md` for the current design.
 
 | Component | Status | Notes |
 |-----------|--------|-------|
 | **SemanticGuarantee Enum** | 🗑️ Removed | No enum exists; at-least-once via claim/ack is the default |
 | **Offset-based Deduplication** | 🗑️ Removed | No `last_offset` or `is_duplicate()` in Operator |
-| **State Store Integration** | ✅ Replaced | State via WorkQueue `state_get`/`state_put` (not local SlateDB) |
+| **State Store Integration** | ✅ Replaced | State via Anvil `state_get`/`state_put` (not local SlateDB) |
 | **Config Propagation** | 🗑️ Removed | No `semantic_guarantee` field in JobConfig |
 | **Fault Injection Framework** | ⚠️ Partial | `FAULT_BEFORE_PROCESS`/`FAULT_AFTER_PROCESS` work; `FAULT_BEFORE_MARK_PROCESSED` is dead code |
 | **Integration Tests** | 🗑️ Removed | Old offset-based tests no longer exist |

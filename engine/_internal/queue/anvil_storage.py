@@ -12,19 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""WorkQueue storage reader (pyO3 direct access)."""
+"""Anvil storage reader (pyO3 direct access)."""
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from workqueue_py import WorkQueueStorageReader as _WorkQueueStorageReader
+from anvil_py import AnvilStorageReader as _AnvilStorageReader
 
 from _internal.core.models import QueueStats
 
 
-class WorkQueueStorageReader:
-    """Direct WorkQueue storage reader (no RPC).
+class AnvilStorageReader:
+    """Direct Anvil storage reader (no RPC).
 
     Uses pyO3 bindings to access the underlying SlateDB storage.
     """
@@ -32,12 +32,12 @@ class WorkQueueStorageReader:
     def __init__(
         self,
         db_path: Optional[str] = None,
-        reader: Optional[_WorkQueueStorageReader] = None,
+        reader: Optional[_AnvilStorageReader] = None,
     ) -> None:
         if reader is None:
             if db_path is None:
                 raise ValueError("db_path is required when reader is not provided")
-            self._reader = _WorkQueueStorageReader(db_path)
+            self._reader = _AnvilStorageReader(db_path)
         else:
             self._reader = reader
 

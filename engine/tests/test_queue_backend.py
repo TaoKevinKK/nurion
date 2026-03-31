@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for WorkQueue backend.
+"""Tests for Anvil backend.
 
-This module contains unit tests for WorkQueueBrokerManager + WorkQueueQueueClient:
+This module contains unit tests for AnvilBrokerManager + AnvilQueueClient:
 - Single-queue multi-consumer model
 - claim/ack operations
 - ack_and_forward for exactly-once semantics
@@ -26,30 +26,29 @@ Test categories:
 4. Edge cases: empty queues, concurrent access
 """
 
-import grpc
 import pytest
 
-from _internal.queue import WorkQueueQueueClient
+from _internal.queue import AnvilQueueClient
 
 
 # ============================================================================
-# WorkQueue Tests (Broker + Client)
-# Uses workqueue_broker_and_client fixture from conftest.py
+# Anvil Tests (Broker + Client)
+# Uses anvil_broker_and_client fixture from conftest.py
 # ============================================================================
 
 
 @pytest.mark.slow
-class TestWorkQueueBrokerManager:
-    """Tests for WorkQueueBrokerManager (QueueBroker implementation)."""
+class TestAnvilBrokerManager:
+    """Tests for AnvilBrokerManager (QueueBroker implementation)."""
 
-    def test_start_stop(self, workqueue_broker_and_client):
+    def test_start_stop(self, anvil_broker_and_client):
         """Test broker lifecycle."""
-        broker, client = workqueue_broker_and_client
+        broker, client = anvil_broker_and_client
         assert broker.is_running()
 
-    def test_get_broker_url(self, workqueue_broker_and_client):
+    def test_get_broker_url(self, anvil_broker_and_client):
         """Test getting broker URL."""
-        broker, client = workqueue_broker_and_client
+        broker, client = anvil_broker_and_client
         broker_url = broker.get_broker_url()
         assert ":" in broker_url
         port = int(broker_url.split(":")[1])
@@ -57,34 +56,34 @@ class TestWorkQueueBrokerManager:
 
 
 @pytest.mark.slow
-class TestWorkQueueQueueClient:
-    """Tests for WorkQueueQueueClient (claim/ack operations)."""
+class TestAnvilQueueClient:
+    """Tests for AnvilQueueClient (claim/ack operations)."""
 
-    def test_health_check(self, workqueue_broker_and_client):
+    def test_health_check(self, anvil_broker_and_client):
         """Test client health check."""
-        broker, client = workqueue_broker_and_client
+        broker, client = anvil_broker_and_client
         assert client.health_check()
 
-    def test_create_queue(self, workqueue_broker_and_client):
+    def test_create_queue(self, anvil_broker_and_client):
         """Test queue creation."""
-        broker, client = workqueue_broker_and_client
+        broker, client = anvil_broker_and_client
         client.create_queue("test-queue")
         # Should not raise
 
-    def test_push_claim_ack(self, workqueue_broker_and_client):
+    def test_push_claim_ack(self, anvil_broker_and_client):
         """Test push, claim, and ack."""
-        broker, client = workqueue_broker_and_client
+        broker, client = anvil_broker_and_client
         queue = "test-queue"
         client.create_queue(queue)
 
         # Push
-        msg_id = client.push(queue, b"hello workqueue")
+        msg_id = client.push(queue, b"hello anvil")
         assert msg_id  # Should be a non-empty string
 
         # Claim
         records = client.claim(queue, batch_size=1, timeout_ms=1000)
         assert len(records) == 1
-        assert records[0].value == b"hello workqueue"
+        assert records[0].value == b"hello anvil"
         assert records[0].msg_id == msg_id
         assert records[0].claim_token
 
@@ -100,48 +99,48 @@ class TestWorkQueueQueueClient:
         records = client.claim(queue, batch_size=1, timeout_ms=100)
         assert len(records) == 0
 
-    def test_ack_requires_claim_token(self, workqueue_broker_and_client):
+    def test_ack_requires_claim_token(self, anvil_broker_and_client):
         """Ack should require claim_token."""
-        broker, client = workqueue_broker_and_client
+        broker, client = anvil_broker_and_client
         queue = "test-queue"
         client.create_queue(queue)
 
-        client.push(queue, b"hello workqueue")
+        client.push(queue, b"hello anvil")
         records = client.claim(queue, batch_size=1, timeout_ms=1000)
         assert len(records) == 1
 
         with pytest.raises(ValueError):
             client.ack(queue, [records[0].msg_id])
 
-    def test_ack_rejects_wrong_claim_token(self, workqueue_broker_and_client):
+    def test_ack_rejects_wrong_claim_token(self, anvil_broker_and_client):
         """Ack should reject invalid claim_token."""
-        broker, client = workqueue_broker_and_client
+        broker, client = anvil_broker_and_client
         queue = "test-queue"
         client.create_queue(queue)
 
-        client.push(queue, b"hello workqueue")
+        client.push(queue, b"hello anvil")
         records = client.claim(queue, batch_size=1, timeout_ms=1000)
         assert len(records) == 1
 
-        with pytest.raises(grpc.RpcError):
+        with pytest.raises(RuntimeError):
             client.ack(queue, [records[0].msg_id], claim_tokens=["bad-token"])
 
-    def test_ack_rejects_token_length_mismatch(self, workqueue_broker_and_client):
+    def test_ack_rejects_token_length_mismatch(self, anvil_broker_and_client):
         """Ack should reject claim_token length mismatch."""
-        broker, client = workqueue_broker_and_client
+        broker, client = anvil_broker_and_client
         queue = "test-queue"
         client.create_queue(queue)
 
-        client.push(queue, b"hello workqueue")
+        client.push(queue, b"hello anvil")
         records = client.claim(queue, batch_size=1, timeout_ms=1000)
         assert len(records) == 1
 
         with pytest.raises(ValueError):
             client.ack(queue, [records[0].msg_id], claim_tokens=["a", "b"])
 
-    def test_push_batch(self, workqueue_broker_and_client):
+    def test_push_batch(self, anvil_broker_and_client):
         """Test batch push."""
-        broker, client = workqueue_broker_and_client
+        broker, client = anvil_broker_and_client
         queue = "test-queue"
         client.create_queue(queue)
 
@@ -154,9 +153,9 @@ class TestWorkQueueQueueClient:
         records = client.claim(queue, batch_size=10, timeout_ms=1000)
         assert len(records) == 5
 
-    def test_nack_returns_to_queue(self, workqueue_broker_and_client):
+    def test_nack_returns_to_queue(self, anvil_broker_and_client):
         """Test nack returns message to queue."""
-        broker, client = workqueue_broker_and_client
+        broker, client = anvil_broker_and_client
         queue = "test-queue"
         client.create_queue(queue)
 
@@ -179,9 +178,9 @@ class TestWorkQueueQueueClient:
         assert len(records) == 1
         assert records[0].msg_id == msg_id
 
-    def test_nack_rejects_wrong_claim_token(self, workqueue_broker_and_client):
+    def test_nack_rejects_wrong_claim_token(self, anvil_broker_and_client):
         """Nack should reject invalid claim_token."""
-        broker, client = workqueue_broker_and_client
+        broker, client = anvil_broker_and_client
         queue = "test-queue"
         client.create_queue(queue)
 
@@ -189,12 +188,12 @@ class TestWorkQueueQueueClient:
         records = client.claim(queue, batch_size=1, timeout_ms=1000)
         assert len(records) == 1
 
-        with pytest.raises(grpc.RpcError):
+        with pytest.raises(RuntimeError):
             client.nack(queue, [records[0].msg_id], claim_tokens=["bad-token"])
 
-    def test_nack_rejects_token_length_mismatch(self, workqueue_broker_and_client):
+    def test_nack_rejects_token_length_mismatch(self, anvil_broker_and_client):
         """Nack should reject claim_token length mismatch."""
-        broker, client = workqueue_broker_and_client
+        broker, client = anvil_broker_and_client
         queue = "test-queue"
         client.create_queue(queue)
 
@@ -205,9 +204,9 @@ class TestWorkQueueQueueClient:
         with pytest.raises(ValueError):
             client.nack(queue, [records[0].msg_id], claim_tokens=["a", "b"])
 
-    def test_claim_token_changes_after_nack(self, workqueue_broker_and_client):
+    def test_claim_token_changes_after_nack(self, anvil_broker_and_client):
         """Reclaim should issue a new claim_token."""
-        broker, client = workqueue_broker_and_client
+        broker, client = anvil_broker_and_client
         queue = "test-queue"
         client.create_queue(queue)
 
@@ -221,9 +220,9 @@ class TestWorkQueueQueueClient:
         assert len(records2) == 1
         assert records2[0].claim_token != token1
 
-    def test_ack_rejects_stale_token_after_reclaim(self, workqueue_broker_and_client):
+    def test_ack_rejects_stale_token_after_reclaim(self, anvil_broker_and_client):
         """Ack with stale claim_token should be rejected after re-claim."""
-        broker, client = workqueue_broker_and_client
+        broker, client = anvil_broker_and_client
         queue = "test-queue"
         client.create_queue(queue)
 
@@ -237,12 +236,12 @@ class TestWorkQueueQueueClient:
         records2 = client.claim(queue, batch_size=1, timeout_ms=1000)
         assert len(records2) == 1
 
-        with pytest.raises(grpc.RpcError):
+        with pytest.raises(RuntimeError):
             client.ack(queue, [msg_id], claim_tokens=[token1])
 
-    def test_get_stats(self, workqueue_broker_and_client):
+    def test_get_stats(self, anvil_broker_and_client):
         """Test getting queue statistics."""
-        broker, client = workqueue_broker_and_client
+        broker, client = anvil_broker_and_client
         queue = "test-queue"
         client.create_queue(queue)
 
@@ -265,12 +264,12 @@ class TestWorkQueueQueueClient:
 
 
 @pytest.mark.slow
-class TestWorkQueueAckAndForward:
+class TestAnvilAckAndForward:
     """Tests for ack_and_forward operation."""
 
-    def test_ack_and_forward_basic(self, workqueue_broker_and_client):
+    def test_ack_and_forward_basic(self, anvil_broker_and_client):
         """Test atomic ack and forward operation."""
-        broker, client = workqueue_broker_and_client
+        broker, client = anvil_broker_and_client
         upstream = "upstream-queue"
         downstream = "downstream-queue"
         client.create_queue(upstream)
@@ -303,9 +302,9 @@ class TestWorkQueueAckAndForward:
         assert len(downstream_records) == 1
         assert downstream_records[0].value == b"output data"
 
-    def test_ack_and_forward_requires_claim_token(self, workqueue_broker_and_client):
+    def test_ack_and_forward_requires_claim_token(self, anvil_broker_and_client):
         """Ack and forward should require claim_token."""
-        broker, client = workqueue_broker_and_client
+        broker, client = anvil_broker_and_client
         upstream = "upstream-queue"
         downstream = "downstream-queue"
         client.create_queue(upstream)
@@ -324,9 +323,9 @@ class TestWorkQueueAckAndForward:
                 downstream_payloads=[b"output data"],
             )
 
-    def test_ack_and_forward_rejects_token_length_mismatch(self, workqueue_broker_and_client):
+    def test_ack_and_forward_rejects_token_length_mismatch(self, anvil_broker_and_client):
         """Ack and forward should reject claim_token length mismatch."""
-        broker, client = workqueue_broker_and_client
+        broker, client = anvil_broker_and_client
         upstream = "upstream-queue"
         downstream = "downstream-queue"
         client.create_queue(upstream)
@@ -347,15 +346,15 @@ class TestWorkQueueAckAndForward:
 
 
 @pytest.mark.slow
-class TestWorkQueueMultiClient:
+class TestAnvilMultiClient:
     """Tests for multiple clients connecting to same broker."""
 
-    def test_two_clients_communication(self, workqueue_broker_and_client):
+    def test_two_clients_communication(self, anvil_broker_and_client):
         """Test two clients producing and consuming."""
-        broker, client1 = workqueue_broker_and_client
+        broker, client1 = anvil_broker_and_client
 
         # Create second client
-        client2 = WorkQueueQueueClient(broker.get_broker_url(), worker_id="client-2")
+        client2 = AnvilQueueClient(broker.get_broker_url(), worker_id="client-2")
         client2.start()
 
         try:

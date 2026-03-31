@@ -76,8 +76,8 @@ class SparkSourceConfig(OperatorConfig):
     parallelism: Optional[int] = None
 
     # SourceConfig fields for master
-    workqueue_db_path: str = "memory://"
-    """WorkQueue storage path (memory://, file://)."""
+    anvil_db_path: str = "memory://"
+    """Anvil storage path (memory://, file://)."""
 
     def create_source(self) -> "SparkSplitPlanner":
         """Create a split planner for this Spark source."""

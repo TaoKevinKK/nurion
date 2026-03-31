@@ -27,7 +27,7 @@ StageMaster StageMaster StageMaster
 - **StageWorker**: Stateless Ray Actor executing Operator logic
 - **Operator**: Data processing logic (configured via `OperatorConfig` subclasses)
 - **Split/SplitPayload**: Metadata and data for a unit of work
-- **Queue Backend**: WorkQueue (embedded broker; `memory://` for tests, `file://` for persistence)
+- **Queue Backend**: Anvil (embedded broker; `memory://` for tests, `file://` for persistence)
 
 **Data Flow**: Pull-based, queue-driven. Workers pull from upstream queue, process, write to own queue. Natural backpressure via queue lag.
 
@@ -35,7 +35,7 @@ StageMaster StageMaster StageMaster
 
 - `_internal/core/` — Job, Stage, Operator, StageMaster, StageWorker, managers/
 - `_internal/operators/` — sources/, sinks/, map.py, filter.py, http/, llm/, dedup/, minhash/, video.py
-- `_internal/queue/` — WorkQueue backend (embedded broker)
+- `_internal/queue/` — Anvil backend (embedded broker)
 - `_internal/runtime/` — RayJobRunner, autoscaler, backpressure
 - `_internal/serve/` — Model serving (manager, pool, worker, allocator, client)
 - `_internal/webui/` — Debug UI (see `_internal/webui/README.md`)
@@ -95,5 +95,5 @@ StageMaster StageMaster StageMaster
 ## Quick Notes
 
 - Pull-based, queue-driven execution; workers are stateless.
-- WorkQueue is embedded; use `workqueue_db_path="memory://"` for tests.
+- Anvil is embedded; use `anvil_db_path="memory://"` for tests.
 - Use `create_ray_logger()` for logging.

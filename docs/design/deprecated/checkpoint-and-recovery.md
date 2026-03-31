@@ -1,8 +1,8 @@
 # Checkpoint, Recovery, and Stream-Based Architecture Design
 
 > ⚠️ **DEPRECATED** - This document describes the checkpoint/recovery design for the old Tansu/Kafka partition model.
-> With the new WorkQueue (single-queue multi-consumer) model introduced in PR #35, this design is no longer applicable.
-> See `workqueue-semantics.md` for the new design.
+> With the new Anvil (single-queue multi-consumer) model introduced in PR #35, this design is no longer applicable.
+> See `anvil-semantics.md` for the new design.
 >
 > _Deprecated: 2026-02-02_
 
@@ -12,21 +12,21 @@ _Design discussion summary - December 5-6, 2025_
 
 ## ⚠️ Implementation Status (Updated 2026-03-24)
 
-**All components below have been removed.** The Tansu/Kafka partition model was replaced by WorkQueue
-(RocksDB-backed Rust queue) in PR #35. See `workqueue-semantics.md` for the current design.
+**All components below have been removed.** The Tansu/Kafka partition model was replaced by Anvil
+(RocksDB-backed Rust queue) in PR #35. See `anvil-semantics.md` for the current design.
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| **Queue Backend Interface** | 🗑️ Removed | Tansu/Kafka code deleted; replaced by `WorkQueueBrokerManager` |
-| **Worker Pull Model** | ✅ Replaced | Workers pull via WorkQueue `claim()` / `claim_from_group()` |
+| **Queue Backend Interface** | 🗑️ Removed | Tansu/Kafka code deleted; replaced by `AnvilBrokerManager` |
+| **Worker Pull Model** | ✅ Replaced | Workers pull via Anvil `claim()` / `claim_from_group()` |
 | **Offset Tracking** | 🗑️ Removed | Replaced by per-message `ack` semantics |
 | **Tansu Integration** | 🗑️ Removed | No Tansu code exists in codebase |
 | **Checkpoint Storage** | 🗑️ Removed | No `FsspecCheckpointStorage` exists |
 | **Checkpoint Saving** | ❌ Never implemented | |
-| **Checkpoint Recovery** | ❌ Never implemented | Within-run recovery via WorkQueue claim timeout |
+| **Checkpoint Recovery** | ❌ Never implemented | Within-run recovery via Anvil claim timeout |
 | **Multi-Partition** | 🗑️ Removed | Replaced by QueueGroup abstraction |
 
-**Current state:** WorkQueue provides within-run recovery (expired claims re-enqueued).
+**Current state:** Anvil provides within-run recovery (expired claims re-enqueued).
 No cross-run checkpoint/resume capability exists.
 - Offset commit after processing (for idempotency within a run)
 

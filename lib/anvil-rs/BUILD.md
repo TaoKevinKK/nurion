@@ -1,4 +1,4 @@
-# workqueue-rs Build Instructions
+# anvil-rs Build Instructions
 
 ## Prerequisites
 

@@ -17,7 +17,7 @@
 Tests the full pipeline flow:
 1. Create Iceberg table via control REST catalog
 2. Write test data to table
-3. Run IcebergSource through StageMaster with WorkQueue queue
+3. Run IcebergSource through StageMaster with Anvil queue
 4. Verify data is processed correctly
 """
 
@@ -149,17 +149,15 @@ class TestIcebergSource:
 
 
 class TestIcebergPipeline:
-    """Integration tests for full Iceberg pipeline with WorkQueue."""
+    """Integration tests for full Iceberg pipeline with Anvil."""
 
     @pytest.mark.asyncio
-    async def test_full_pipeline_with_queue(
-        self, iceberg_test_table, ray_cluster, workqueue_backend
-    ):
-        """Test complete IcebergSource pipeline with WorkQueue queue.
+    async def test_full_pipeline_with_queue(self, iceberg_test_table, ray_cluster, anvil_backend):
+        """Test complete IcebergSource pipeline with Anvil queue.
 
         This test verifies the full flow:
         1. Create IcebergSource stage
-        2. Start StageMaster with WorkQueue
+        2. Start StageMaster with Anvil
         3. Process data through queue
         4. Verify completion
         """
@@ -221,7 +219,7 @@ class TestIcebergPipeline:
         runtime = StageRuntime(
             broker_endpoint=QueueEndpoint(
                 host="localhost",
-                port=workqueue_backend.port,
+                port=anvil_backend.port,
                 storage_url="memory://",
             ),
         )

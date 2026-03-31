@@ -167,8 +167,8 @@
                     <protocArtifact>com.google.protobuf:protoc:4.27.1:exe:${os.detected.classifier}</protocArtifact>
                     <pluginId>grpc-java</pluginId>
                     <pluginArtifact>io.grpc:protoc-gen-grpc-java:1.56.0:exe:${os.detected.classifier}</pluginArtifact>
-                    <!-- Use workqueue-rs proto directly -->
-                    <protoSourceRoot>${project.basedir}/../../../workqueue-rs/proto</protoSourceRoot>
+                    <!-- Use anvil-rs proto directly -->
+                    <protoSourceRoot>${project.basedir}/../../../anvil-rs/proto</protoSourceRoot>
                 </configuration>
                 <executions>
                     <execution>

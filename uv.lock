@@ -740,7 +740,7 @@ dependencies = [
     { name = "fsspec", extra = ["s3"] },
     { name = "grpcio" },
     { name = "jinja2" },
-    { name = "nurion-workqueue" },
+    { name = "nurion-anvil" },
     { name = "pandas" },
     { name = "prometheus-client" },
     { name = "py-spy" },
@@ -801,8 +801,8 @@ requires-dist = [
     { name = "fsspec", extras = ["s3"], specifier = ">=2024.6.0" },
     { name = "grpcio", specifier = ">=1.76.0" },
     { name = "jinja2", specifier = ">=3.1.0" },
+    { name = "nurion-anvil", editable = "lib/anvil-rs" },
     { name = "nurion-raydp", marker = "extra == 'spark'", editable = "lib/raydp" },
-    { name = "nurion-workqueue", editable = "lib/workqueue-rs" },
     { name = "pandas", specifier = ">=2.0.0" },
     { name = "prometheus-client", specifier = ">=0.20.0" },
     { name = "py-spy", specifier = ">=0.4.1" },
@@ -1837,6 +1837,23 @@ dev = [
 dev = [{ name = "pandas", specifier = ">=2.3.3" }]
 
 [[package]]
+name = "nurion-anvil"
+version = "0.1.0"
+source = { editable = "lib/anvil-rs" }
+dependencies = [
+    { name = "grpcio" },
+    { name = "grpcio-tools" },
+    { name = "protobuf" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "grpcio", specifier = ">=1.68.0" },
+    { name = "grpcio-tools", specifier = ">=1.68.0" },
+    { name = "protobuf", specifier = ">=5.0.0" },
+]
+
+[[package]]
 name = "nurion-raydp"
 version = "1.7.0"
 source = { editable = "lib/raydp" }
@@ -1853,23 +1870,6 @@ requires-dist = [
     { name = "pyarrow", specifier = ">=8.0.0" },
     { name = "pyspark", specifier = ">=3.4.0" },
     { name = "ray", extras = ["default"], specifier = ">=2.0.0" },
-]
-
-[[package]]
-name = "nurion-workqueue"
-version = "0.1.0"
-source = { editable = "lib/workqueue-rs" }
-dependencies = [
-    { name = "grpcio" },
-    { name = "grpcio-tools" },
-    { name = "protobuf" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "grpcio", specifier = ">=1.68.0" },
-    { name = "grpcio-tools", specifier = ">=1.68.0" },
-    { name = "protobuf", specifier = ">=5.0.0" },
 ]
 
 [[package]]

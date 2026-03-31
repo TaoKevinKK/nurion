@@ -72,9 +72,9 @@ async def process_split(self, split, payload): yield p1; yield p2  # async gener
 
 ---
 
-## Persistent State (WorkQueue model)
+## Persistent State (Anvil model)
 
-State is stored in WorkQueue (not local files). Access via `runtime.broker_endpoint`:
+State is stored in Anvil (not local files). Access via `runtime.broker_endpoint`:
 - `state_get(namespace, key)` / `state_put(namespace, key, value)`
 - Atomic with ack: `ack_and_forward` commits ack + state update in one WriteBatch
 - Do NOT use local files, instance variables, or external DBs for cross-split state

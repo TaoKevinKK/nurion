@@ -42,7 +42,7 @@ def _find_available_port(host: str, start_port: int, max_tries: int = 200) -> in
 class EmbeddedWebUIServer:
     """Run WebUI inside the job driver process.
 
-    Reads metadata directly from WorkQueue storage (pyO3) via JobStateManager.
+    Reads metadata directly from Anvil storage (pyO3) via JobStateManager.
     """
 
     def __init__(

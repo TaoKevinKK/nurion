@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from _internal.core.models import QueueEndpoint, QueueStats
-from _internal.queue import WorkQueueQueueClient
+from _internal.queue import AnvilQueueClient
 
 
 @dataclass(frozen=True)
@@ -58,7 +58,7 @@ class StageQueueConfig:
 
 
 class QueueStatsClient:
-    """Thin wrapper for WorkQueue stats queries.
+    """Thin wrapper for Anvil stats queries.
 
     Supports both single-queue stats and QueueGroup aggregate stats,
     dispatched automatically via QueueRef.is_group.
@@ -66,9 +66,9 @@ class QueueStatsClient:
 
     def __init__(self, endpoint: QueueEndpoint, claim_timeout_secs: float) -> None:
         broker_url = f"{endpoint.host}:{endpoint.port}"
-        from _internal.queue.workqueue import _compute_heartbeat_interval
+        from _internal.queue.anvil import _compute_heartbeat_interval
 
-        self._client = WorkQueueQueueClient(
+        self._client = AnvilQueueClient(
             broker_url,
             worker_id="metrics",
             heartbeat_interval_secs=_compute_heartbeat_interval(claim_timeout_secs),

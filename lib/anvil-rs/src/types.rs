@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Core data structures for WorkQueue
+// Core data structures for Anvil
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -186,9 +186,9 @@ impl QueueGroupMeta {
     }
 }
 
-/// WorkQueue server configuration
+/// Anvil server configuration
 #[derive(Debug, Clone)]
-pub struct WorkQueueConfig {
+pub struct AnvilConfig {
     /// Host to bind to
     pub host: String,
     /// Port to bind to (0 for auto-assign)
@@ -208,12 +208,12 @@ pub struct WorkQueueConfig {
     pub gc_interval_secs: f64,
 }
 
-impl Default for WorkQueueConfig {
+impl Default for AnvilConfig {
     fn default() -> Self {
         Self {
             host: "0.0.0.0".to_string(),
             port: 0,
-            db_path: "memory://workqueue".to_string(),
+            db_path: "memory://anvil".to_string(),
             claim_timeout_secs: 60.0,
             recovery_interval_secs: 10.0,
             max_queue_depth: 0,
@@ -265,11 +265,11 @@ mod tests {
 
     #[test]
     fn test_config_default() {
-        let config = WorkQueueConfig::default();
+        let config = AnvilConfig::default();
 
         assert_eq!(config.host, "0.0.0.0");
         assert_eq!(config.port, 0);
-        assert_eq!(config.db_path, "memory://workqueue");
+        assert_eq!(config.db_path, "memory://anvil");
         assert_eq!(config.claim_timeout_secs, 60.0);
         assert_eq!(config.recovery_interval_secs, 10.0);
         assert_eq!(config.max_queue_depth, 0);

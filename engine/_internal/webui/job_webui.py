@@ -20,7 +20,7 @@ from _internal.utils.logging import create_ray_logger
 
 if TYPE_CHECKING:
     from _internal.runtime.ray_runner import RayJobRunner
-    from _internal.webui.state.writer import WorkQueueStateWriter
+    from _internal.webui.state.writer import AnvilStateWriter
 
 
 class JobWebUI:
@@ -28,19 +28,19 @@ class JobWebUI:
 
     This component stores job configuration at startup.
 
-    Note: Configuration is stored via WorkQueue state writer (gRPC).
+    Note: Configuration is stored via Anvil state writer (gRPC).
     """
 
     def __init__(
         self,
         job_runner: "RayJobRunner",
-        state_writer: Optional["WorkQueueStateWriter"] = None,
+        state_writer: Optional["AnvilStateWriter"] = None,
     ):
         """Initialize job WebUI.
 
         Args:
             job_runner: RayJobRunner instance
-            state_writer: WorkQueue state writer for metadata
+            state_writer: Anvil state writer for metadata
         """
         self.job_runner = job_runner
         self.job_id = job_runner.job.job_id
@@ -78,8 +78,8 @@ class JobWebUI:
             config_data = {
                 "job_config": {
                     "job_id": job_runner.job.job_id,
-                    "queue_type": "workqueue",
-                    "workqueue_db_path": job_runner.workqueue_db_path,
+                    "queue_type": "anvil",
+                    "anvil_db_path": job_runner.anvil_db_path,
                 },
                 "stage_configs": stage_configs,
                 "dag_edges": job_runner.job.dag_edges,
@@ -92,7 +92,7 @@ class JobWebUI:
 
             if self.state_writer:
                 self.state_writer.write_config(config_data)
-                self.logger.debug("Configuration stored in WorkQueue state")
+                self.logger.debug("Configuration stored in Anvil state")
 
         except Exception as e:
             self.logger.warning(f"Failed to store configuration: {e}")

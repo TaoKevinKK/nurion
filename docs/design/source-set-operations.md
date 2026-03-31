@@ -396,7 +396,7 @@ Three layers: Unit Tests (pure logic, no Ray), Integration Tests (Lance datasets
 
 ### Layer 1: Unit Tests — `tests/test_source_set_operations.py`
 
-Pure logic tests with no Ray/WorkQueue dependency. Validate planner and operator correctness.
+Pure logic tests with no Ray/Anvil dependency. Validate planner and operator correctness.
 
 #### Union Tests
 
@@ -458,14 +458,14 @@ class TestAntiJoinOperator:
 
 ### Layer 2: Integration Tests — `tests/test_integration_source_set_ops.py`
 
-Real Lance datasets + StageMaster + WorkQueue. Validates the end-to-end source stage.
+Real Lance datasets + StageMaster + Anvil. Validates the end-to-end source stage.
 
 **Marker**: `pytestmark = pytest.mark.integration`
 
 **Fixtures**:
 - `lance_dataset_a` / `lance_dataset_b` / `lance_dataset_c`: local Lance datasets with identical schemas
 - `lance_dataset_different_schema`: Lance dataset with a different schema
-- `workqueue_backend`, `ray_cluster`: from `conftest.py`
+- `anvil_backend`, `ray_cluster`: from `conftest.py`
 
 | Test | Description | Assertions |
 |------|-------------|------------|
@@ -480,7 +480,7 @@ Real Lance datasets + StageMaster + WorkQueue. Validates the end-to-end source s
 class TestLanceUnionIntegration:
     @pytest.mark.asyncio
     async def test_union_lance_sources_full_pipeline(
-        self, lance_dataset_a, lance_dataset_b, ray_cluster, workqueue_backend
+        self, lance_dataset_a, lance_dataset_b, ray_cluster, anvil_backend
     ):
         """Union of two Lance tables produces correct total rows."""
         source_stage = Stage(
@@ -536,7 +536,7 @@ class TestUnionDistributed:
 
         job = Job(
             job_id=f"test_union_{uuid.uuid4().hex[:8]}",
-            config=JobConfig(workqueue_db_path="memory://"),
+            config=JobConfig(anvil_db_path="memory://"),
         )
         job.add_stage(Stage(
             stage_id="source",
@@ -577,7 +577,7 @@ class TestUnionDistributed:
 | File | Layer | Marker | Dependencies | Tests |
 |------|-------|--------|--------------|-------|
 | `tests/test_source_set_operations.py` | Unit | (none) | pyarrow only | ~20 |
-| `tests/test_integration_source_set_ops.py` | Integration | `integration` | Lance + WorkQueue + Ray | ~5 |
+| `tests/test_integration_source_set_ops.py` | Integration | `integration` | Lance + Anvil + Ray | ~5 |
 | `tests/test_distributed_source_set_ops.py` | Distributed | `distributed` | Full pipeline + Ray cluster | ~7 |
 
 ### Run Commands

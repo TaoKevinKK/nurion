@@ -87,7 +87,7 @@ async def run_workflow(
     # Create job
     job = Job(
         job_id="image_captioning",
-        config=JobConfig(workqueue_db_path="memory://"),
+        config=JobConfig(anvil_db_path="memory://"),
     )
 
     # Source stage

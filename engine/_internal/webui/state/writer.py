@@ -12,16 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""WorkQueue state writer for WebUI metadata (gRPC)."""
+"""Anvil state writer for WebUI metadata (gRPC)."""
 
 from __future__ import annotations
 
 from typing import Any, Dict
 
-from _internal.queue import WorkQueueQueueClient
+from _internal.queue import AnvilQueueClient
 from _internal.utils.logging import create_ray_logger
 from _internal.core.models import QueueEndpoint
-from _internal.queue.workqueue import _compute_heartbeat_interval
+from _internal.queue.anvil import _compute_heartbeat_interval
 from _internal.webui.state.schema import (
     config_key,
     encode_json,
@@ -33,8 +33,8 @@ from _internal.webui.state.schema import (
 )
 
 
-class WorkQueueStateWriter:
-    """Write WebUI metadata into WorkQueue state (gRPC)."""
+class AnvilStateWriter:
+    """Write WebUI metadata into Anvil state (gRPC)."""
 
     def __init__(
         self,
@@ -44,13 +44,13 @@ class WorkQueueStateWriter:
     ) -> None:
         self.job_id = job_id
         self.broker_endpoint = broker_endpoint
-        self._client = WorkQueueQueueClient(
+        self._client = AnvilQueueClient(
             f"{broker_endpoint.host}:{broker_endpoint.port}",
             worker_id=f"state-writer-{job_id}",
             heartbeat_interval_secs=_compute_heartbeat_interval(claim_timeout_secs),
         )
         self._running = False
-        self.logger = create_ray_logger(f"WorkQueueStateWriter-{job_id}")
+        self.logger = create_ray_logger(f"AnvilStateWriter-{job_id}")
 
     def start(self) -> None:
         if self._running:

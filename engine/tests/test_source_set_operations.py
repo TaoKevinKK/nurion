@@ -14,7 +14,7 @@
 
 """Unit tests for Union and Anti-Join source operations.
 
-Pure logic tests — no Ray, no WorkQueue, no Lance on disk.
+Pure logic tests — no Ray, no Anvil, no Lance on disk.
 All sources use in-memory stubs.
 """
 

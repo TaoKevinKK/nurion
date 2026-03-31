@@ -1,6 +1,6 @@
-# WorkQueue-RS Development Guide
+# Anvil-RS Development Guide
 
-This document provides critical design guidelines for developing and maintaining the WorkQueue Rust implementation.
+This document provides critical design guidelines for developing and maintaining the Anvil Rust implementation.
 
 ---
 
@@ -287,7 +287,7 @@ fn dedup_key(queue: &str, business_key: &str) -> Vec<u8> {
 **Design considerations:**
 - Dedup keys need TTL/cleanup (job-scoped or time-based)
 - Business key must be deterministic from source data
-- See `workqueue-semantics.md` Section 9 for full design discussion
+- See `anvil-semantics.md` Section 9 for full design discussion
 
 ---
 

@@ -105,68 +105,66 @@ jobs:
         path: /tmp/raydp-wheel/*.whl
         retention-days: 1
 
-  build-workqueue-rs:
-    name: Build workqueue-rs Wheel
+  build-anvil-rs:
+    name: Build anvil-rs Wheel
     runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v4
 
-    - name: Cache workqueue-rs wheel
-      id: cache-workqueue
+    - name: Cache anvil-rs wheel
+      id: cache-anvil
       uses: actions/cache@v4
       with:
-        path: /tmp/workqueue-rs-wheel/
-        key: workqueue-rs-wheel-${{ hashFiles('lib/workqueue-rs/**') }}
+        path: /tmp/anvil-rs-wheel/
+        key: anvil-rs-wheel-${{ hashFiles('lib/anvil-rs/**') }}
 
     - name: Set up Rust
-      if: steps.cache-workqueue.outputs.cache-hit != 'true'
+      if: steps.cache-anvil.outputs.cache-hit != 'true'
       uses: dtolnay/rust-toolchain@stable
 
     - name: Install protoc
-      if: steps.cache-workqueue.outputs.cache-hit != 'true'
+      if: steps.cache-anvil.outputs.cache-hit != 'true'
       uses: arduino/setup-protoc@v3
       with:
         version: "25.x"
 
     - name: Rust cache
-      if: steps.cache-workqueue.outputs.cache-hit != 'true'
+      if: steps.cache-anvil.outputs.cache-hit != 'true'
       uses: Swatinem/rust-cache@v2
       with:
-        workspaces: "lib/workqueue-rs -> target"
+        workspaces: "lib/anvil-rs -> target"
 
     - name: Install uv
-      if: steps.cache-workqueue.outputs.cache-hit != 'true'
+      if: steps.cache-anvil.outputs.cache-hit != 'true'
       uses: astral-sh/setup-uv@v4
       with:
         version: "latest"
 
-    - name: Build workqueue-rs wheel
-      if: steps.cache-workqueue.outputs.cache-hit != 'true'
+    - name: Build anvil-rs wheel
+      if: steps.cache-anvil.outputs.cache-hit != 'true'
       run: |
-        cd lib/workqueue-rs
+        cd lib/anvil-rs
         uvx maturin build --release
         echo "Built wheel:"
         ls -la target/wheels/
-        # Generate gRPC stubs
-        uv run --with grpcio-tools python -m grpc_tools.protoc -I proto --python_out=python/workqueue_py --grpc_python_out=python/workqueue_py proto/workqueue.proto
         # Copy to cache directory
-        mkdir -p /tmp/workqueue-rs-wheel/
-        cp target/wheels/*.whl /tmp/workqueue-rs-wheel/
+        mkdir -p /tmp/anvil-rs-wheel/
+        cp target/wheels/*.whl /tmp/anvil-rs-wheel/
 
     - name: Upload wheel artifact
       uses: actions/upload-artifact@v4
       with:
-        name: workqueue-rs-wheel
-        path: /tmp/workqueue-rs-wheel/*.whl
+        name: anvil-rs-wheel
+        path: /tmp/anvil-rs-wheel/*.whl
         retention-days: 1
 
   # ============================================================================
-  # Test workqueue-rs (Rust unit tests)
+  # Test anvil-rs (Rust unit tests)
   # ============================================================================
 
-  test-workqueue-rs:
-    name: Workqueue-rs Tests
+  test-anvil-rs:
+    name: Anvil-rs Tests
     runs-on: ubuntu-latest
 
     steps:
@@ -179,11 +177,11 @@ jobs:
       uses: tj-actions/changed-files@v45
       with:
         files: |
-          lib/workqueue-rs/**
+          lib/anvil-rs/**
 
-    - name: Skip if no workqueue-rs changes
+    - name: Skip if no anvil-rs changes
       if: steps.changed-files.outputs.any_changed == 'false' && github.event_name == 'pull_request'
-      run: echo "No workqueue-rs files changed, skipping..."
+      run: echo "No anvil-rs files changed, skipping..."
 
     - name: Set up Rust
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
@@ -201,7 +199,7 @@ jobs:
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       uses: Swatinem/rust-cache@v2
       with:
-        workspaces: "lib/workqueue-rs -> target"
+        workspaces: "lib/anvil-rs -> target"
 
     - name: Install cargo-llvm-cov
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
@@ -210,23 +208,23 @@ jobs:
     - name: Run Rust tests with coverage
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
-        cd lib/workqueue-rs
+        cd lib/anvil-rs
         cargo llvm-cov --release --codecov --output-path codecov.json
 
     - name: Upload Rust coverage artifact
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       uses: actions/upload-artifact@v4
       with:
-        name: coverage-workqueue-rs
-        path: lib/workqueue-rs/codecov.json
+        name: coverage-anvil-rs
+        path: lib/anvil-rs/codecov.json
         retention-days: 1
 
   # ============================================================================
   # Rust code quality (clippy + rustfmt)
   # ============================================================================
 
-  lint-workqueue-rs:
-    name: Workqueue-rs Lint
+  lint-anvil-rs:
+    name: Anvil-rs Lint
     runs-on: ubuntu-latest
 
     steps:
@@ -239,11 +237,11 @@ jobs:
       uses: tj-actions/changed-files@v45
       with:
         files: |
-          lib/workqueue-rs/**
+          lib/anvil-rs/**
 
-    - name: Skip if no workqueue-rs changes
+    - name: Skip if no anvil-rs changes
       if: steps.changed-files.outputs.any_changed == 'false' && github.event_name == 'pull_request'
-      run: echo "No workqueue-rs files changed, skipping..."
+      run: echo "No anvil-rs files changed, skipping..."
 
     - name: Set up Rust
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
@@ -261,18 +259,18 @@ jobs:
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       uses: Swatinem/rust-cache@v2
       with:
-        workspaces: "lib/workqueue-rs -> target"
+        workspaces: "lib/anvil-rs -> target"
 
     - name: Check formatting
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
-        cd lib/workqueue-rs
+        cd lib/anvil-rs
         cargo fmt -- --check
 
     - name: Run clippy
       if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'push'
       run: |
-        cd lib/workqueue-rs
+        cd lib/anvil-rs
         cargo clippy --lib --tests -- -W clippy::all -D warnings
 
   # ============================================================================
@@ -282,7 +280,7 @@ jobs:
   lint:
     name: Code Quality Check
     runs-on: ubuntu-latest
-    needs: [build-raydp, build-workqueue-rs]
+    needs: [build-raydp, build-anvil-rs]
     if: always() && !cancelled()
     
     steps:
@@ -356,7 +354,7 @@ jobs:
   mypy:
     name: mypy
     runs-on: ubuntu-latest
-    needs: [build-raydp, build-workqueue-rs]
+    needs: [build-raydp, build-anvil-rs]
     if: always() && !cancelled()
     
     steps:
@@ -480,7 +478,7 @@ jobs:
   test-engine-unit:
     name: Engine Unit Tests
     runs-on: ubuntu-latest
-    needs: [build-raydp, build-workqueue-rs]
+    needs: [build-raydp, build-anvil-rs]
     if: always() && !cancelled()
     
     steps:
@@ -560,7 +558,7 @@ jobs:
   test-engine-integration:
     name: Engine Integration Tests
     runs-on: ubuntu-latest
-    needs: [build-raydp, build-workqueue-rs]
+    needs: [build-raydp, build-anvil-rs]
     if: always() && !cancelled()
     
     steps:
@@ -667,7 +665,7 @@ jobs:
   test-engine-distributed:
     name: Engine Distributed Tests
     runs-on: ubuntu-latest
-    needs: [build-raydp, build-workqueue-rs]
+    needs: [build-raydp, build-anvil-rs]
     if: always() && !cancelled()
     
     steps:
@@ -747,7 +745,7 @@ jobs:
   test-engine-stability:
     name: Engine Stability Tests
     runs-on: ubuntu-latest
-    needs: [build-raydp, build-workqueue-rs]
+    needs: [build-raydp, build-anvil-rs]
     if: always() && !cancelled()
     
     steps:
@@ -827,7 +825,7 @@ jobs:
   test-engine-workflow:
     name: Engine Workflow Tests
     runs-on: ubuntu-latest
-    needs: [build-raydp, build-workqueue-rs]
+    needs: [build-raydp, build-anvil-rs]
     if: always() && !cancelled()
     # Workflow tests are slow - doesn't block PR merge
     continue-on-error: true
@@ -934,7 +932,7 @@ jobs:
   test-engine-chaos:
     name: Engine Chaos Tests
     runs-on: ubuntu-latest
-    needs: [build-raydp, build-workqueue-rs]
+    needs: [build-raydp, build-anvil-rs]
     if: always() && !cancelled()
     # Chaos tests are experimental and may be flaky - doesn't block PR merge
     continue-on-error: true
@@ -1021,8 +1019,8 @@ jobs:
       pull-requests: write
     needs:
       - build-raydp
-      - build-workqueue-rs
-      - test-workqueue-rs
+      - build-anvil-rs
+      - test-anvil-rs
       - test-engine-unit
       - test-engine-integration
       - test-engine-distributed
@@ -1126,15 +1124,15 @@ jobs:
           fi
         fi
 
-    # ---- Rust (workqueue-rs) coverage ----
+    # ---- Rust (anvil-rs) coverage ----
     - name: Rust coverage summary
       run: |
-        if [ -f /tmp/coverage/coverage-workqueue-rs/codecov.json ]; then
+        if [ -f /tmp/coverage/coverage-anvil-rs/codecov.json ]; then
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## Rust (workqueue-rs) Coverage" >> $GITHUB_STEP_SUMMARY
+          echo "## Rust (anvil-rs) Coverage" >> $GITHUB_STEP_SUMMARY
           echo "Rust coverage data available in job summary." >> $GITHUB_STEP_SUMMARY
         else
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## Rust (workqueue-rs) Coverage" >> $GITHUB_STEP_SUMMARY
+          echo "## Rust (anvil-rs) Coverage" >> $GITHUB_STEP_SUMMARY
           echo "No Rust coverage data collected." >> $GITHUB_STEP_SUMMARY
         fi

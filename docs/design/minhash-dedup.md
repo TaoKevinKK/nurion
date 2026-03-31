@@ -28,7 +28,7 @@
 
 The original MinHash dedup design used Connected Components (CC) label propagation
 with O(n^2) candidate pair generation and multi-round iterative label propagation
-through WorkQueue. At 10B+ document scale, this had several critical issues:
+through Anvil. At 10B+ document scale, this had several critical issues:
 
 1. **Data amplification**: Each document expanded to 16 rows (one per band), each
    carrying the full 1KB signature. 10B docs = ~160TB flowing through the queue.
@@ -182,7 +182,7 @@ cross-shard edges (typically small compared to total documents).
 | Matching | Sorted signature files + heap merge | Shard-side band_hash index |
 | Clustering | Single-process Union-Find over .dups files | Distributed Union-Find across shards |
 | Cross-worker matching | Sort + merge across all worker files | Cross-shard resolution phase |
-| Scaling model | SLURM / filesystem | Ray cluster + WorkQueue |
+| Scaling model | SLURM / filesystem | Ray cluster + Anvil |
 | Fault tolerance | Re-run from files | UFShard checkpoint + worker restart |
 
 Both approaches achieve the same result: they find documents with identical band
@@ -219,7 +219,7 @@ stages are fully reused.
    endpoints, no queue clients, no storage details.
 2. **The manager owns checkpoint orchestration** -- it decides when to checkpoint,
    calls shard RPCs to get state, and persists via `SplitPayloadStore`.
-3. **PayloadStore is the checkpoint backend** -- not WorkQueue State API.
+3. **PayloadStore is the checkpoint backend** -- not Anvil State API.
    State API is for small metadata (offsets, counters). UF checkpoint data
    can be GBs at billion-doc scale and needs a storage layer designed for
    large Arrow tables. PayloadStore (with future S3 backend) is the right fit.
@@ -278,7 +278,7 @@ and stores payloads directly without routing through the master.
 
 | Component | OOM Impact | Recovery |
 |-----------|-----------|----------|
-| MinHashEncoder worker | Batch not encoded | Stateless; WorkQueue re-delivers message |
+| MinHashEncoder worker | Batch not encoded | Stateless; Anvil re-delivers message |
 | BucketUnion worker | Batch not sent to UFService | Stateless; re-delivery. Shard state unaffected |
 | UFShard actor | In-memory state lost | Ray restarts actor; manager restores from PayloadStore checkpoint |
 | DedupFilter worker | Batch not filtered | Stateless; re-delivery |

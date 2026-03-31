@@ -47,7 +47,7 @@ from _internal.core.models import (
 )
 from _internal.core.operator import Operator, OperatorRuntime
 from _internal.core.split_payload_store import SplitPayloadStore
-from _internal.queue import WorkQueueQueueClient, WorkQueueRecord
+from _internal.queue import AnvilQueueClient, AnvilRecord
 from _internal.testing.fault_injection import (
     FAULT_AFTER_PROCESS,
     FAULT_BEFORE_PROCESS,
@@ -73,7 +73,7 @@ class _ParsedBatch(NamedTuple):
 
     msg_ids: list[str]
     claim_tokens: list[str]
-    records: list[WorkQueueRecord]
+    records: list[AnvilRecord]
     tables: "list[pa.Table]"
     parent_split_ids: list[str]
     consumed_payload_keys: list[str]
@@ -152,7 +152,7 @@ class StageWorker:
 
         self.stage = stage
         self.payload_store = payload_store
-        self.queue_client: Optional[WorkQueueQueueClient] = None
+        self.queue_client: Optional[AnvilQueueClient] = None
 
         self.logger = create_ray_logger(f"Worker-{self.stage_id}-{self.worker_id}")
 
@@ -177,13 +177,13 @@ class StageWorker:
         )
         self._operator = self.stage.operator_config.setup(runtime)
 
-    def _create_queue_client(self) -> WorkQueueQueueClient:
+    def _create_queue_client(self) -> AnvilQueueClient:
         if not self._runtime.broker_endpoint:
             raise RuntimeError("broker_endpoint is required")
         broker_url = f"{self._runtime.broker_endpoint.host}:{self._runtime.broker_endpoint.port}"
-        from _internal.queue.workqueue import _compute_heartbeat_interval
+        from _internal.queue.anvil import _compute_heartbeat_interval
 
-        client = WorkQueueQueueClient(
+        client = AnvilQueueClient(
             broker_url,
             worker_id=self.worker_id,
             heartbeat_interval_secs=_compute_heartbeat_interval(self._claim_timeout_secs),
@@ -238,7 +238,7 @@ class StageWorker:
 
         upstream_queue = self._runtime.upstream.name
         merge = self._merge_upstream
-        pending: list[WorkQueueRecord] = []
+        pending: list[AnvilRecord] = []
 
         last_claimed_time = time.time()
 
@@ -308,7 +308,7 @@ class StageWorker:
             else None
         )
         merge = self._merge_upstream
-        pending: list[WorkQueueRecord] = []
+        pending: list[AnvilRecord] = []
         # Track which partition queue the current pending batch came from
         current_source_queue: Optional[str] = None
 
@@ -394,7 +394,7 @@ class StageWorker:
 
     async def _process_and_ack(
         self,
-        records: list[WorkQueueRecord],
+        records: list[AnvilRecord],
         upstream_queue_override: Optional[str] = None,
     ) -> None:
         """Process one or more records and ack atomically.
@@ -497,7 +497,7 @@ class StageWorker:
 
     def _parse_records(
         self,
-        records: list[WorkQueueRecord],
+        records: list[AnvilRecord],
         upstream_queue: Optional[str] = None,
     ) -> Optional[_ParsedBatch]:
         """Parse claimed records, fetch payloads. Returns None if nacked."""
@@ -786,7 +786,7 @@ class StageWorker:
 
     def _build_event_puts(
         self,
-        records: list[WorkQueueRecord],
+        records: list[AnvilRecord],
         split_id: str,
         source_stage: Optional[str],
         processing_ms: float,

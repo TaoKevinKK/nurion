@@ -518,8 +518,8 @@ class TestSparkSplitPlanner:
         planner.cleanup()
 
     @pytest.mark.asyncio
-    async def test_full_pipeline_with_queue(self, ray_cluster, workqueue_backend):
-        """Test complete SparkSource pipeline with WorkQueue queue.
+    async def test_full_pipeline_with_queue(self, ray_cluster, anvil_backend):
+        """Test complete SparkSource pipeline with Anvil queue.
 
         This test verifies the full flow:
         1. SparkSplitPlanner starts and creates source queue
@@ -548,7 +548,7 @@ class TestSparkSplitPlanner:
         runtime = StageRuntime(
             broker_endpoint=QueueEndpoint(
                 host="localhost",
-                port=workqueue_backend.port,
+                port=anvil_backend.port,
                 storage_url="memory://",
             ),
         )

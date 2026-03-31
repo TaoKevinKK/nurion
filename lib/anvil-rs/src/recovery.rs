@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Timeout recovery and GC for WorkQueue
+// Timeout recovery and GC for Anvil
 //
 // This module handles:
 // 1. Runtime recovery: reclaim messages from dead workers (expired claims)
@@ -27,26 +27,22 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, Duration};
 
-use crate::state::WorkQueueState;
-use crate::storage::WorkQueueStorage;
-use crate::types::WorkQueueConfig;
+use crate::state::AnvilState;
+use crate::storage::AnvilStorage;
+use crate::types::AnvilConfig;
 
 /// Recovery task manager - recovers expired claims
 pub struct RecoveryTask {
-    storage: Arc<WorkQueueStorage>,
-    state: Arc<WorkQueueState>,
-    config: WorkQueueConfig,
+    storage: Arc<AnvilStorage>,
+    state: Arc<AnvilState>,
+    config: AnvilConfig,
     running: Arc<AtomicBool>,
     shutdown_notify: Arc<Notify>,
     handle: Option<JoinHandle<()>>,
 }
 
 impl RecoveryTask {
-    pub fn new(
-        storage: Arc<WorkQueueStorage>,
-        state: Arc<WorkQueueState>,
-        config: WorkQueueConfig,
-    ) -> Self {
+    pub fn new(storage: Arc<AnvilStorage>, state: Arc<AnvilState>, config: AnvilConfig) -> Self {
         Self {
             storage,
             state,
@@ -153,15 +149,15 @@ impl Drop for RecoveryTask {
 
 /// GC task manager for cleaning up acked messages
 pub struct GcTask {
-    storage: Arc<WorkQueueStorage>,
-    config: WorkQueueConfig,
+    storage: Arc<AnvilStorage>,
+    config: AnvilConfig,
     running: Arc<AtomicBool>,
     shutdown_notify: Arc<Notify>,
     handle: Option<JoinHandle<()>>,
 }
 
 impl GcTask {
-    pub fn new(storage: Arc<WorkQueueStorage>, config: WorkQueueConfig) -> Self {
+    pub fn new(storage: Arc<AnvilStorage>, config: AnvilConfig) -> Self {
         Self {
             storage,
             config,

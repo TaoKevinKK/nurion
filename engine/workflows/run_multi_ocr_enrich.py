@@ -650,7 +650,7 @@ async def run_workflow(
 
     job = Job(
         job_id="multi_ocr_fusion",
-        config=JobConfig(workqueue_db_path="memory://"),
+        config=JobConfig(anvil_db_path="memory://"),
     )
 
     source = Stage(

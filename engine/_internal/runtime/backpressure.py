@@ -21,7 +21,7 @@ from _internal.runtime.queue_stats import QueueStatsClient, StageQueueConfig
 
 
 class JobBackpressureController:
-    """Job-level backpressure controller using WorkQueue stats.
+    """Job-level backpressure controller using Anvil stats.
 
     Uses QueueRef to transparently query single queues or QueueGroups.
     """

@@ -20,14 +20,14 @@ package org.apache.spark.sql.raydp
 import com.google.gson.Gson
 import io.grpc.ManagedChannel
 import io.grpc.ManagedChannelBuilder
-import workqueue.Workqueue.{PushRequest, PushResponse}
-import workqueue.WorkQueueGrpc
+import anvil.AnvilProto.{PushRequest, PushResponse}
+import anvil.AnvilGrpc
 
 import java.util.{Base64, HashMap => JHashMap}
 import java.util.concurrent.TimeUnit
 
 /**
- * Writes Arrow data directly to WorkQueue via gRPC.
+ * Writes Arrow data directly to Anvil via gRPC.
  *
  * This is the V2 implementation that:
  * 1. Embeds Arrow IPC data directly in message (base64 encoded)
@@ -40,7 +40,7 @@ import java.util.concurrent.TimeUnit
  * 3. Send message to output_queue via gRPC
  * 4. Downstream: payload_store.get(payload_key) → decode and convert to SplitPayload
  *
- * @param queueEndpoint WorkQueue gRPC endpoint (host:port)
+ * @param queueEndpoint Anvil gRPC endpoint (host:port)
  * @param queueTopic Topic name (output_queue topic)
  * @param stageId Stage identifier for message IDs
  */
@@ -51,7 +51,7 @@ class SplitPayloadStoreWriter(
 ) extends Serializable {
 
   @transient private var channel: ManagedChannel = _
-  @transient private var stub: WorkQueueGrpc.WorkQueueBlockingStub = _
+  @transient private var stub: AnvilGrpc.AnvilBlockingStub = _
   @transient private lazy val gson = new Gson()
 
   private var messageCounter = 0
@@ -73,7 +73,7 @@ class SplitPayloadStoreWriter(
       .usePlaintext()
       .build()
 
-    stub = WorkQueueGrpc.newBlockingStub(channel)
+    stub = AnvilGrpc.newBlockingStub(channel)
   }
 
   /**
@@ -120,7 +120,7 @@ class SplitPayloadStoreWriter(
     // 4. Send via gRPC Push
     val request = PushRequest.newBuilder()
       .setQueue(queueTopic)
-      .setPayload(com.google.protobuf.ByteString.copyFrom(jsonBytes))
+      .addPayloads(com.google.protobuf.ByteString.copyFrom(jsonBytes))
       .build()
 
     val response: PushResponse = stub.push(request)
@@ -172,7 +172,7 @@ object SplitPayloadStoreWriter {
   /**
    * Create a new writer instance.
    *
-   * @param queueEndpoint WorkQueue gRPC endpoint (host:port)
+   * @param queueEndpoint Anvil gRPC endpoint (host:port)
    * @param queueTopic Topic name (output_queue topic)
    * @param stageId Stage identifier
    * @return A new SplitPayloadStoreWriter instance

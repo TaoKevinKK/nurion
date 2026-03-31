@@ -27,7 +27,7 @@ Both caption stages see ALL source records. The join stage matches results by `f
 ```python
 from nurion import Job, JobConfig, Stage, JoinConfig
 
-job = Job(job_id='diamond', config=JobConfig(workqueue_db_path="memory://"))
+job = Job(job_id='diamond', config=JobConfig(anvil_db_path="memory://"))
 
 job.add_stage(Stage(
     stage_id='source',

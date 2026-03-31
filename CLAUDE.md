@@ -4,7 +4,7 @@ Read `AGENTS.md` for full project context (architecture, patterns, conventions).
 
 ## Quick Reference
 
-- **Monorepo**: `engine/` (Ray processing), `control/` (FastAPI), `lib/` (workqueue-rs, raydp)
+- **Monorepo**: `engine/` (Ray processing), `control/` (FastAPI), `lib/` (anvil-rs, raydp)
 - **Engine source**: `engine/_internal/` (NOT `engine/engine/`)
 - **Public API**: `engine/nurion/__init__.py`
 - **Package manager**: uv
@@ -17,5 +17,5 @@ Read `AGENTS.md` for full project context (architecture, patterns, conventions).
 - Commit messages: Conventional Commits (`feat:`, `fix:`, `refactor:`, etc.)
 - Don't over-engineer; only implement what's requested
 - Operators are config-driven and stateless (`OperatorConfig` + `OperatorRuntime`)
-- WorkQueue hot paths must be O(1) — never scan
+- Anvil hot paths must be O(1) — never scan
 - Check `docs/design/` before proposing architectural changes

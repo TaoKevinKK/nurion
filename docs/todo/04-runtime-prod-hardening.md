@@ -100,12 +100,12 @@ See `01-roadmap.md` §Deprioritized for reasoning.
 - [ ] ~~**Payload durability contract**~~ — Documentation task, not a code feature. Write when production deployment patterns are established.
 - [ ] ~~**StageMaster failover**~~ — Job re-run is sufficient today. Revisit for multi-hour jobs or when iterative execution (roadmap §3.1) makes job restart expensive.
 
-### WorkQueue — Designed but Not Implemented
+### Anvil — Designed but Not Implemented
 
-From `../design/work-queue-redesign.md` and `../design/workqueue-semantics.md`:
+From `../design/work-queue-redesign.md` and `../design/anvil-semantics.md`:
 
 - [ ] **`push_with_dedup`** (exactly-once source dedup)
-  - Design: `work-queue-redesign.md` §4.7, `workqueue-semantics.md` Phase 2
+  - Design: `work-queue-redesign.md` §4.7, `anvil-semantics.md` Phase 2
   - Business-key-based deduplication on push to prevent duplicate source messages
   - **Acceptance**: Duplicate push with same business key is a no-op
 
@@ -115,7 +115,7 @@ From `../design/work-queue-redesign.md` and `../design/workqueue-semantics.md`:
   - Related to "Worker-level output backpressure" above
 
 - [ ] **State TTL / cleanup**
-  - Design: `workqueue-semantics.md` Open Question 8.1
+  - Design: `anvil-semantics.md` Open Question 8.1
   - No state TTL or job-scoped state cleanup implemented
   - State keys accumulate across jobs sharing a broker
 
@@ -124,8 +124,8 @@ From `../design/work-queue-redesign.md` and `../design/workqueue-semantics.md`:
   - Fetch state keys inline during claim (one RPC instead of two)
   - Optimization only; current separate RPCs work
 
-- [ ] **WorkQueue observability metrics**
-  - Design: `workqueue-semantics.md` Phase 4
+- [ ] **Anvil observability metrics**
+  - Design: `anvil-semantics.md` Phase 4
   - Dedup hit/miss counters, recovery event counters, state size metrics
   - No metrics export from broker currently
 

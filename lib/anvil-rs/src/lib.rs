@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// WorkQueue Python bindings using PyO3
+// Anvil Python bindings using PyO3
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use tokio::runtime::Runtime;
 
+pub mod client;
 mod recovery;
 mod server;
 mod service;
@@ -29,11 +30,13 @@ mod storage;
 mod types;
 
 #[cfg(test)]
+mod bench;
+#[cfg(test)]
 mod dst;
 
-use server::WorkQueueBrokerInner;
-use storage::WorkQueueStorage;
-use types::WorkQueueConfig;
+use server::AnvilBrokerInner;
+use storage::AnvilStorage;
+use types::AnvilConfig;
 
 /// Broker error type exposed to Python
 #[pyclass]
@@ -121,9 +124,9 @@ impl BrokerConfig {
     }
 }
 
-impl From<BrokerConfig> for WorkQueueConfig {
+impl From<BrokerConfig> for AnvilConfig {
     fn from(config: BrokerConfig) -> Self {
-        WorkQueueConfig {
+        AnvilConfig {
             db_path: config.db_path,
             host: config.host,
             port: config.port,
@@ -136,9 +139,9 @@ impl From<BrokerConfig> for WorkQueueConfig {
     }
 }
 
-/// WorkQueue Broker - embedded work queue server
+/// Anvil Broker - embedded work queue server
 #[pyclass]
-pub struct WorkQueueBroker {
+pub struct AnvilBroker {
     config: BrokerConfig,
     handle: Option<JoinHandle<()>>,
     running: Arc<AtomicBool>,
@@ -146,11 +149,11 @@ pub struct WorkQueueBroker {
     actual_port: Arc<Mutex<Option<u16>>>,
     // Storage is created inside the broker thread (to keep it in the same tokio runtime)
     // and shared back via this Arc<Mutex<>>
-    storage: Arc<Mutex<Option<Arc<WorkQueueStorage>>>>,
+    storage: Arc<Mutex<Option<Arc<AnvilStorage>>>>,
 }
 
 #[pymethods]
-impl WorkQueueBroker {
+impl AnvilBroker {
     #[new]
     #[pyo3(signature = (config, event_handler=None))]
     fn new(config: BrokerConfig, event_handler: Option<PyObject>) -> Self {
@@ -174,7 +177,7 @@ impl WorkQueueBroker {
 
         self.running.store(true, Ordering::SeqCst);
 
-        let config: WorkQueueConfig = self.config.clone().into();
+        let config: AnvilConfig = self.config.clone().into();
         let handler = self.event_handler.as_ref().map(|h| h.clone_ref(py));
         let running = self.running.clone();
         let actual_port = self.actual_port.clone();
@@ -212,7 +215,7 @@ impl WorkQueueBroker {
                 // CRITICAL: SlateDB's internal background tasks (compactor, gc, memtable flusher)
                 // are bound to the tokio runtime that creates the Db. Storage must be created
                 // and used in the same runtime to avoid "channel closed" panics.
-                let storage = match WorkQueueStorage::new(&config.db_path).await {
+                let storage = match AnvilStorage::new(&config.db_path).await {
                     Ok(s) => Arc::new(s),
                     Err(e) => {
                         running.store(false, Ordering::SeqCst);
@@ -232,7 +235,7 @@ impl WorkQueueBroker {
                 // Share storage reference back to the main struct for get_storage_reader()
                 *storage_slot.lock().unwrap() = Some(storage.clone());
 
-                match WorkQueueBrokerInner::new_with_storage(config, storage.clone()).await {
+                match AnvilBrokerInner::new_with_storage(config, storage.clone()).await {
                     Ok(mut broker) => {
                         match broker.start().await {
                             Ok(port) => {
@@ -294,14 +297,14 @@ impl WorkQueueBroker {
     }
 
     /// Create a storage reader backed by the broker's storage instance
-    fn get_storage_reader(&self) -> PyResult<WorkQueueStorageReader> {
+    fn get_storage_reader(&self) -> PyResult<AnvilStorageReader> {
         let storage_guard = self.storage.lock().unwrap();
         let storage = storage_guard.as_ref().ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err(
                 "Broker storage not available (start the broker first)",
             )
         })?;
-        WorkQueueStorageReader::from_storage(self.config.db_path.clone(), storage.clone())
+        AnvilStorageReader::from_storage(self.config.db_path.clone(), storage.clone())
     }
 
     /// Stop the broker
@@ -340,37 +343,35 @@ impl WorkQueueBroker {
             "stopped"
         };
         format!(
-            "WorkQueueBroker(config={:?}, status={})",
+            "AnvilBroker(config={:?}, status={})",
             self.config.__repr__(),
             status
         )
     }
 }
 
-/// WorkQueue Storage Reader - direct storage access (no RPC)
+/// Anvil Storage Reader - direct storage access (no RPC)
 #[pyclass(unsendable)]
-pub struct WorkQueueStorageReader {
+pub struct AnvilStorageReader {
     db_path: String,
     runtime: Runtime,
-    storage: Arc<WorkQueueStorage>,
+    storage: Arc<AnvilStorage>,
 }
 
 #[pymethods]
-impl WorkQueueStorageReader {
+impl AnvilStorageReader {
     #[new]
     #[pyo3(signature = (db_path))]
     fn new(db_path: String) -> PyResult<Self> {
         let runtime = Runtime::new().map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to create runtime: {}", e))
         })?;
-        let storage = runtime
-            .block_on(WorkQueueStorage::new(&db_path))
-            .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Failed to open storage {}: {}",
-                    db_path, e
-                ))
-            })?;
+        let storage = runtime.block_on(AnvilStorage::new(&db_path)).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "Failed to open storage {}: {}",
+                db_path, e
+            ))
+        })?;
         Ok(Self {
             db_path,
             runtime,
@@ -551,12 +552,12 @@ impl WorkQueueStorageReader {
     }
 
     fn __repr__(&self) -> String {
-        format!("WorkQueueStorageReader(db_path='{}')", self.db_path)
+        format!("AnvilStorageReader(db_path='{}')", self.db_path)
     }
 }
 
-impl WorkQueueStorageReader {
-    fn from_storage(db_path: String, storage: Arc<WorkQueueStorage>) -> PyResult<Self> {
+impl AnvilStorageReader {
+    fn from_storage(db_path: String, storage: Arc<AnvilStorage>) -> PyResult<Self> {
         let runtime = Runtime::new().map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to create runtime: {}", e))
         })?;
@@ -570,10 +571,12 @@ impl WorkQueueStorageReader {
 
 /// Python module definition
 #[pymodule]
-fn workqueue_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn anvil_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<BrokerConfig>()?;
     m.add_class::<BrokerError>()?;
-    m.add_class::<WorkQueueBroker>()?;
-    m.add_class::<WorkQueueStorageReader>()?;
+    m.add_class::<AnvilBroker>()?;
+    m.add_class::<AnvilStorageReader>()?;
+    m.add_class::<client::AnvilRustClient>()?;
+    m.add_class::<client::RustMessage>()?;
     Ok(())
 }

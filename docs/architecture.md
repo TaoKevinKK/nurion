@@ -10,7 +10,7 @@ This document describes the internal architecture of Nurion Engine -- a Ray-base
 2. [Core Abstractions](#2-core-abstractions)
 3. [Runtime Architecture](#3-runtime-architecture)
 4. [Data Flow](#4-data-flow)
-5. [WorkQueue: The Message Backbone](#5-workqueue-the-message-backbone)
+5. [Anvil: The Message Backbone](#5-anvil-the-message-backbone)
 6. [Component Managers](#6-component-managers)
 7. [Autoscaling](#7-autoscaling)
 8. [Fault Tolerance & Recovery](#8-fault-tolerance--recovery)
@@ -43,7 +43,7 @@ Nurion Engine processes data through **DAG pipelines** where each node is a **St
                          │   [Output Q]     [Output Q]             │
                          │                                         │
                          │   ┌──────────────────────────────────┐  │
-                         │   │    WorkQueue Broker (Rust/gRPC)  │  │
+                         │   │    Anvil Broker (Rust/gRPC)  │  │
                          │   └──────────────────────────────────┘  │
                          │                                         │
                          │   ┌──────────────────────────────────┐  │
@@ -56,7 +56,7 @@ Nurion Engine processes data through **DAG pipelines** where each node is a **St
 **Key properties:**
 
 - **Pull-based**: Workers pull messages from upstream queues (not push)
-- **Queue-driven**: All inter-stage communication goes through WorkQueue
+- **Queue-driven**: All inter-stage communication goes through Anvil
 - **Competing consumers**: Multiple workers compete for messages on the same queue (no partitions)
 - **Natural backpressure**: Queue lag signals upstream to slow down
 - **Elastic**: Workers can be added/removed at runtime without rebalancing
@@ -72,7 +72,7 @@ A `Job` is a DAG of Stages. It holds:
 - A set of `Stage` objects connected by directed edges
 
 ```python
-job = Job(job_id="my_pipeline", config=JobConfig(workqueue_db_path="memory://"))
+job = Job(job_id="my_pipeline", config=JobConfig(anvil_db_path="memory://"))
 job.add_stage(source_stage)
 job.add_stage(transform_stage, upstream_stages=["source"])
 job.add_stage(sink_stage, upstream_stages=["transform"])
@@ -137,7 +137,7 @@ Data is stored in a `SplitPayloadStore` (Ray Object Store by default, or S3/fssp
 
 The top-level orchestrator. It:
 
-1. Initializes Ray and creates a shared **WorkQueue broker** (Rust process)
+1. Initializes Ray and creates a shared **Anvil broker** (Rust process)
 2. Creates a **SplitPayloadStore** for cross-stage data sharing
 3. Creates **StageMaster** instances in topological order (sources first)
 4. Starts all masters, monitors progress, handles failures
@@ -178,7 +178,7 @@ Each stage has a `StageMaster` that orchestrates its workers. It is **not** a Ra
 
 **Key behaviors:**
 
-- **Stateless**: All state lives in WorkQueue server or payload store
+- **Stateless**: All state lives in Anvil server or payload store
 - **Atomic ack-and-forward**: Upstream messages are acked and output is pushed in a single atomic operation
 - **Graceful exit**: Workers exit when notified that upstream is finished AND the queue is drained
 - **Supports sync/async**: `process_split()` can be sync, async, or a generator
@@ -234,15 +234,15 @@ There are no EOF messages in the queue. Instead:
 
 ---
 
-## 5. WorkQueue: The Message Backbone
+## 5. Anvil: The Message Backbone
 
-WorkQueue is an embedded Rust-based message broker that provides the queue backbone for all inter-stage communication.
+Anvil is an embedded Rust-based message broker that provides the queue backbone for all inter-stage communication.
 
 ### 5.1 Architecture
 
 ```
 ┌──────────────────────────────────────────────┐
-│              WorkQueue Broker                 │
+│              Anvil Broker                 │
 │          (Rust process, gRPC API)             │
 │                                               │
 │  ┌─────────┐  ┌─────────┐  ┌─────────┐      │
@@ -282,7 +282,7 @@ PENDING ──claim()──► CLAIMED ──ack()──► ACKED ──GC──
 | **Competing consumers** | Workers compete via `claim()` -- natural load distribution |
 | **Claim-based leasing** | Messages auto-return to PENDING if worker dies (timeout-based) |
 | **GC-based ack retention** | Acked messages retained for debugging; cleaned up by GC pass |
-| **Integrated state store** | Operators access state via WorkQueue server (single-writer, no conflicts) |
+| **Integrated state store** | Operators access state via Anvil server (single-writer, no conflicts) |
 | **Embedded broker** | No external dependencies; `memory://` for tests, `file://` for persistence |
 
 ### 5.4 Exactly-Once Semantics
@@ -637,7 +637,7 @@ engine/
 │   │
 │   ├── queue/
 │   │   ├── backend.py          # Queue abstraction (QueueBackend protocol)
-│   │   └── workqueue.py        # WorkQueue Rust broker integration
+│   │   └── anvil.py        # Anvil Rust broker integration
 │   │
 │   ├── operators/
 │   │   ├── sources/            # Lance, Iceberg, Spark, File sources
@@ -677,7 +677,7 @@ engine/
 
 1. **Pull-based, queue-driven**: Workers pull work, enabling natural load balancing and backpressure
 2. **Config/runtime separation**: `OperatorConfig` (user, immutable) vs `OperatorRuntime` (system, immutable)
-3. **Stateless workers**: All state in WorkQueue server or payload store -- workers are disposable
+3. **Stateless workers**: All state in Anvil server or payload store -- workers are disposable
 4. **Single queue, no partitions**: Eliminates partition-worker coupling, enables work-stealing
 5. **Atomic operations**: `ack_and_forward` ensures cross-stage consistency
 6. **Explicit references**: ActorHandles passed explicitly, no magic `ray.get_actor` lookups
@@ -688,7 +688,7 @@ engine/
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Queue backend | WorkQueue (Rust + SlateDB) | Embedded, no external dependencies, high throughput |
+| Queue backend | Anvil (Rust + SlateDB) | Embedded, no external dependencies, high throughput |
 | Queue model | Single queue, competing consumers | No partition rebalancing; work-stealing load balancing |
 | Payload transport | Reference keys through queue | Queue stays lightweight; data in Object Store or S3 |
 | Exactly-once | Source dedup + idempotent sinks | Simpler than cross-stage dedup; works with work-stealing |

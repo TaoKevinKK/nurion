@@ -17,7 +17,7 @@ _Design document — March 2026_
 1. [Problem Statement](#1-problem-statement)
 2. [Design Goals](#2-design-goals)
 3. [QueueGroup Concept](#3-queuegroup-concept)
-4. [New WorkQueue RPCs](#4-new-workqueue-rpcs)
+4. [New Anvil RPCs](#4-new-anvil-rpcs)
 5. [Skew Analysis and Handling](#5-skew-analysis-and-handling)
 6. [Python-Side Simplification](#6-python-side-simplification)
 7. [Migration Plan](#7-migration-plan)
@@ -74,7 +74,7 @@ This is acceptable (Spark has the same semantics), but we can do better.
 | Provide atomic ack + multi-partition push (exactly-once shuffle output) | P0 |
 | Enable skew detection without Python-side queue scanning | P1 |
 | Enable work-stealing for operators that don't require key affinity | P1 |
-| Keep WorkQueue a generic queue — no payload inspection | P0 (constraint) |
+| Keep Anvil a generic queue — no payload inspection | P0 (constraint) |
 | Maintain O(1) hot-path complexity for existing operations | P0 (constraint) |
 | Leave room for future range-partition and dynamic split | P2 |
 
@@ -83,7 +83,7 @@ This is acceptable (Spark has the same semantics), but we can do better.
 ## 3. QueueGroup Concept
 
 A **QueueGroup** is a named set of partition queues managed as a unit by the
-WorkQueue broker. The broker stores group metadata alongside the individual queues:
+Anvil broker. The broker stores group metadata alongside the individual queues:
 
 ```
 group_meta:{group_name} → QueueGroupMeta {
@@ -98,7 +98,7 @@ group_meta:{group_name} → QueueGroupMeta {
 ### 3.1 Why a First-Class Concept?
 
 The key insight: **Python currently maintains the "N queues are a group" relationship
-in StageMaster state**. By moving this into WorkQueue, every operation that touches
+in StageMaster state**. By moving this into Anvil, every operation that touches
 "all partitions" becomes a single RPC instead of a Python loop.
 
 ### 3.2 Naming Convention
@@ -113,7 +113,7 @@ reconstruct them from `group_meta` without storing a separate list.
 
 ---
 
-## 4. New WorkQueue RPCs
+## 4. New Anvil RPCs
 
 ### 4.1 CreateQueueGroup
 
@@ -335,9 +335,9 @@ must respect this:
 
 | Operator type | Key affinity | Skew strategy | Layer |
 |---|---|---|---|
-| Map, Filter | None | Work-stealing via `ClaimFromGroup` | WorkQueue |
-| Dedup (UFService) | Weak (service handles cross-shard) | Work-stealing | WorkQueue |
-| Repartition | None | Work-stealing | WorkQueue |
+| Map, Filter | None | Work-stealing via `ClaimFromGroup` | Anvil |
+| Dedup (UFService) | Weak (service handles cross-shard) | Work-stealing | Anvil |
+| Repartition | None | Work-stealing | Anvil |
 | GroupBy (SUM, COUNT, AVG) | Strong, but pre-aggregable | Salted two-phase aggregation | DAG/Pipeline |
 | Join (equi-join) | Strong, not splittable | Broadcast small side / skew join | DAG/Pipeline |
 
@@ -371,7 +371,7 @@ class GroupByConfig(ShuffleOperatorConfig):
     allow_work_stealing: bool = False   # must preserve key grouping
 ```
 
-**Why this works**: WorkQueue is already a competing-consumer model. Work-stealing
+**Why this works**: Anvil is already a competing-consumer model. Work-stealing
 is a natural extension — it relaxes the partition-worker binding when semantics
 allow it. No structural queue changes needed.
 
@@ -555,7 +555,7 @@ class OutputRouting:
 1. Delete `shuffle.py:split_by_partition()` (unused, replaced by `partition.py`)
 2. Simplify `OutputRouting` to use `group_name`
 3. Remove `partition_queue_names` from `WorkerRuntime` and `StageRuntime`
-4. Update `architecture.md`, `workqueue.md`, TODO files
+4. Update `architecture.md`, `anvil.md`, TODO files
 
 ---
 

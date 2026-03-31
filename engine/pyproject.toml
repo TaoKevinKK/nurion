@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
 
 dependencies = [
-    "nurion-workqueue",  # WorkQueue gRPC broker (built from lib/workqueue-rs/)
+    "nurion-anvil",  # Anvil gRPC broker (built from lib/anvil-rs/)
     "ray[default]==2.54.0",
     "pyarrow>=22.0.0",
     "pandas>=2.0.0",
@@ -20,7 +20,7 @@ dependencies = [
     "pyiceberg[sql-sqlite]>=0.11.0",
     "sqlalchemy>=2.0.0",
     "py-spy>=0.4.1",
-    "grpcio>=1.76.0",           # gRPC for WorkQueue client (matches generated stubs)
+    "grpcio>=1.76.0",           # gRPC for Anvil client (matches generated stubs)
     "tenacity>=8.2.0",          # Retry library for transient failures
     # Compute engine
     "duckdb>=1.1.0",            # Embedded OLAP database for shuffle/aggregation
@@ -80,10 +80,10 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
 
-# Local development: editable sources for workqueue-py and raydp
+# Local development: editable sources for anvil-py and raydp
 # CI uses `uv sync --no-sources` to skip these and install pre-built wheels instead
 [tool.uv.sources]
-nurion-workqueue = { path = "../lib/workqueue-rs", editable = true }
+nurion-anvil = { path = "../lib/anvil-rs", editable = true }
 nurion-raydp = { path = "../lib/raydp", editable = true }
 
 [tool.setuptools.packages.find]
@@ -111,8 +111,8 @@ warn_unused_ignores = false  # Avoid noise during gradual typing
 show_error_codes = true
 exclude = [
     "^tests/",  # Tests don't need strict typing
-    ".*workqueue_pb2\\.py$",  # Generated protobuf files
-    ".*workqueue_pb2_grpc\\.py$",  # Generated gRPC files
+    ".*anvil_pb2\\.py$",  # Generated protobuf files
+    ".*anvil_pb2_grpc\\.py$",  # Generated gRPC files
 ]
 
 [[tool.mypy.overrides]]
@@ -122,7 +122,7 @@ module = [
     "pandas.*",
     "pyspark.*",
     "slatedb.*",
-    "workqueue_py.*",
+    "anvil_py.*",
     "requests.*",
     "httpx.*",
     "fsspec.*",
@@ -161,7 +161,7 @@ ignore_errors = true
 [tool.ruff]
 line-length = 100
 target-version = "py313"
-extend-exclude = ["**/workqueue_pb2.py"]
+extend-exclude = ["**/anvil_pb2.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -178,7 +178,7 @@ markers = [
     "stability: marks stability tests with deterministic fault injection",
     "chaos: marks chaos engineering tests with random failures (may be flaky)",
     "benchmark: marks performance benchmark tests (skipped by default in CI)",
-    "slow: marks slow tests (WorkQueue broker startup ~5s per test)",
+    "slow: marks slow tests (Anvil broker startup ~5s per test)",
     "timeout: marks tests with timeout (requires pytest-timeout)",
 ]
 

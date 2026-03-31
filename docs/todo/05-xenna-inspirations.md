@@ -16,7 +16,7 @@ Valuable design patterns extracted from [nvidia-cosmos/cosmos-xenna](https://git
 - **Current state**: `GPUAllocator` has bin-packing but ignores node topology and fragmentation
 - **Xenna approach**: Rust LP solver (`good_lp` + `microlp`), models allocation as optimization problem, minimizes cross-node fragmentation
 - **Nurion applicability**: `serve/allocator.py` — concurrent deployment of mixed TP sizes (e.g., 3x TP=4 + 2x TP=2) can cause fragmentation that LP can globally optimize
-- **Implementation path**: New scheduling module in workqueue-rs crate, or standalone Rust crate + PyO3
+- **Implementation path**: New scheduling module in anvil-rs crate, or standalone Rust crate + PyO3
 - **Related**: `docs/todo/02-serve.md`
 
 ### Two-Level Initialization: Node-level + Worker-level (Serve Module)
@@ -43,7 +43,7 @@ Valuable design patterns extracted from [nvidia-cosmos/cosmos-xenna](https://git
 - **Xenna approach**: Sliding window measurement of `batches_per_second_per_worker` per stage, LP solver for globally optimal worker allocation, supports `over_provision_factor`
 - **Advantage**: Queue depth is a lagging indicator (queue already backed up); throughput is a leading indicator
 - **Nurion applicability**: `runtime/autoscaler.py` — in multi-stage pipelines, queue depth reacts slowly when bottleneck stage shifts
-- **Implementation path**: WorkQueue already has `get_queue_stats()`; add per-worker throughput sampling, Rust-side LP solver
+- **Implementation path**: Anvil already has `get_queue_stats()`; add per-worker throughput sampling, Rust-side LP solver
 - **Note**: Nurion's exactly-once semantics and backpressure must be factored into scaling decisions
 
 ### Worker Health Management Parameters
@@ -112,6 +112,6 @@ Documented to avoid re-evaluation in the future.
 | Xenna Design | Reason Not Applicable |
 |---|---|
 | Stateful Stage model (setup loads model into self) | Nurion's stateless operator is a core design principle ensuring exactly-once and fault tolerance; Serve module handles model lifecycle separately |
-| Ray object store for inter-stage communication | Nurion's WorkQueue provides persistence + exactly-once — a core differentiator |
+| Ray object store for inter-stage communication | Nurion's Anvil provides persistence + exactly-once — a core differentiator |
 | attrs instead of dataclass | Marginal benefit, high migration cost; Nurion uses dataclass throughout |
 | Tests co-located with source files | Nurion has a well-established `tests/` structure with marker system |

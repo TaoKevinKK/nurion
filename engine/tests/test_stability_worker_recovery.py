@@ -20,7 +20,7 @@ These are P0 (highest priority) tests that verify:
 - Exactly-once semantics under failures
 - Offset tracking and recovery
 
-All tests use real Ray clusters and WorkQueue brokers (no mocks).
+All tests use real Ray clusters and Anvil brokers (no mocks).
 Data volumes: 10,000+ records with complex operators.
 """
 

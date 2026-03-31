@@ -1,7 +1,7 @@
 # Solstice Runtime Architecture
 
 > NOTE: This document references the former Tansu/Kafka queue model. The current
-> implementation uses the embedded WorkQueue backend. See
+> implementation uses the embedded Anvil backend. See
 > `../work-queue-redesign.md`.
 
 ## Overview
@@ -67,7 +67,7 @@ Source.output_queue <── pull ── Transform.workers ── produce ──>
 * `StageMaster`: Manages the output queue and a pool of StageWorkers. Delegates to component managers:
   - `WorkerManager`: Worker lifecycle (spawn, stop, status tracking)
   - `RecoveryManager`: Failure tracking and worker recovery
-  - Backpressure/autoscaling use job-level WorkQueue stats
+  - Backpressure/autoscaling use job-level Anvil stats
 
 * `StageWorker`: Executes the user operator over batches. Responsibilities:
   - Pull messages from upstream queue.
@@ -152,7 +152,7 @@ When all stages are complete, the runner stops the job.
 ### Natural Backpressure (Pull Model)
 
 * **Queue lag-based throttling**: When downstream workers can't keep up, upstream queue fills up, naturally throttling producers.
-* **Lag monitoring**: Job-level WorkQueue stats drive backpressure/autoscaling decisions.
+* **Lag monitoring**: Job-level Anvil stats drive backpressure/autoscaling decisions.
 * **No explicit backpressure signals needed**: Downstream controls the flow rate by its pull frequency.
 
 ### Worker Scheduling

@@ -15,8 +15,8 @@
 """Jobs API - list and retrieve job information.
 
 Architecture:
-- JobRunner writes metadata to WorkQueue state (gRPC)
-- WebUI reads directly from WorkQueue storage (pyO3)
+- JobRunner writes metadata to Anvil state (gRPC)
+- WebUI reads directly from Anvil storage (pyO3)
 """
 
 from typing import Any, Dict, Optional

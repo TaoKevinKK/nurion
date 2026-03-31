@@ -1,7 +1,7 @@
 # Deprecated Design Docs
 
 This directory contains legacy design documents that no longer reflect the
-current WorkQueue-based runtime. They are preserved for historical reference.
+current Anvil-based runtime. They are preserved for historical reference.
 
 ## Lessons Learned
 

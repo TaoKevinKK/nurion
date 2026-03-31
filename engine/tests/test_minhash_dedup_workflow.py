@@ -303,7 +303,7 @@ class TestMinHashDedupWorkflowExecution:
                 "num_shards": num_shards,  # Parametrized shard count
                 "shard_num_cpus": 0.1,  # Minimal CPU for test (4 CPU cluster)
                 "shard_memory_mb": 512,
-                "workqueue_db_path": "memory://",
+                "anvil_db_path": "memory://",
                 "output_format": "lance",
                 "num_partitions": 4,
                 "split_size": 1000,  # Normal split size

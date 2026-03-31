@@ -4,13 +4,13 @@ _Analysis Date: December 10, 2025_
 
 ---
 
-## ⚠️ SUPERSEDED BY WORKQUEUE (2026-02-01)
+## ⚠️ SUPERSEDED BY ANVIL (2026-02-01)
 
-**This document is now historical.** The Tansu/Kafka partition-based model has been replaced with WorkQueue, a single-queue multi-consumer model.
+**This document is now historical.** The Tansu/Kafka partition-based model has been replaced with Anvil, a single-queue multi-consumer model.
 
 See: [`work-queue-redesign.md`](../work-queue-redesign.md) for the current design.
 
-### Why WorkQueue?
+### Why Anvil?
 
 The partition-based model had fundamental issues:
 - Complex partition management and rebalancing
@@ -18,9 +18,9 @@ The partition-based model had fundamental issues:
 - Offset-based tracking was error-prone
 - EOF per partition was complicated
 
-### WorkQueue Solution
+### Anvil Solution
 
-| Old Issue | WorkQueue Solution |
+| Old Issue | Anvil Solution |
 |-----------|-------------------|
 | Offset not persisted | **No offsets** - claim-based with server-managed state |
 | Multi-worker coordination | **Work-stealing** - any worker claims any message |
@@ -37,21 +37,21 @@ This section preserved for historical reference:
 
 | Issue | Status | Resolution |
 |-------|--------|------------|
-| **#1 Offset not persisted** | 🔄 Obsolete | WorkQueue uses claim-based model, no offsets |
+| **#1 Offset not persisted** | 🔄 Obsolete | Anvil uses claim-based model, no offsets |
 | **#2 Data in Ray Object Store** | ⚠️ Still applies | Design choice; S3 backup not yet implemented |
-| **#3 Consumer Group offset not shared** | 🔄 Obsolete | WorkQueue has no consumer groups |
-| **#4 Multi-worker coordination** | 🔄 Obsolete | WorkQueue uses work-stealing |
+| **#3 Consumer Group offset not shared** | 🔄 Obsolete | Anvil has no consumer groups |
+| **#4 Multi-worker coordination** | 🔄 Obsolete | Anvil uses work-stealing |
 | **#5 Worker failure no restart** | ✅ Fixed | RecoveryManager handles worker failures |
 | **#6 Exception skips message** | ✅ Fixed | FailurePolicy controls behavior |
-| **#7 Single partition** | 🔄 Obsolete | WorkQueue has no partitions |
+| **#7 Single partition** | 🔄 Obsolete | Anvil has no partitions |
 | **#8 Payload deletion timing** | ⚠️ Acceptable | Not critical for current use cases |
-| **#9 Lag calculation incorrect** | 🔄 Obsolete | WorkQueue uses `get_stats()` |
+| **#9 Lag calculation incorrect** | 🔄 Obsolete | Anvil uses `get_stats()` |
 
-**Note**: Issues marked 🔄 Obsolete are no longer relevant with the WorkQueue architecture.
+**Note**: Issues marked 🔄 Obsolete are no longer relevant with the Anvil architecture.
 
 ---
 
-## Historical Analysis (Pre-WorkQueue)
+## Historical Analysis (Pre-Anvil)
 
 ---
 

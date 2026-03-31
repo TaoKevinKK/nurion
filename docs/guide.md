@@ -75,7 +75,7 @@ async def main():
     # 1. Create a Job
     job = Job(
         job_id="simple_etl",
-        config=JobConfig(workqueue_db_path="memory://"),
+        config=JobConfig(anvil_db_path="memory://"),
     )
 
     # 2. Source Stage - read from a Lance table
@@ -284,7 +284,7 @@ async def run():
 
     job = Job(
         job_id="image_captioning",
-        config=JobConfig(workqueue_db_path="memory://"),
+        config=JobConfig(anvil_db_path="memory://"),
     )
 
     # Source: read images from a Lance table
@@ -520,7 +520,7 @@ async def main():
     # ====== Step 2: Run pipeline ======
     job = Job(
         job_id="captioning",
-        config=JobConfig(workqueue_db_path="memory://"),
+        config=JobConfig(anvil_db_path="memory://"),
     )
 
     job.add_stage(Stage(
@@ -670,7 +670,7 @@ async def run_pipeline():
     # Build and run pipeline
     job = Job(
         job_id="ocr_pipeline",
-        config=JobConfig(workqueue_db_path="memory://"),
+        config=JobConfig(anvil_db_path="memory://"),
     )
 
     job.add_stage(Stage(
@@ -962,7 +962,7 @@ ray job submit --address http://localhost:8265 \
     "aiohttp",
     "vllm==0.15.1",
     "pillow",
-    "nurion-workqueue"
+    "nurion-anvil"
   ],
   "env_vars": {
     "VLLM_WORKER_MULTIPROC_METHOD": "spawn",

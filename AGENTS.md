@@ -8,7 +8,7 @@
 |-----------|------|-------------|
 | **Engine** | `/engine` | Ray-based distributed streaming processing framework with multimodal operators |
 | **Control Plane** | `/control` | FastAPI orchestration service (task management, K8s integration, data catalog) |
-| **Shared Libs** | `/lib` | WorkQueue broker (Rust), RayDP Spark-on-Ray integration |
+| **Shared Libs** | `/lib` | Anvil broker (Rust), RayDP Spark-on-Ray integration |
 
 ## Monorepo Structure
 
@@ -28,14 +28,14 @@ nurion/
 │   ├── alembic/              # Database migrations
 │   └── tests/
 ├── lib/                      # Shared libraries
-│   ├── workqueue-rs/         # Rust WorkQueue broker + Python bindings
+│   ├── anvil-rs/         # Rust Anvil broker + Python bindings
 │   └── raydp/                # Spark on Ray (Python + JVM)
 └── scripts/                  # CI/dev scripts
 ```
 
 ## Tech Stack
 
-- **Languages**: Python 3.12+, Rust (WorkQueue), Java/Scala (Spark)
+- **Languages**: Python 3.12+, Rust (Anvil), Java/Scala (Spark)
 - **Runtime**: Ray (distributed computing), Apache Spark
 - **API Framework**: FastAPI
 - **Package Manager**: uv (monorepo workspace)
@@ -83,7 +83,7 @@ Each subproject has its own `AGENTS.md` with specific context:
 - `engine/AGENTS.md` — Engine architecture, operator patterns, test conventions
 - `control/AGENTS.md` — Control plane development, API patterns
 - `lib/AGENTS.md` — Shared libraries overview
-- `lib/workqueue-rs/AGENTS.md` — WorkQueue Rust development (O(1) I/O principles)
+- `lib/anvil-rs/AGENTS.md` — Anvil Rust development (O(1) I/O principles)
 
 ## Resources
 

@@ -1,7 +1,7 @@
 # Spark Source V2: Direct Queue Integration
 
 > NOTE: This document references the former Tansu/Kafka queue model. The current
-> implementation uses the embedded WorkQueue backend. See
+> implementation uses the embedded Anvil backend. See
 > `work-queue-redesign.md`.
 
 _Design document for optimized Spark-to-Nurion Runtime data pipeline_

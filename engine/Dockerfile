@@ -1,5 +1,5 @@
 # Nurion Engine Base Image
-# Includes: Python 3.12, JVM 17, FFmpeg, Ray, workqueue-py
+# Includes: Python 3.12, JVM 17, FFmpeg, Ray, anvil-py
 # Based on Ubuntu 24.04
 # 
 # This is a base image - engine code is NOT included.
@@ -40,20 +40,20 @@ ENV PATH="/root/.local/bin:${JAVA_HOME}/bin:${PATH}"
 
 WORKDIR /app
 
-# Copy only what's needed for building (workqueue-rs and java from lib/)
-COPY lib/workqueue-rs /app/build/workqueue-rs
+# Copy only what's needed for building (anvil-rs and java from lib/)
+COPY lib/anvil-rs /app/build/anvil-rs
 COPY lib/raydp/java /app/build/java
 
-# Install Rust and protoc, build workqueue-rs, then cleanup completely (all in one layer)
+# Install Rust and protoc, build anvil-rs, then cleanup completely (all in one layer)
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
     export PATH="/root/.cargo/bin:$PATH" && \
     cargo install maturin && \
     apt-get update && apt-get install -y protobuf-compiler && \
-    cd /app/build/workqueue-rs && \
+    cd /app/build/anvil-rs && \
     maturin build --release && \
     uv pip install --system --no-cache target/wheels/*.whl && \
     # Cleanup Rust, protoc and source completely
-    rm -rf /app/build/workqueue-rs && \
+    rm -rf /app/build/anvil-rs && \
     rm -rf /root/.cargo && \
     rm -rf /root/.rustup && \
     apt-get remove -y protobuf-compiler && apt-get autoremove -y
@@ -96,7 +96,7 @@ RUN uv pip install --system --no-cache \
 
 # Verify installations and remove build dependencies
 RUN python -c "import ray; print(f'Ray: {ray.__version__}')" && \
-    python -c "import workqueue_py; print('workqueue_py: OK')" && \
+    python -c "import anvil_py; print('anvil_py: OK')" && \
     python -c "import pyarrow; print(f'PyArrow: {pyarrow.__version__}')" && \
     ffmpeg -version | head -1 && \
     java -version 2>&1 | head -1

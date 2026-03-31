@@ -15,11 +15,11 @@
 """Portal service - Ray Serve deployment for Nurion WebUI.
 
 The Portal is the global entry point for accessing all Nurion jobs.
-It reads directly from WorkQueue storage (pyO3).
+It reads directly from Anvil storage (pyO3).
 
 Usage:
     from _internal.webui.portal import start_portal
-    start_portal("file:///path/to/workqueue.db")
+    start_portal("file:///path/to/anvil.db")
     # Access at http://localhost:8000/nurion/
 """
 
@@ -31,16 +31,16 @@ from _internal.webui.state.manager import JobStateManager
 from _internal.utils.logging import create_ray_logger
 
 
-def create_portal_app(workqueue_db_path: str):
+def create_portal_app(anvil_db_path: str):
     """Create Portal FastAPI app.
 
     Args:
-        workqueue_db_path: WorkQueue storage path
+        anvil_db_path: Anvil storage path
 
     Returns:
         FastAPI application
     """
-    storage = JobStateManager(workqueue_db_path)
+    storage = JobStateManager(anvil_db_path)
     # Portal runs at /nurion/ via Ray Serve route_prefix
     return create_webui_app(storage, title="Nurion Portal", base_path="/solstice")
 
@@ -55,11 +55,11 @@ class NurionPortal:
     Wraps the FastAPI app and handles ASGI forwarding.
     """
 
-    def __init__(self, workqueue_db_path: str):
+    def __init__(self, anvil_db_path: str):
         """Initialize portal with storage path."""
-        self.app = create_portal_app(workqueue_db_path)
+        self.app = create_portal_app(anvil_db_path)
         self.logger = create_ray_logger("NurionPortal")
-        self.logger.info(f"Portal initialized with storage: {workqueue_db_path}")
+        self.logger.info(f"Portal initialized with storage: {anvil_db_path}")
 
     async def __call__(self, request: Request):
         """Handle HTTP request by forwarding to FastAPI app."""
@@ -94,11 +94,11 @@ class NurionPortal:
         return Response(content=body, status_code=status_code, headers=headers)
 
 
-def start_portal(workqueue_db_path: str, port: int = 8000) -> str:
+def start_portal(anvil_db_path: str, port: int = 8000) -> str:
     """Start the global Nurion Portal service.
 
     Args:
-        workqueue_db_path: WorkQueue storage path
+        anvil_db_path: Anvil storage path
         port: HTTP port for Ray Serve
 
     Returns:
@@ -117,9 +117,9 @@ def start_portal(workqueue_db_path: str, port: int = 8000) -> str:
         logger.info(f"Ray Serve already running: {e}")
 
     # Deploy portal
-    handle = NurionPortal.bind(workqueue_db_path)  # type: ignore[attr-defined]
+    handle = NurionPortal.bind(anvil_db_path)  # type: ignore[attr-defined]
     serve.run(handle, name="nurion-portal", route_prefix="/solstice")
-    logger.info(f"Deployed Nurion Portal at /solstice with storage: {workqueue_db_path}")
+    logger.info(f"Deployed Nurion Portal at /solstice with storage: {anvil_db_path}")
 
     return "/solstice"
 

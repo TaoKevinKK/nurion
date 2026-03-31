@@ -17,11 +17,11 @@
 Design Principles:
 - OperatorConfig: User-defined configuration, immutable after creation
 - OperatorRuntime: System-assigned runtime parameters, immutable after creation
-- Operator: Processor with state managed via WorkQueue Server
+- Operator: Processor with state managed via Anvil Server
 
-State Management (WorkQueue model):
-- State is integrated into WorkQueue Server (single-writer, no partition conflicts)
-- Workers access state via WorkQueue Client: state_get(), state_put()
+State Management (Anvil model):
+- State is integrated into Anvil Server (single-writer, no partition conflicts)
+- Workers access state via Anvil Client: state_get(), state_put()
 - Atomic operations: ack + state update in single transaction
 - No local SlateDB state store needed in operators
 """
@@ -326,10 +326,10 @@ class Operator(ABC):
     """Base class for all operators.
 
     Design Principle: Operators receive immutable config and runtime parameters.
-    State is managed via WorkQueue Server (not local state store).
+    State is managed via Anvil Server (not local state store).
 
-    State Management (WorkQueue model):
-    - State operations go through WorkQueue Client
+    State Management (Anvil model):
+    - State operations go through Anvil Client
     - Atomic ack + state update supported via ack_and_scatter()
     - No local SlateDB needed in operators
 

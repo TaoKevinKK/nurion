@@ -11,11 +11,11 @@
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Rust Server (`lib/workqueue-rs/`) | ✅ Done | gRPC + SlateDB + PyO3 |
+| Rust Server (`lib/anvil-rs/`) | ✅ Done | gRPC + SlateDB + PyO3 |
 | GC-based Ack | ✅ Done | Messages retained until GC, safer recovery |
 | State API | ✅ Done | `state_get`, `state_put`, atomic ack+state |
-| Python Client | ✅ Done | `workqueue_py.client.WorkQueueClient` |
-| Solstice Integration | ✅ Done | `engine/queue/workqueue.py` |
+| Python Client | ✅ Done | `anvil_py.client.AnvilClient` |
+| Solstice Integration | ✅ Done | `engine/queue/anvil.py` |
 | Unified Worker Exit | ✅ Done | No EOF messages, uses `notify_upstream_finished` + queue drained |
 
 ---
@@ -54,7 +54,7 @@ Replace the Kafka partition model with a **single-queue, multi-consumer work que
 │                        Driver Process                           │
 │                                                                 │
 │  ┌───────────────────────────────────────────────────────────┐  │
-│  │              WorkQueueServer (Rust + tonic)               │  │
+│  │              AnvilServer (Rust + tonic)               │  │
 │  │  ┌───────────────┐  ┌────────────┐  ┌─────────────────┐   │  │
 │  │  │   SlateDB     │  │  tokio     │  │  gRPC Server    │   │  │
 │  │  │ (S3 backed)   │  │  runtime   │  │  (tonic)        │   │  │
@@ -68,7 +68,7 @@ Replace the Kafka partition model with a **single-queue, multi-consumer work que
 │                              ▲                                  │
 │                              │ PyO3                             │
 │  ┌───────────────────────────────────────────────────────────┐  │
-│  │  Python Binding: workqueue_py.WorkQueueBroker             │  │
+│  │  Python Binding: anvil_py.AnvilBroker             │  │
 │  │    - start(db_path, host, port) -> address                │  │
 │  │    - stop()                                               │  │
 │  │    - get_stats() -> dict                                  │  │
@@ -135,7 +135,7 @@ State Entries:
 ### 2. gRPC API
 
 ```protobuf
-service WorkQueue {
+service Anvil {
   // Consumer API
   rpc Claim(ClaimRequest) returns (ClaimResponse);
   rpc Ack(AckRequest) returns (AckResponse);
@@ -301,7 +301,7 @@ async def recover_timeout_messages():
 
 #### 4.1 Problem: State Store Partitioning with Work-Stealing
 
-The original design used partition-scoped state stores (one SlateDB per partition). This worked well when worker:partition was 1:1, but causes issues with WorkQueue's work-stealing model:
+The original design used partition-scoped state stores (one SlateDB per partition). This worked well when worker:partition was 1:1, but causes issues with Anvil's work-stealing model:
 
 ```
 问题: SlateDB 只支持单写者
@@ -310,7 +310,7 @@ The original design used partition-scoped state stores (one SlateDB per partitio
   Worker_0 ──独占写──> SlateDB_partition_0  ✓
   Worker_1 ──独占写──> SlateDB_partition_1  ✓
 
-WorkQueue work-stealing (N:M):
+Anvil work-stealing (N:M):
   Worker_0 ─┬─ 可能写 ──> SlateDB_partition_0
             └─ 可能写 ──> SlateDB_partition_1  ❌ 多写者冲突！
 ```
@@ -320,13 +320,13 @@ If workers can process any message, and state is partitioned by key hash, we'd n
 - Complex locking across processes
 - Or give up work-stealing benefits
 
-#### 4.2 Solution: State Integrated into WorkQueue Server
+#### 4.2 Solution: State Integrated into Anvil Server
 
-Since WorkQueue Server already manages SlateDB as a single-writer process, extend it to also manage operator state:
+Since Anvil Server already manages SlateDB as a single-writer process, extend it to also manage operator state:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│           WorkQueue Server (单进程, 单写者)              │
+│           Anvil Server (单进程, 单写者)              │
 │  ┌─────────────┐    ┌─────────────┐                    │
 │  │ Message DB  │    │  State DB   │  ← 同一进程管理     │
 │  │  (SlateDB)  │    │  (SlateDB)  │    无多写者问题     │
@@ -345,7 +345,7 @@ Since WorkQueue Server already manages SlateDB as a single-writer process, exten
 #### 4.3 Extended gRPC API
 
 ```protobuf
-service WorkQueue {
+service Anvil {
   // Existing consumer API
   rpc Claim(ClaimRequest) returns (ClaimResponse);
   rpc Ack(AckRequest) returns (AckResponse);
@@ -574,7 +574,7 @@ Background GC task cleans up acked messages after the retention period:
 
 ```rust
 // recovery.rs - GcTask
-async fn run_gc(storage: &WorkQueueStorage, retention_ns: u64) {
+async fn run_gc(storage: &AnvilStorage, retention_ns: u64) {
     let now = now_nanos();
     let cutoff = now - retention_ns;
 
@@ -589,9 +589,9 @@ async fn run_gc(storage: &WorkQueueStorage, retention_ns: u64) {
 }
 ```
 
-**Configuration** (`WorkQueueConfig`):
+**Configuration** (`AnvilConfig`):
 ```rust
-pub struct WorkQueueConfig {
+pub struct AnvilConfig {
     // ... other fields ...
     pub acked_retention_secs: f64,  // Default: 3600.0 (1 hour)
     pub gc_interval_secs: f64,       // Default: 60.0 (1 minute)
@@ -600,8 +600,8 @@ pub struct WorkQueueConfig {
 
 **Python API**:
 ```python
-broker = WorkQueueBrokerManager(
-    db_path="file:///tmp/workqueue",
+broker = AnvilBrokerManager(
+    db_path="file:///tmp/anvil",
     acked_retention_secs=3600.0,  # Keep acked messages for 1 hour
     gc_interval_secs=60.0,        # Run GC every minute
 )
@@ -624,23 +624,23 @@ broker = WorkQueueBrokerManager(
 ### Project Structure
 
 ```
-lib/workqueue-rs/
+lib/anvil-rs/
 ├── Cargo.toml
 ├── build.rs                    # protobuf compilation
 ├── proto/
-│   └── workqueue.proto
+│   └── anvil.proto
 ├── src/
 │   ├── lib.rs                  # PyO3 entry point
 │   ├── server.rs               # gRPC server
-│   ├── service.rs              # WorkQueueService implementation
+│   ├── service.rs              # AnvilService implementation
 │   ├── storage.rs              # SlateDB wrapper (messages)
 │   ├── state.rs                # State store (integrated state management)
 │   ├── types.rs                # Data structures
 │   └── recovery.rs             # Timeout recovery logic
 └── python/
-    └── workqueue_py/
+    └── anvil_py/
         ├── __init__.py
-        └── client.py           # WorkQueueClient with state support
+        └── client.py           # AnvilClient with state support
 ```
 
 ### Key Rust Dependencies
@@ -660,10 +660,10 @@ parking_lot = "0.12"       # Fast locks
 
 ```python
 # === Broker (Driver side) ===
-from workqueue_py import WorkQueueBroker, BrokerConfig
+from anvil_py import AnvilBroker, BrokerConfig
 
 config = BrokerConfig(
-    db_path="s3://bucket/workqueue",  # or file:///path
+    db_path="s3://bucket/anvil",  # or file:///path
     host="0.0.0.0",
     port=0,                           # auto-assign
     claim_timeout_secs=60.0,
@@ -672,15 +672,15 @@ config = BrokerConfig(
     gc_interval_secs=60.0,            # GC: run every minute
 )
 
-broker = WorkQueueBroker(config)
+broker = AnvilBroker(config)
 broker.start()
-print(f"WorkQueue started at port {broker.get_port()}")
+print(f"Anvil started at port {broker.get_port()}")
 broker.stop()
 
 # === Client (Worker side) ===
-from workqueue_py.client import WorkQueueClient
+from anvil_py.client import AnvilClient
 
-client = WorkQueueClient("localhost:50051", worker_id="worker-1")
+client = AnvilClient("localhost:50051", worker_id="worker-1")
 client.start()
 
 # Producer
@@ -833,7 +833,7 @@ async fn claim(&self, queue: &str, batch_size: usize) -> Vec<Message> {
 
 ### 10. State Operation Bottleneck
 
-**Issue**: All state operations go through the single WorkQueue Server, which could become a bottleneck for high-frequency state access.
+**Issue**: All state operations go through the single Anvil Server, which could become a bottleneck for high-frequency state access.
 
 **Mitigation**:
 - Batch state operations (read multiple keys in one RPC)
@@ -883,20 +883,20 @@ fn validate_namespace(namespace: &str) -> Result<(), Status> {
 
 ### 12. Multi-Job Isolation
 
-**Issue**: Should multiple jobs share one WorkQueue instance?
+**Issue**: Should multiple jobs share one Anvil instance?
 
 **Recommendation**:
-- Each job gets its own WorkQueueBroker instance
+- Each job gets its own AnvilBroker instance
 - Different SlateDB paths for isolation
 - Simpler resource management and debugging
 
 ```python
 # Job 1
-broker1 = WorkQueueBroker()
+broker1 = AnvilBroker()
 broker1.start(db_path="s3://bucket/job1/queue")
 
 # Job 2
-broker2 = WorkQueueBroker()
+broker2 = AnvilBroker()
 broker2.start(db_path="s3://bucket/job2/queue")
 ```
 
@@ -904,9 +904,9 @@ broker2.start(db_path="s3://bucket/job2/queue")
 
 ## Migration Plan
 
-### Phase 1: Implement WorkQueue (Rust)
+### Phase 1: Implement Anvil (Rust)
 
-1. Create `lib/workqueue-rs/` project
+1. Create `lib/anvil-rs/` project
 2. Implement gRPC service with tonic
 3. Integrate SlateDB for persistence
 4. Add PyO3 bindings
@@ -914,15 +914,15 @@ broker2.start(db_path="s3://bucket/job2/queue")
 
 ### Phase 2: Python Client
 
-1. Create `WorkQueueClient` class using `grpcio`
+1. Create `AnvilClient` class using `grpcio`
 2. Implement heartbeat streaming
 3. Add connection retry logic
 4. Integration tests with Rust server
 
 ### Phase 3: Integrate with Solstice
 
-1. Update `StageMaster` to use `WorkQueueBroker`
-2. Update `StageWorker` to use `WorkQueueClient`
+1. Update `StageMaster` to use `AnvilBroker`
+2. Update `StageWorker` to use `AnvilClient`
 3. Remove partition-related code from managers
 4. Update recovery logic
 
@@ -937,7 +937,7 @@ broker2.start(db_path="s3://bucket/job2/queue")
 
 ## Comparison with Current Design
 
-| Aspect | Current (Tansu/Kafka) | New (WorkQueue) |
+| Aspect | Current (Tansu/Kafka) | New (Anvil) |
 |--------|----------------------|-----------------|
 | Parallelism unit | Partition | Message |
 | Consumer model | 1 partition : 1 consumer | N consumers : 1 queue |
@@ -946,7 +946,7 @@ broker2.start(db_path="s3://bucket/job2/queue")
 | Worker failure recovery | Partition reassignment | Message timeout + reclaim |
 | Code complexity | High (PartitionManager, etc.) | Low (single queue model) |
 | Persistence | Tansu storage backends | SlateDB (S3) |
-| State management | Separate SlateDB per partition | Integrated in WorkQueue Server |
+| State management | Separate SlateDB per partition | Integrated in Anvil Server |
 | State write model | Worker writes directly | Server-mediated (single writer) |
 | Shuffle support | Queue partitions | State-based (any worker, any key) |
 | Partition skew | Manual rebalancing | Work-stealing (automatic) |
@@ -961,7 +961,7 @@ broker2.start(db_path="s3://bucket/job2/queue")
 
 3. **Payload storage**: Keep using Ray Object Store for payloads, or move to SlateDB?
 
-4. **Metrics**: What metrics should the WorkQueue expose? (queue depth, claim rate, ack latency, etc.)
+4. **Metrics**: What metrics should the Anvil expose? (queue depth, claim rate, ack latency, etc.)
 
 5. **State TTL**: Should state entries have automatic expiration? Useful for:
    - Dedup state cleanup after job completion
@@ -1021,7 +1021,7 @@ Instead: **Detect → Report → Replay from Source**
 │       │                                                             │
 │       │ nack(reason=PAYLOAD_MISSING)                                │
 │       ▼                                                             │
-│  WorkQueue Server                                                   │
+│  Anvil Server                                                   │
 │       │                                                             │
 │       │ Route to rebuild_queue                                      │
 │       ▼                                                             │
@@ -1192,7 +1192,7 @@ class RebuildPolicy(Enum):
   - Removed local SlateDB state store from operators (shuffle.py, connected_components.py)
   - Edges now flow through payload (Arrow tables) - scales to 10B+ records
   - Labels tracked via @master_callable aggregation
-  - Future: labels stored via WorkQueue state API (state_get/state_put)
+  - Future: labels stored via Anvil state API (state_get/state_put)
   - Removed: state_store, _ensure_partition_acquired(), SlateDB imports from operators
   - Updated: CCIterateOperator, CCIterateMaster, related tests
   - See "Connected Components Operator Redesign" section below
@@ -1217,7 +1217,7 @@ The original CC operator design used local SlateDB partition state stores for la
 This design had critical issues:
 
 1. **Doesn't scale to 10B+ records**: SlateDB per partition means N partitions × M records = very large state
-2. **Partition conflicts with WorkQueue work-stealing**: When workers can process any message, partition-based state leads to multi-writer conflicts (SlateDB is single-writer)
+2. **Partition conflicts with Anvil work-stealing**: When workers can process any message, partition-based state leads to multi-writer conflicts (SlateDB is single-writer)
 3. **Complexity**: `_ensure_partition_acquired()` calls throughout the codebase
 
 ### New Design: Payload-Based Iteration
@@ -1227,7 +1227,7 @@ This design had critical issues:
 **Solution**:
 - **Edges → Payload**: Flow through Arrow tables, scales to any size
 - **Labels → Tracked via iteration**: No external state needed for basic convergence
-- **Future: Labels → WorkQueue State API**: For advanced use cases
+- **Future: Labels → Anvil State API**: For advanced use cases
 
 ### Architecture
 
@@ -1348,9 +1348,9 @@ class CCIterateMaster(StageMaster):
 ### Benefits
 
 1. **Scales to 10B+ records**: Edges flow through Arrow tables, no single-node state limit
-2. **Works with WorkQueue work-stealing**: No partition ownership, any worker processes any message
+2. **Works with Anvil work-stealing**: No partition ownership, any worker processes any message
 3. **Simpler code**: No `_ensure_partition_acquired()`, no SlateDB lifecycle management
-4. **Future-proof**: Can add WorkQueue state API for labels when needed
+4. **Future-proof**: Can add Anvil state API for labels when needed
 
 ### Trade-offs
 
@@ -1363,7 +1363,7 @@ class CCIterateMaster(StageMaster):
 3. **Large gRPC payloads**: Edges data in payload may be large
    - Mitigation: Already using payload store (Ray Object Store) for large data
 
-### Future: WorkQueue State API for Labels
+### Future: Anvil State API for Labels
 
 For use cases requiring label persistence:
 ```python
@@ -1380,7 +1380,7 @@ await self.queue_client.ack_with_state(
 ```
 
 This would require:
-1. WorkQueue state API integration in operators
+1. Anvil state API integration in operators
 2. State cleanup after job completion
 3. State size limits (labels are small, ~100 bytes per doc)
 

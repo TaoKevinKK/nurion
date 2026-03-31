@@ -21,7 +21,7 @@ These are P0 (highest priority) tests that verify:
 - Data consistency under fault conditions
 - Correctness with row-count-changing operators (filter, explode)
 
-All tests use real Ray clusters and WorkQueue brokers (no mocks).
+All tests use real Ray clusters and Anvil brokers (no mocks).
 Data volumes: 10,000+ records for realistic testing.
 """
 

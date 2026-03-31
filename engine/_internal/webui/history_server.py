@@ -23,10 +23,10 @@ from _internal.webui.state.manager import JobStateManager
 
 @click.command()
 @click.option(
-    "--workqueue-db-path",
+    "--anvil-db-path",
     "-s",
     required=True,
-    help="WorkQueue storage path (e.g., file:///tmp/workqueue.db)",
+    help="Anvil storage path (e.g., file:///tmp/anvil.db)",
 )
 @click.option(
     "--host",
@@ -46,21 +46,21 @@ from _internal.webui.state.manager import JobStateManager
     is_flag=True,
     help="Enable auto-reload for development",
 )
-def history_server(workqueue_db_path: str, host: str, port: int, reload: bool):
+def history_server(anvil_db_path: str, host: str, port: int, reload: bool):
     """Start Nurion History Server for viewing completed jobs.
 
     The History Server provides read-only access to archived job data
-    stored in WorkQueue storage. It uses the same WebUI interface as the embedded
+    stored in Anvil storage. It uses the same WebUI interface as the embedded
     mode but reads data from storage instead of live jobs.
 
     Example:
-        nurion history-server -s file:///tmp/workqueue.db -p 8080
+        nurion history-server -s file:///tmp/anvil.db -p 8080
     """
     click.echo("╔════════════════════════════════════════════╗")
     click.echo("║   Nurion History Server                   ║")
     click.echo("╚════════════════════════════════════════════╝")
     click.echo()
-    click.echo(f"Storage:  {workqueue_db_path}")
+    click.echo(f"Storage:  {anvil_db_path}")
     click.echo(f"Address:  http://{host}:{port}")
     click.echo()
     click.echo("Press Ctrl+C to stop")
@@ -68,7 +68,7 @@ def history_server(workqueue_db_path: str, host: str, port: int, reload: bool):
 
     # Initialize storage (read-only, caches readers per job)
     try:
-        storage = JobStateManager(workqueue_db_path)
+        storage = JobStateManager(anvil_db_path)
         click.echo("✓ Connected to storage (read-only)")
     except Exception as e:
         click.echo(f"✗ Failed to initialize storage: {e}", err=True)

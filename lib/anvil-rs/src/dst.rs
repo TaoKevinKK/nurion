@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Deterministic Simulation Testing (DST) for WorkQueue
+// Deterministic Simulation Testing (DST) for Anvil
 //
 // Generates random sequences of queue operations from a fixed seed,
-// executes them against a real WorkQueueStorage instance, then verifies
+// executes them against a real AnvilStorage instance, then verifies
 // that critical invariants hold after every run.
 //
 // Invariants checked:
@@ -36,7 +36,7 @@ mod tests {
     use rand::rngs::StdRng;
     use rand::SeedableRng;
 
-    use crate::storage::WorkQueueStorage;
+    use crate::storage::AnvilStorage;
     use crate::types::{advance_sim_time_secs, set_sim_time_nanos, Message, SIM_TIME_LOCK};
 
     /// What a simulated worker currently holds (claimed messages).
@@ -80,7 +80,7 @@ mod tests {
     }
 
     struct DstSimulator {
-        storage: WorkQueueStorage,
+        storage: AnvilStorage,
         rng: StdRng,
         queues: Vec<String>,
         num_workers: usize,
@@ -90,12 +90,12 @@ mod tests {
 
     impl DstSimulator {
         async fn new(seed: u64, num_queues: usize, num_workers: usize) -> Self {
-            let storage = WorkQueueStorage::new("memory://").await.unwrap();
+            let storage = AnvilStorage::new("memory://").await.unwrap();
             Self::with_storage(storage, seed, num_queues, num_workers).await
         }
 
         async fn with_storage(
-            storage: WorkQueueStorage,
+            storage: AnvilStorage,
             seed: u64,
             num_queues: usize,
             num_workers: usize,
@@ -449,7 +449,7 @@ mod tests {
     #[tokio::test]
     async fn test_dst_forward_heavy() {
         let _guard = SIM_TIME_LOCK.lock().unwrap();
-        let storage = WorkQueueStorage::new("memory://").await.unwrap();
+        let storage = AnvilStorage::new("memory://").await.unwrap();
         storage.create_queue("upstream").await.unwrap();
         storage.create_queue("downstream").await.unwrap();
 
@@ -506,7 +506,7 @@ mod tests {
     #[tokio::test]
     async fn test_dst_recovery_cycle() {
         let _guard = SIM_TIME_LOCK.lock().unwrap();
-        let storage = WorkQueueStorage::new("memory://").await.unwrap();
+        let storage = AnvilStorage::new("memory://").await.unwrap();
         storage.create_queue("q").await.unwrap();
 
         set_sim_time_nanos(1_735_689_600_000_000_000);
@@ -580,7 +580,7 @@ mod tests {
     #[tokio::test]
     async fn test_dst_nack_storm() {
         let _guard = SIM_TIME_LOCK.lock().unwrap();
-        let storage = WorkQueueStorage::new("memory://").await.unwrap();
+        let storage = AnvilStorage::new("memory://").await.unwrap();
         storage.create_queue("q").await.unwrap();
 
         set_sim_time_nanos(1_735_689_600_000_000_000);
@@ -639,7 +639,7 @@ mod tests {
     async fn test_500_concurrent_claims() {
         use std::sync::atomic::AtomicU64;
 
-        let storage = WorkQueueStorage::new("memory://").await.unwrap();
+        let storage = AnvilStorage::new("memory://").await.unwrap();
         let storage = Arc::new(storage);
         let queue = "stress_q";
         storage.create_queue(queue).await.unwrap();
@@ -705,7 +705,7 @@ mod tests {
     async fn test_concurrent_push_claim_ack() {
         use std::sync::atomic::AtomicU64;
 
-        let storage = Arc::new(WorkQueueStorage::new("memory://").await.unwrap());
+        let storage = Arc::new(AnvilStorage::new("memory://").await.unwrap());
         let queue = "pca_q";
         storage.create_queue(queue).await.unwrap();
 
@@ -768,7 +768,7 @@ mod tests {
     /// 200 workers claiming from a 4-partition group simultaneously.
     #[tokio::test]
     async fn test_concurrent_claim_from_group() {
-        let storage = Arc::new(WorkQueueStorage::new("memory://").await.unwrap());
+        let storage = Arc::new(AnvilStorage::new("memory://").await.unwrap());
         let group = "stress_grp";
         storage.create_queue_group(group, 4).await.unwrap();
 

@@ -123,7 +123,7 @@ def create_union_job(
     hashes_per_bucket = int(config.get("hashes_per_bucket", DEFAULT_HASHES_PER_BUCKET))
     ngram_size = int(config.get("ngram_size", DEFAULT_NGRAM_SIZE))
     num_partitions = int(config.get("num_partitions", 32))
-    workqueue_db_path = config.get("workqueue_db_path", "memory://")
+    anvil_db_path = config.get("anvil_db_path", "memory://")
     split_size = int(config.get("split_size", 1000))
 
     worker_resources = {
@@ -135,7 +135,7 @@ def create_union_job(
     encoder_parallelism = config.get("encoder_parallelism", (2, 8))
     union_parallelism = config.get("union_parallelism", (2, 8))
 
-    job_config = JobConfig(workqueue_db_path=workqueue_db_path)
+    job_config = JobConfig(anvil_db_path=anvil_db_path)
     job = Job(job_id=f"{job_id}_union", config=job_config)
 
     uf_client = uf_manager.create_client()
@@ -216,7 +216,7 @@ def create_filter_job(
     input_path = config["input"]
     output_path = config["output"]
     id_column = config["id_column"]
-    workqueue_db_path = config.get("workqueue_db_path", "memory://")
+    anvil_db_path = config.get("anvil_db_path", "memory://")
     split_size = int(config.get("split_size", 1000))
 
     worker_resources = {
@@ -227,7 +227,7 @@ def create_filter_job(
 
     filter_parallelism = config.get("filter_parallelism", (2, 4))
 
-    job_config = JobConfig(workqueue_db_path=workqueue_db_path)
+    job_config = JobConfig(anvil_db_path=anvil_db_path)
     job = Job(job_id=f"{job_id}_filter", config=job_config)
 
     # Stage 1: Re-read source (all columns this time)

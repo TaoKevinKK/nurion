@@ -6,7 +6,7 @@ While designing dynamic partition support for Nurion's shuffle mechanism, we
 studied Silo (gadget-inc/silo) — a Rust job queue built on SlateDB that uses
 range-based shard splitting to redistribute load at runtime.
 
-The initial proposal was to add a `SplitPartition` RPC to WorkQueue, modeled on
+The initial proposal was to add a `SplitPartition` RPC to Anvil, modeled on
 Silo's `ShardSplitter` state machine (Requested → Pausing → Cloning → Complete).
 
 ## What we got wrong
@@ -64,7 +64,7 @@ Different skew types require different solutions at different layers:
 | Skew type | Solution | Layer |
 |---|---|---|
 | Hash collision (rare) | More partitions at config time | Configuration |
-| Key frequency, no affinity needed | Work-stealing in ClaimFromGroup | WorkQueue (Rust) |
+| Key frequency, no affinity needed | Work-stealing in ClaimFromGroup | Anvil (Rust) |
 | Key frequency, affinity required | Salted two-phase aggregation | Pipeline DAG |
 | Temporal burst | Backpressure + autoscaler | Runtime (existing) |
 

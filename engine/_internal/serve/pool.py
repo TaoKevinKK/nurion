@@ -41,7 +41,7 @@ from _internal.utils.network import find_free_port
 from _internal.webui.state.schema import encode_json, serve_namespace, serve_worker_key
 
 if TYPE_CHECKING:
-    from _internal.queue import WorkQueueQueueClient
+    from _internal.queue import AnvilQueueClient
     from _internal.serve.allocator import GPUAllocator
 
 logger = logging.getLogger(__name__)
@@ -71,7 +71,7 @@ class ModelPool:
         registry: ray.actor.ActorHandle,
         detached: bool = False,
         allocator: Optional[GPUAllocator] = None,
-        state_writer: Optional["WorkQueueQueueClient"] = None,
+        state_writer: Optional["AnvilQueueClient"] = None,
     ) -> None:
         self._config = config
         self._registry = registry
@@ -95,7 +95,7 @@ class ModelPool:
     # --- State persistence ---
 
     def _write_serve_worker_state(self, worker_id: str, status: str) -> None:
-        """Write serve worker lifecycle metadata into WorkQueue state."""
+        """Write serve worker lifecycle metadata into Anvil state."""
         if self._state_writer is None:
             return
         data = {

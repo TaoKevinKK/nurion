@@ -123,11 +123,11 @@ def mock_stage():
 @pytest.fixture
 def stage_runtime():
     """Provide stage runtime with a real broker for unit tests."""
-    from _internal.queue import WorkQueueBrokerManager
+    from _internal.queue import AnvilBrokerManager
     from _internal.core.models import QueueEndpoint
 
     # Create a real broker for tests
-    broker = WorkQueueBrokerManager(db_path="memory://")
+    broker = AnvilBrokerManager(db_path="memory://")
     broker.start()
 
     broker_url = broker.get_broker_url()
@@ -265,7 +265,7 @@ class TestStageMaster:
     @pytest.mark.asyncio
     async def test_get_queue_client(self, mock_stage, stage_runtime, payload_store, ray_cluster):
         """Test getting output queue for downstream."""
-        from _internal.queue import WorkQueueQueueClient
+        from _internal.queue import AnvilQueueClient
 
         master = StageMaster(
             job_id="test_job",
@@ -280,7 +280,7 @@ class TestStageMaster:
 
         queue = master.get_queue_client()
         assert queue is not None
-        assert isinstance(queue, WorkQueueQueueClient)
+        assert isinstance(queue, AnvilQueueClient)
 
         await master.stop()
 
@@ -300,7 +300,7 @@ class TestSourceManagerBackpressure:
     """
 
     @pytest.mark.asyncio
-    async def test_backpressure_does_not_drop_split(self, workqueue_backend):
+    async def test_backpressure_does_not_drop_split(self, anvil_backend):
         """When backpressure fires, the paused split must still be produced."""
         from _internal.core.managers.source_manager import SourceManager
         from _internal.core.models import Split
@@ -329,7 +329,7 @@ class TestSourceManagerBackpressure:
         mock_worker_manager.notify_safe_to_exit = AsyncMock()
 
         manager.start_split_production(
-            queue_client=workqueue_backend.client,
+            queue_client=anvil_backend.client,
             worker_manager=mock_worker_manager,
             backpressure_fn=backpressure_fn,
             running_fn=lambda: running_flag[0],
@@ -339,7 +339,7 @@ class TestSourceManagerBackpressure:
         # _poll_queue_drained is a separate subtask and won't block this await.
         await asyncio.wait_for(manager._production_task, timeout=5.0)
 
-        stats = workqueue_backend.client.get_stats(manager.planner_queue_name)
+        stats = anvil_backend.client.get_stats(manager.planner_queue_name)
         total_pushed = stats.get("pending_count", 0) + stats.get("claimed_count", 0)
         assert total_pushed == NUM_SPLITS, (
             f"Expected {NUM_SPLITS} splits after backpressure, got {total_pushed}. "
@@ -443,7 +443,7 @@ class TestStageWorkerPayloadCleanup:
     """
 
     @pytest.mark.asyncio
-    async def test_payload_deleted_after_successful_ack(self, workqueue_backend):
+    async def test_payload_deleted_after_successful_ack(self, anvil_backend):
         """payload_store.delete(key) is called once per consumed payload after ack."""
         from _internal.core.stage_worker import StageWorker, WorkerRuntime
 
@@ -468,8 +468,8 @@ class TestStageWorkerPayloadCleanup:
             job_id="job_cleanup",
             stage_id="stage_cleanup",
             broker_endpoint=QueueEndpoint(
-                host=workqueue_backend.host,
-                port=workqueue_backend.port,
+                host=anvil_backend.host,
+                port=anvil_backend.port,
                 storage_url="memory://",
             ),
             upstream=QueueRef.queue("cleanup_upstream"),
@@ -478,19 +478,19 @@ class TestStageWorkerPayloadCleanup:
 
         worker = WorkerClass(runtime, MockStage(), mock_payload_store)
         # Re-use the test backend's already-started client.
-        worker.queue_client = workqueue_backend.client
+        worker.queue_client = anvil_backend.client
 
         # Push a DataQueueMessage that references a payload.
-        workqueue_backend.client.create_queue("cleanup_upstream")
+        anvil_backend.client.create_queue("cleanup_upstream")
         msg = DataQueueMessage(
             message_id="msg_del_001",
             split_id="s1",
             payload_key=payload_key,
             metadata={},
         )
-        workqueue_backend.client.push("cleanup_upstream", msg.to_bytes())
+        anvil_backend.client.push("cleanup_upstream", msg.to_bytes())
 
-        records = workqueue_backend.client.claim("cleanup_upstream", batch_size=1, timeout_ms=1000)
+        records = anvil_backend.client.claim("cleanup_upstream", batch_size=1, timeout_ms=1000)
         assert len(records) == 1, "Expected to claim 1 record"
 
         await worker._process_and_ack(records)
@@ -501,7 +501,7 @@ class TestStageWorkerPayloadCleanup:
         mock_payload_store.delete.assert_called_once_with(payload_key)
 
     @pytest.mark.asyncio
-    async def test_payload_unreachable_raises_runtime_error(self, workqueue_backend):
+    async def test_payload_unreachable_raises_runtime_error(self, anvil_backend):
         """When payload_store returns None, worker must raise RuntimeError (fail fast).
 
         Regression: previously the worker would nack and return None, causing the
@@ -525,28 +525,26 @@ class TestStageWorkerPayloadCleanup:
             job_id="job_fail_fast",
             stage_id="stage_fail_fast",
             broker_endpoint=QueueEndpoint(
-                host=workqueue_backend.host,
-                port=workqueue_backend.port,
+                host=anvil_backend.host,
+                port=anvil_backend.port,
                 storage_url="memory://",
             ),
             upstream=QueueRef.queue("fail_fast_upstream"),
         )
 
         worker = WorkerClass(runtime, MockStage(), mock_payload_store)
-        worker.queue_client = workqueue_backend.client
+        worker.queue_client = anvil_backend.client
 
-        workqueue_backend.client.create_queue("fail_fast_upstream")
+        anvil_backend.client.create_queue("fail_fast_upstream")
         msg = DataQueueMessage(
             message_id="msg_unreachable_001",
             split_id="s1",
             payload_key=payload_key,
             metadata={},
         )
-        workqueue_backend.client.push("fail_fast_upstream", msg.to_bytes())
+        anvil_backend.client.push("fail_fast_upstream", msg.to_bytes())
 
-        records = workqueue_backend.client.claim(
-            "fail_fast_upstream", batch_size=1, timeout_ms=1000
-        )
+        records = anvil_backend.client.claim("fail_fast_upstream", batch_size=1, timeout_ms=1000)
         assert len(records) == 1
 
         with pytest.raises(RuntimeError, match="Payload unreachable"):

@@ -8,9 +8,9 @@ A web-based debugging and monitoring interface for Nurion runtime jobs.
 |---------|--------|
 | Portal Service (Ray Serve) | ✅ Complete |
 | Unified Read-Only Architecture | ✅ Complete |
-| Push-Based Metrics (WorkQueue) | ✅ Complete |
+| Push-Based Metrics (Anvil) | ✅ Complete |
 | Job/Stage/Worker Pages | ✅ Complete |
-| WorkQueue Storage Reader | ✅ Complete |
+| Anvil Storage Reader | ✅ Complete |
 | SSE Real-Time Updates | ❌ Pending |
 | Lineage Visualization | ❌ Pending |
 | Chart.js Metrics | ❌ Pending |
@@ -34,7 +34,7 @@ A web-based debugging and monitoring interface for Nurion runtime jobs.
 
 ### Storage Strategy
 
-- **WorkQueue storage (pyO3)**: Job metadata, events, lineage
+- **Anvil storage (pyO3)**: Job metadata, events, lineage
 - **Prometheus**: Optional real-time metrics (records/s, lag, backpressure)
 
 ## Usage
@@ -48,7 +48,7 @@ from nurion import Job, JobConfig, WebUIConfig
 job = Job(
     job_id="my_etl_job",
     config=JobConfig(
-        workqueue_db_path="file:///tmp/workqueue.db",
+        anvil_db_path="file:///tmp/anvil.db",
         webui=WebUIConfig(
             enabled=True,
         ),
@@ -72,7 +72,7 @@ await runner.run()
 
 ```bash
 # Start History Server
-nurion history-server -s file:///tmp/workqueue.db -p 8080
+nurion history-server -s file:///tmp/anvil.db -p 8080
 
 # Access at: http://localhost:8080
 ```
@@ -102,7 +102,7 @@ http://localhost:<port>/
 | `port` | int | 5000 | Embedded WebUI base port (auto-increment) |
 | `lineage_sample_rate` | float | 0.0 | Split lineage sampling rate |
 
-WorkQueue storage is configured via `JobConfig.workqueue_db_path`.
+Anvil storage is configured via `JobConfig.anvil_db_path`.
 
 ### Environment Variables
 
@@ -259,11 +259,11 @@ The UI uses:
 ### Metrics Not Appearing
 
 1. Check if Prometheus is scraping Ray metrics endpoint (if enabled)
-2. Verify WorkQueue DB path is writable
+2. Verify Anvil DB path is writable
 
 ### History Server Shows No Jobs
 
-1. Check WorkQueue DB path is correct
+1. Check Anvil DB path is correct
 2. Verify jobs are writing state via gRPC
 3. Check logs for storage read errors
 

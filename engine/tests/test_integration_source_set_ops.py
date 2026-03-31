@@ -14,7 +14,7 @@
 
 """Integration tests for Union and Anti-Join sources.
 
-Uses real Lance datasets on the local filesystem + StageMaster + WorkQueue.
+Uses real Lance datasets on the local filesystem + StageMaster + Anvil.
 Validates that the source stage produces the correct number of output messages.
 
 Run with:
@@ -115,7 +115,7 @@ def lance_dataset_different_schema(tmp_path):
 
 async def _run_source_stage(
     operator_config,
-    workqueue_backend,
+    anvil_backend,
     timeout: float = 30.0,
 ) -> int:
     """Start a source-only StageMaster and return the number of output messages."""
@@ -129,8 +129,8 @@ async def _run_source_stage(
     payload_store = RaySplitPayloadStore(name=f"test_store_{id(operator_config)}")
     runtime = StageRuntime(
         broker_endpoint=QueueEndpoint(
-            host=workqueue_backend.host,
-            port=workqueue_backend.port,
+            host=anvil_backend.host,
+            port=anvil_backend.port,
             storage_url="memory://",
         ),
     )
@@ -163,7 +163,7 @@ async def _run_source_stage(
 class TestUnionLanceIntegration:
     @pytest.mark.asyncio
     async def test_union_two_sources_total_rows(
-        self, lance_dataset_a, lance_dataset_b, ray_cluster, workqueue_backend
+        self, lance_dataset_a, lance_dataset_b, ray_cluster, anvil_backend
     ):
         """Union of two Lance tables produces splits covering all rows."""
         config = UnionSourceConfig(
@@ -172,7 +172,7 @@ class TestUnionLanceIntegration:
                 LanceTableSourceConfig(dataset_uri=lance_dataset_b, split_size=10),
             ]
         )
-        output_size = await _run_source_stage(config, workqueue_backend)
+        output_size = await _run_source_stage(config, anvil_backend)
         # A: 30 rows / 10 = 3 splits; B: 20 rows / 10 = 2 splits → 5 messages
         assert output_size == 5
 
@@ -183,7 +183,7 @@ class TestUnionLanceIntegration:
         lance_dataset_b,
         lance_dataset_c,
         ray_cluster,
-        workqueue_backend,
+        anvil_backend,
     ):
         """Union of three Lance tables produces output from all three."""
         config = UnionSourceConfig(
@@ -193,7 +193,7 @@ class TestUnionLanceIntegration:
                 LanceTableSourceConfig(dataset_uri=lance_dataset_c, split_size=15),
             ]
         )
-        output_size = await _run_source_stage(config, workqueue_backend)
+        output_size = await _run_source_stage(config, anvil_backend)
         # A: 30/15=2; B: 20/10=2; C: 15/15=1 → 5 messages
         assert output_size == 5
 
@@ -203,7 +203,7 @@ class TestUnionLanceIntegration:
         lance_dataset_a,
         lance_dataset_different_schema,
         ray_cluster,
-        workqueue_backend,
+        anvil_backend,
     ):
         """Union with mismatched schemas raises ValueError before workers start."""
         config = UnionSourceConfig(
@@ -221,8 +221,8 @@ class TestUnionLanceIntegration:
         payload_store = RaySplitPayloadStore(name=f"test_store_mismatch_{id(config)}")
         runtime = StageRuntime(
             broker_endpoint=QueueEndpoint(
-                host=workqueue_backend.host,
-                port=workqueue_backend.port,
+                host=anvil_backend.host,
+                port=anvil_backend.port,
                 storage_url="memory://",
             ),
         )
@@ -248,7 +248,7 @@ class TestAntiJoinLanceIntegration:
         lance_dataset_full,
         lance_dataset_processed,
         ray_cluster,
-        workqueue_backend,
+        anvil_backend,
     ):
         """Anti-join produces only unprocessed rows (full − processed)."""
         config = AntiJoinSourceConfig(
@@ -256,7 +256,7 @@ class TestAntiJoinLanceIntegration:
             exclude=LanceTableSourceConfig(dataset_uri=lance_dataset_processed, split_size=50),
             on=["id"],
         )
-        output_size = await _run_source_stage(config, workqueue_backend)
+        output_size = await _run_source_stage(config, anvil_backend)
         # full=50 → 5 splits of 10; processed ids=0-19 → splits [0-9],[10-19] empty,
         # [20-29],[30-39],[40-49] have rows.  All 5 splits produce output messages
         # (workers push even empty payloads via ack_and_forward).
@@ -264,7 +264,7 @@ class TestAntiJoinLanceIntegration:
 
     @pytest.mark.asyncio
     async def test_empty_exclude_returns_full_source(
-        self, lance_dataset_full, tmp_path, ray_cluster, workqueue_backend
+        self, lance_dataset_full, tmp_path, ray_cluster, anvil_backend
     ):
         """Empty exclude table → all source rows are produced."""
         empty_path = str(tmp_path / "empty.lance")
@@ -275,7 +275,7 @@ class TestAntiJoinLanceIntegration:
             exclude=LanceTableSourceConfig(dataset_uri=empty_path, split_size=10),
             on=["id"],
         )
-        output_size = await _run_source_stage(config, workqueue_backend)
+        output_size = await _run_source_stage(config, anvil_backend)
         # 50 rows / 10 = 5 splits, none filtered → 5 output messages
         assert output_size == 5
 
@@ -286,7 +286,7 @@ class TestAntiJoinLanceIntegration:
         lance_dataset_b,
         lance_dataset_processed,
         ray_cluster,
-        workqueue_backend,
+        anvil_backend,
     ):
         """Union two sources then anti-join a third: composed operation works."""
         config = AntiJoinSourceConfig(
@@ -299,7 +299,7 @@ class TestAntiJoinLanceIntegration:
             exclude=LanceTableSourceConfig(dataset_uri=lance_dataset_processed, split_size=50),
             on=["id"],
         )
-        output_size = await _run_source_stage(config, workqueue_backend)
+        output_size = await _run_source_stage(config, anvil_backend)
         # A: ids 0-29 (3 splits); B: ids 100-119 (2 splits) → 5 splits total.
         # Processed: ids 0-19 → A splits [0-9],[10-19] become empty; rest have rows.
         # All 5 splits produce output messages.

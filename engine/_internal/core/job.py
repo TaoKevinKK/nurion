@@ -45,7 +45,7 @@ class JobConfig:
     """Configuration for a Nurion runtime job.
 
     Attributes:
-        workqueue_db_path: Storage path for WorkQueue backend (file://, memory://)
+        anvil_db_path: Storage path for Anvil backend (file://, memory://)
         claim_timeout_secs: Seconds before claimed messages are reclaimed from dead workers
         recovery_interval_secs: Interval between recovery task runs
         ray_init_kwargs: Arguments to pass to ray.init()
@@ -58,7 +58,7 @@ class JobConfig:
         payload_store_options: Extra options passed to fsspec (e.g. S3 credentials).
     """
 
-    workqueue_db_path: str = "memory://"
+    anvil_db_path: str = "memory://"
     claim_timeout_secs: float = 60.0  # Default: 60s before reclaiming from dead workers
     recovery_interval_secs: float = 10.0  # Default: check every 10s for expired claims
     ray_init_kwargs: Dict[str, Any] = field(default_factory=dict)
@@ -88,7 +88,7 @@ class Job:
 
             >>> job = Job(
             ...     job_id="etl_pipeline",
-            ...     config=JobConfig(workqueue_db_path="file:///tmp/wq"),
+            ...     config=JobConfig(anvil_db_path="file:///tmp/wq"),
             ... )
         """
         self.job_id = job_id

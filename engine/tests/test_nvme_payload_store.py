@@ -825,11 +825,11 @@ class TestStageWorkerNvmeIntegration:
     """Verify StageWorker correctly uses get_with_hint and embeds payload_loc.
 
     Uses the same pattern as TestStageWorkerPayloadCleanup in test_stage_master.py:
-    direct class instantiation (no Ray), real WorkQueue backend.
+    direct class instantiation (no Ray), real Anvil backend.
     """
 
     @pytest.mark.asyncio
-    async def test_get_with_hint_called(self, workqueue_backend):
+    async def test_get_with_hint_called(self, anvil_backend):
         """StageWorker._parse_records passes payload_loc hint to get_with_hint."""
         from unittest.mock import MagicMock
         from _internal.core.stage_worker import StageWorker, WorkerRuntime
@@ -886,15 +886,15 @@ class TestStageWorkerNvmeIntegration:
             job_id="job_hint",
             stage_id="stage_hint",
             broker_endpoint=QueueEndpoint(
-                host=workqueue_backend.host,
-                port=workqueue_backend.port,
+                host=anvil_backend.host,
+                port=anvil_backend.port,
                 storage_url="memory://",
             ),
             upstream=QueueRef.queue("hint_upstream"),
         )
 
         worker = WorkerClass(runtime, MockStage(), mock_store)
-        worker.queue_client = workqueue_backend.client
+        worker.queue_client = anvil_backend.client
 
         # Push a message WITH payload_loc in metadata
         loc = {"flight": "grpc://10.0.0.1:5555", "s3": "s3://bucket/k1.arrow"}
@@ -904,10 +904,10 @@ class TestStageWorkerNvmeIntegration:
             payload_key="input_key",
             metadata={"payload_loc": loc},
         )
-        workqueue_backend.client.create_queue("hint_upstream")
-        workqueue_backend.client.push("hint_upstream", msg.to_bytes())
+        anvil_backend.client.create_queue("hint_upstream")
+        anvil_backend.client.push("hint_upstream", msg.to_bytes())
 
-        records = workqueue_backend.client.claim("hint_upstream", batch_size=1, timeout_ms=1000)
+        records = anvil_backend.client.claim("hint_upstream", batch_size=1, timeout_ms=1000)
         assert len(records) == 1
 
         await worker._process_and_ack(records)

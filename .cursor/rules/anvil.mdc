@@ -1,11 +1,11 @@
 ---
-description: WorkQueue development constraints
+description: Anvil development constraints
 globs:
-  - lib/workqueue-rs/**
+  - lib/anvil-rs/**
   - engine/_internal/queue/**
 ---
 
-# WorkQueue Rules
+# Anvil Rules
 
 ## Critical: O(1) I/O on Hot Paths
 All hot-path operations (claim, ack, push, stats) MUST be O(1).
@@ -25,4 +25,4 @@ state:{namespace}:{key}          -> value bytes
 - Use direct key access, never scan in hot paths
 - Maintain counters instead of counting via scan
 - Batch operations with WriteBatch for atomicity
-- See `lib/workqueue-rs/AGENTS.md` for full constraints
+- See `lib/anvil-rs/AGENTS.md` for full constraints

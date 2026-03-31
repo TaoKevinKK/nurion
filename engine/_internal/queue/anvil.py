@@ -13,29 +13,29 @@
 # limitations under the License.
 
 """
-WorkQueue Implementation - Single-queue Multi-consumer Model.
+Anvil Implementation - Single-queue Multi-consumer Model.
 
 Components:
-- WorkQueueBrokerManager: Manages embedded Rust broker lifecycle
-- WorkQueueQueueClient: Client for claim/ack operations
+- AnvilBrokerManager: Manages embedded Rust broker lifecycle
+- AnvilQueueClient: Client for claim/ack operations
 
-Unlike Kafka's partition model, WorkQueue uses:
+Unlike Kafka's partition model, Anvil uses:
 - claim: Atomically grab messages (with timeout-based lease)
 - ack: Confirm message processing
 - nack: Return message to queue for retry
 
 Example:
     # On Master
-    broker = WorkQueueBrokerManager(db_path="file:///tmp/wq")
+    broker = AnvilBrokerManager(db_path="file:///tmp/wq")
     broker.start()
 
-    client = WorkQueueQueueClient(broker.get_broker_url(), worker_id="master")
+    client = AnvilQueueClient(broker.get_broker_url(), worker_id="master")
     client.start()
     client.create_queue("my-queue")
     client.push("my-queue", b"hello")
 
     # On Worker
-    client = WorkQueueQueueClient("master-host:50051", worker_id="worker-1")
+    client = AnvilQueueClient("master-host:50051", worker_id="worker-1")
     client.start()
     messages = client.claim("my-queue", batch_size=10)
     client.ack(
@@ -52,24 +52,23 @@ import threading
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-from workqueue_py import BrokerConfig, BrokerError, WorkQueueBroker
-from workqueue_py.client import WorkQueueClient, Message
+from anvil_py import BrokerConfig, BrokerError, AnvilBroker, AnvilRustClient
 
 from _internal.utils.logging import create_ray_logger
-from _internal.queue.workqueue_storage import WorkQueueStorageReader
+from _internal.queue.anvil_storage import AnvilStorageReader
 
 
 # =============================================================================
-# WorkQueueBrokerManager
+# AnvilBrokerManager
 # =============================================================================
 
 
-class WorkQueueBrokerManager:
-    """Manages the embedded WorkQueue broker lifecycle."""
+class AnvilBrokerManager:
+    """Manages the embedded Anvil broker lifecycle."""
 
     def __init__(
         self,
-        db_path: str = "file:///tmp/workqueue",
+        db_path: str = "file:///tmp/anvil",
         port: int = 0,
         host: str = "0.0.0.0",
         startup_timeout: float = 30.0,
@@ -87,10 +86,10 @@ class WorkQueueBrokerManager:
         self.acked_retention_secs = acked_retention_secs
         self.gc_interval_secs = gc_interval_secs
 
-        self._broker: Optional[WorkQueueBroker] = None
+        self._broker: Optional[AnvilBroker] = None
         self._running = False
         self._actual_port: Optional[int] = None
-        self.logger = create_ray_logger(f"WorkQueueBroker:{port}")
+        self.logger = create_ray_logger(f"AnvilBroker:{port}")
 
     def start(self) -> None:
         if self._running:
@@ -108,7 +107,7 @@ class WorkQueueBrokerManager:
 
         ready_event = threading.Event()
         handler = _BrokerEventHandler(self, ready_event)
-        self._broker = WorkQueueBroker(config, event_handler=handler)
+        self._broker = AnvilBroker(config, event_handler=handler)
         self._broker.start()
 
         if not ready_event.wait(timeout=self.startup_timeout):
@@ -136,13 +135,13 @@ class WorkQueueBrokerManager:
     def is_running(self) -> bool:
         return self._running
 
-    def get_storage_reader(self) -> Optional[WorkQueueStorageReader]:
+    def get_storage_reader(self) -> Optional[AnvilStorageReader]:
         """Get a storage reader backed by the broker's live storage."""
         if not self._broker:
             return None
         try:
             reader = self._broker.get_storage_reader()
-            return WorkQueueStorageReader(reader=reader)
+            return AnvilStorageReader(reader=reader)
         except Exception as e:
             self.logger.warning(f"Failed to get storage reader: {e}")
             return None
@@ -151,34 +150,34 @@ class WorkQueueBrokerManager:
 class _BrokerEventHandler:
     """Internal event handler for broker lifecycle."""
 
-    def __init__(self, manager: WorkQueueBrokerManager, ready_event: threading.Event):
+    def __init__(self, manager: AnvilBrokerManager, ready_event: threading.Event):
         self.manager = manager
         self._ready_event = ready_event
 
     def on_started(self, port: int) -> None:
-        self.manager.logger.info(f"WorkQueue broker started on port {port}")
+        self.manager.logger.info(f"Anvil broker started on port {port}")
         self.manager._actual_port = port
         self.manager._running = True
         self._ready_event.set()
 
     def on_stopped(self) -> None:
-        self.manager.logger.info("WorkQueue broker stopped")
+        self.manager.logger.info("Anvil broker stopped")
         self.manager._running = False
 
     def on_fatal(self, error: BrokerError) -> None:
-        self.manager.logger.error(f"WorkQueue broker fatal error: {error.message}")
+        self.manager.logger.error(f"Anvil broker fatal error: {error.message}")
         self.manager._running = False
         self._ready_event.set()
 
 
 # =============================================================================
-# WorkQueueQueueClient
+# AnvilQueueClient
 # =============================================================================
 
 
 @dataclass
-class WorkQueueRecord:
-    """A record from WorkQueue."""
+class AnvilRecord:
+    """A record from Anvil."""
 
     msg_id: str
     value: bytes
@@ -188,7 +187,8 @@ class WorkQueueRecord:
     claim_token: Optional[str] = None
 
     @classmethod
-    def from_message(cls, msg: Message) -> "WorkQueueRecord":
+    def from_message(cls, msg) -> "AnvilRecord":
+        """Create from Python Message or Rust RustMessage (duck typed)."""
         return cls(
             msg_id=msg.msg_id,
             value=msg.payload,
@@ -208,8 +208,13 @@ def _compute_heartbeat_interval(claim_timeout_secs: Optional[float]) -> Optional
     return max(0.1, min(5.0, claim_timeout_secs / 2))
 
 
-class WorkQueueQueueClient:
-    """WorkQueue client for claim/ack operations."""
+class AnvilQueueClient:
+    """Anvil client for claim/ack operations.
+
+    Uses the high-performance Rust gRPC client (via PyO3) which provides 10-20x
+    throughput over the old Python grpcio client by eliminating Python protobuf
+    serialization overhead and releasing the GIL during gRPC calls.
+    """
 
     def __init__(
         self,
@@ -220,18 +225,18 @@ class WorkQueueQueueClient:
         self.broker_url = broker_url
         self.worker_id = worker_id
         self.heartbeat_interval_secs = heartbeat_interval_secs
-        self._client: Optional[WorkQueueClient] = None
+        self._client: Optional[AnvilRustClient] = None
         self._running = False
-        self.logger = create_ray_logger(f"WorkQueueClient:{worker_id}")
+        self.logger = create_ray_logger(f"AnvilClient:{worker_id}")
 
     # Lifecycle
     def start(self) -> None:
         if self._running:
             return
         if self.heartbeat_interval_secs is None:
-            self._client = WorkQueueClient(self.broker_url, self.worker_id)
+            self._client = AnvilRustClient(self.broker_url, self.worker_id)
         else:
-            self._client = WorkQueueClient(
+            self._client = AnvilRustClient(
                 self.broker_url,
                 self.worker_id,
                 heartbeat_interval_secs=self.heartbeat_interval_secs,
@@ -271,12 +276,10 @@ class WorkQueueQueueClient:
         return client.push_batch(queue, values)
 
     # Consumer
-    def claim(
-        self, queue: str, batch_size: int = 1, timeout_ms: int = 5000
-    ) -> List[WorkQueueRecord]:
+    def claim(self, queue: str, batch_size: int = 1, timeout_ms: int = 5000) -> List[AnvilRecord]:
         client = self._check()
         messages = client.claim(queue, batch_size, timeout_ms)
-        return [WorkQueueRecord.from_message(m) for m in messages]
+        return [AnvilRecord.from_message(m) for m in messages]
 
     def ack(
         self,
@@ -415,7 +418,7 @@ class WorkQueueQueueClient:
         assigned_partitions: Optional[List[int]] = None,
         allow_steal: bool = False,
         steal_pending_threshold: int = 0,
-    ) -> "tuple[List[WorkQueueRecord], str, int]":
+    ) -> "tuple[List[AnvilRecord], str, int]":
         """Claim from a partition group (broker picks partition)."""
         client = self._check()
         messages, source_queue, source_partition = client.claim_from_group(
@@ -427,7 +430,7 @@ class WorkQueueQueueClient:
             steal_pending_threshold=steal_pending_threshold,
         )
         return (
-            [WorkQueueRecord.from_message(m) for m in messages],
+            [AnvilRecord.from_message(m) for m in messages],
             source_queue,
             source_partition,
         )
@@ -456,7 +459,7 @@ class WorkQueueQueueClient:
         client = self._check()
         return client.is_queue_finished(queue)
 
-    def _check(self) -> WorkQueueClient:
+    def _check(self):
         if self._client is None:
             raise RuntimeError("Client not started")
         return self._client

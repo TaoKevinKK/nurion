@@ -24,7 +24,7 @@ Nurion Runtime focuses on **simple, elastic, and observable high-throughput pipe
   - The runtime uses queue lag metrics to detect bottlenecks and adapt throughput.
 
 - **Minimal dependencies**:  
-  - Runtime only requires **Ray**; WorkQueue broker is embedded (no external service).  
+  - Runtime only requires **Ray**; Anvil broker is embedded (no external service).  
   - No heavy external services are required to start a pipeline.
 
 - **Streaming-style execution model**:  
@@ -32,7 +32,7 @@ Nurion Runtime focuses on **simple, elastic, and observable high-throughput pipe
   - This avoids classic batch-style stage barriers and long-tail stragglers.
 
 - **Queue-based data flow**:  
-  - Stage-to-stage communication uses WorkQueue (embedded broker; `memory://` or `file://` storage).
+  - Stage-to-stage communication uses Anvil (embedded broker; `memory://` or `file://` storage).
   - Message IDs enable recovery and exactly-once semantics (when fully implemented).
 
 ## How Nurion Runtime compares
@@ -50,7 +50,7 @@ Nurion Runtime focuses on **simple, elastic, and observable high-throughput pipe
 - Ray Data is primarily built around **in-memory object store shuffle**:
   - Great for smaller tabular workloads, but costly for **huge multimodal binaries** (e.g. video frames, model inputs).  
 - Nurion Runtime:
-  - Uses **WorkQueue** (embedded broker) for stage-to-stage coordination with message ID tracking.  
+  - Uses **Anvil** (embedded broker) for stage-to-stage coordination with message ID tracking.  
   - Offers a **transparent, explicit runtime model** (stages, splits, queues, backpressure) instead of opaque auto-tuning knobs.  
   - Works better when your data is large, binary, and long-lived.
 
@@ -85,7 +85,7 @@ Instead, it is focused on:
 
 ### Shared Libraries (in `/lib`)
 
-- **lib/workqueue-rs/**: Embedded WorkQueue broker + Python client
+- **lib/anvil-rs/**: Embedded Anvil broker + Python client
 - **lib/raydp/**: Run Spark on Ray with distributed execution
 - **lib/raydp/java/**: Scala/Java components for Spark integration
 
@@ -121,7 +121,7 @@ from nurion import (
 job = Job(
     job_id='my_pipeline',
     config=JobConfig(
-        workqueue_db_path="memory://",  # Use file:// for local persistence
+        anvil_db_path="memory://",  # Use file:// for local persistence
     ),
 )
 
@@ -166,7 +166,7 @@ asyncio.run(main())
 ✅ **Elastic Scaling**: Auto-scale workers based on load  
 ✅ **Backpressure**: Automatic rate adaptation via queue lag detection  
 ✅ **DAG Pipelines**: Complex multi-stage workflows  
-✅ **Queue-Based Flow**: WorkQueue (embedded broker) for stage coordination  
+✅ **Queue-Based Flow**: Anvil (embedded broker) for stage coordination  
 ✅ **Zero Config Files**: All configuration in Python code  
 ✅ **Multimodal Operators**: Video processing, LLM inference, deduplication
 
@@ -259,7 +259,7 @@ Nurion Runtime uses a **pull-based, queue-driven execution model**:
 - **RayJobRunner**: Orchestrates the job lifecycle, manages stage masters
 - **StageMaster**: Manages workers for a stage, owns the output queue
 - **StageWorker**: Stateless Ray actor that pulls from upstream queue, processes data, writes to output queue
-- **Queue Backend**: WorkQueue (embedded broker; `memory://` or `file://` storage)
+- **Queue Backend**: Anvil (embedded broker; `memory://` or `file://` storage)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -295,19 +295,19 @@ Nurion Runtime uses a **pull-based, queue-driven execution model**:
 **StageMaster** coordinates core managers:
 - `WorkerManager`: Worker lifecycle (spawn, stop, status)
 - `RecoveryManager`: Failure tracking and worker recovery
-- Backpressure/autoscaling use job-level WorkQueue stats
+- Backpressure/autoscaling use job-level Anvil stats
 
 **Queue Backend**:
-- `WorkQueue`: Embedded broker with claim/ack semantics
+- `Anvil`: Embedded broker with claim/ack semantics
 
-## WorkQueue Storage Options
+## Anvil Storage Options
 
 ### In-memory (testing)
 
 ```python
 job = Job(
     job_id='test_job',
-    config=JobConfig(workqueue_db_path="memory://"),
+    config=JobConfig(anvil_db_path="memory://"),
 )
 ```
 
@@ -316,7 +316,7 @@ job = Job(
 ```python
 job = Job(
     job_id='prod_job',
-    config=JobConfig(workqueue_db_path="file:///tmp/workqueue"),
+    config=JobConfig(anvil_db_path="file:///tmp/anvil"),
 )
 ```
 
@@ -330,7 +330,7 @@ from nurion import Job, JobConfig, WebUIConfig
 job = Job(
     job_id='my_job',
     config=JobConfig(
-        workqueue_db_path="file:///tmp/workqueue",
+        anvil_db_path="file:///tmp/anvil",
         webui=WebUIConfig(
             enabled=True,
         ),

@@ -20,8 +20,8 @@ These are P1 tests that verify:
 - Zero-worker recovery (all workers killed)
 - Exactly-once semantics during scaling
 
-All tests use real Ray clusters and WorkQueue brokers (no mocks).
-WorkQueue uses a single-queue multi-consumer model where workers
+All tests use real Ray clusters and Anvil brokers (no mocks).
+Anvil uses a single-queue multi-consumer model where workers
 compete to claim messages - no explicit partition assignment needed.
 """
 
@@ -53,9 +53,9 @@ pytestmark = pytest.mark.distributed
 
 
 class TestElasticScaling:
-    """Tests for elastic worker scaling with WorkQueue.
+    """Tests for elastic worker scaling with Anvil.
 
-    WorkQueue model:
+    Anvil model:
     - Single queue per stage, multiple workers claim messages
     - No explicit partition assignment - workers compete for messages
     - Claimed messages have lease timeout for failure recovery
@@ -82,7 +82,7 @@ class TestElasticScaling:
     async def test_scale_up_during_processing(self, ray_cluster):
         """Scale up: additional workers should help process messages faster.
 
-        In WorkQueue model, new workers simply start claiming from the queue.
+        In Anvil model, new workers simply start claiming from the queue.
         No rebalancing needed - they compete for available messages.
         """
         NUM_RECORDS = 2000

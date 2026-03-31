@@ -19,15 +19,15 @@ This module provides operators for deduplicating data:
 1. **HashDedupeOperator**: Exact deduplication by key columns
    - Shuffles data by dedup key
    - Deduplicates within batch using DuckDB
-   - Future: Cross-batch dedup via WorkQueue state API
+   - Future: Cross-batch dedup via Anvil state API
 
-Architecture for HashDedupe (WorkQueue model, Jan 2025):
+Architecture for HashDedupe (Anvil model, Jan 2025):
     Input -> Shuffle by dedup_keys -> HashDedupeOperator -> Deduplicated Output
 
 Design rationale for 10B+ scale:
 - Batch-level dedup via DuckDB (efficient, in-memory)
 - Shuffle ensures same keys go to same partition
-- Cross-batch dedup via WorkQueue state API (future)
+- Cross-batch dedup via Anvil state API (future)
 - No local SlateDB state store needed
 
 For exact cross-batch deduplication at scale, use MinHash + CC flow
@@ -73,12 +73,12 @@ class HashDedupeOperator(ShuffleOperator):
     2. Uses DuckDB for efficient batch-level deduplication
     3. Outputs deduplicated records
 
-    WorkQueue-based design (no local state store):
+    Anvil-based design (no local state store):
     - Batch-level dedup via DuckDB (efficient, handles most cases)
     - Shuffle ensures same keys go to same partition
     - For exact cross-batch dedup at 10B+ scale, use MinHash + CC flow
 
-    Future: Cross-batch dedup via WorkQueue state API:
+    Future: Cross-batch dedup via Anvil state API:
     - state_get(key_hash) to check if seen
     - atomic ack + state_put(key_hash) to mark as seen
 

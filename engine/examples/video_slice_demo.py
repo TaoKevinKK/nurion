@@ -25,7 +25,7 @@ Usage:
 
     # Submit job with excludes
     ray job submit --working-dir . \\
-        --runtime-env-json '{"excludes": ["tests/testdata/", "java/", "*.jar", "*.mp4", "*.mkv", "*.avi", ".venv/", "__pycache__/", ".pytest_cache/", ".ruff_cache/", "*.egg-info/", "workqueue-rs/target/"]}' \\
+        --runtime-env-json '{"excludes": ["tests/testdata/", "java/", "*.jar", "*.mp4", "*.mkv", "*.avi", ".venv/", "__pycache__/", ".pytest_cache/", ".ruff_cache/", "*.egg-info/", "anvil-rs/target/"]}' \\
         -- python examples/video_slice_demo.py --job-id my_job --wait-time 300
 """
 
@@ -99,8 +99,8 @@ def main(job_id: str, wait_time: int):
     input_path = os.path.join(job_dir, "input_videos.lance")
     output_path = os.path.join(job_dir, "output_slices.lance")
 
-    # Shared WorkQueue storage path (same across runs to show completed jobs)
-    workqueue_db_path = "file:///tmp/nurion-workqueue"
+    # Shared Anvil storage path (same across runs to show completed jobs)
+    anvil_db_path = "file:///tmp/nurion-anvil"
 
     # Create input data
     create_test_lance_table(input_path)
@@ -113,7 +113,7 @@ def main(job_id: str, wait_time: int):
         "filter_modulo": 4,
         "scene_threshold": 0.4,
         "split_size": 2,
-        "workqueue_db_path": workqueue_db_path,
+        "anvil_db_path": anvil_db_path,
         "scene_parallelism": (1, 2),  # Lower parallelism
         "slice_parallelism": (1, 2),
         "filter_parallelism": (1, 2),
@@ -136,7 +136,7 @@ def main(job_id: str, wait_time: int):
     logger.info(f"Starting job {job_id}")
     logger.info(f"Input:  {input_path}")
     logger.info(f"Output: {output_path}")
-    logger.info(f"WorkQueue DB: {workqueue_db_path}")
+    logger.info(f"Anvil DB: {anvil_db_path}")
     logger.info("=" * 80)
 
     runner = job.create_ray_runner()

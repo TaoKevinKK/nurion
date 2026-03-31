@@ -13,7 +13,7 @@ User Code
         │
         ▼
   RayJobRunner.run()                          # runtime/ray_runner.py
-    ├── WorkQueueBrokerManager.start()        # starts workqueue-rs broker
+    ├── AnvilBrokerManager.start()        # starts anvil-rs broker
     ├── SplitPayloadStore.create()            # Ray object store or fsspec
     ├── For each Stage:
     │     └── StageMaster (Ray actor)         # core/stage_master.py
@@ -35,7 +35,7 @@ User Code
 Source (plan_splits)
   │  Push Split metadata → upstream queue
   ▼
-WorkQueue (workqueue-rs, Rust)
+Anvil (anvil-rs, Rust)
   │  claim() → StageWorker (atomic, competing consumers)
   ▼
 StageWorker
@@ -54,14 +54,14 @@ Sink (write to storage)
 
 ---
 
-## Queue Model (WorkQueue)
+## Queue Model (Anvil)
 
 All inter-stage data flows through QueueGroup (1 partition for non-shuffle, N for shuffle).
 Source planner queues and sink commit queues remain as single queues (internal coordination).
 Workers compete via `claim_from_group()` (broker-directed partition selection).
 
 ```
-Key Schema (RocksDB via workqueue-rs):
+Key Schema (RocksDB via anvil-rs):
   meta:{queue}               → QueueMeta { claim_seq, push_seq, pending_count, claimed_count }
   pending:{queue}:{seq}      → msg_id
   msg:{queue}:{msg_id}       → QueueMessage JSON
@@ -106,7 +106,7 @@ class MyOperator(Operator):
     def get_stats(self) -> dict: ...
 ```
 
-**State access** (via WorkQueue, atomic with ack):
+**State access** (via Anvil, atomic with ack):
 ```python
 # In process_split, use broker_endpoint from runtime:
 # state_get(namespace, key) / state_put(namespace, key, value)
@@ -161,9 +161,9 @@ stop()
 
 ## StageMaster ↔ StageWorker Communication
 
-- **Normal**: Workers pull via `claim()` from WorkQueue (no push from master)
+- **Normal**: Workers pull via `claim()` from Anvil (no push from master)
 - **Master → Worker**: `worker.invoke_operator("method_name", *args)` for `@master_callable` methods
-- **Worker failure**: RecoveryManager detects via Ray actor death; re-enqueues claimed messages via WorkQueue `nack`/recovery
+- **Worker failure**: RecoveryManager detects via Ray actor death; re-enqueues claimed messages via Anvil `nack`/recovery
 
 ---
 
@@ -206,20 +206,20 @@ control/control/
 
 ---
 
-## WorkQueue Rust Architecture
+## Anvil Rust Architecture
 
 ```
-lib/workqueue-rs/
+lib/anvil-rs/
   src/
     lib.rs          → PyO3 module entry + broker lifecycle
     storage.rs      → all persistent ops: push, claim, ack, nack, state, queue meta, GC, QueueGroup
-    service.rs      → gRPC service implementation (WorkQueueService)
+    service.rs      → gRPC service implementation (AnvilService)
     server.rs       → broker inner (start/stop server)
     state.rs        → in-memory coordination (per-queue claim locks, lease tracking)
     types.rs        → data structures (QueueMessage, QueueMeta, QueueGroupMeta, etc.)
     recovery.rs     → background tasks: RecoveryTask (expire claims) + GcTask (delete acked)
   proto/
-    workqueue.proto → gRPC service + message definitions
+    anvil.proto → gRPC service + message definitions
   python/           → Python bindings (PyO3)
 ```
 
@@ -228,7 +228,7 @@ lib/workqueue-rs/
 ## Key Invariants
 
 1. **Queue operations are O(1)** — counters in QueueMeta, no scans in hot path
-2. **Operators are stateless** — all persistent state via WorkQueue `state_get`/`state_put`
+2. **Operators are stateless** — all persistent state via Anvil `state_get`/`state_put`
 3. **Exactly-once semantics** — `ack_and_scatter` is atomic (ack upstream + push to downstream QueueGroup in one WriteBatch)
 4. **Unified QueueGroup** — all inter-stage data flows through QueueGroup (1 partition for non-shuffle, N for shuffle); workers compete via `claim_from_group()`
 5. **Operator config is immutable** — frozen after `__init__`; no `set_*()` methods

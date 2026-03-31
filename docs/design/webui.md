@@ -1,37 +1,37 @@
-# Nurion WebUI (WorkQueue-First)
+# Nurion WebUI (Anvil-First)
 
 > **Note**: API design, schema extensions, and endpoint specification are documented in [webui-api-v2.md](webui-api-v2.md).
 
 ## Overview
 
 The WebUI is a lightweight debugging interface that reads job metadata directly from
-WorkQueue storage (pyO3) and never relies on push-based state queues or SlateDB.
-All writes happen via gRPC calls into the WorkQueue broker; all reads use the storage API.
+Anvil storage (pyO3) and never relies on push-based state queues or SlateDB.
+All writes happen via gRPC calls into the Anvil broker; all reads use the storage API.
 
 ## Core Principles
 
 1. **Writes via gRPC**: Job/Stage metadata and per-message events are written using
-   `state_put` / `state_puts` on WorkQueue gRPC.
-2. **Reads via storage API**: WebUI queries WorkQueue storage directly (pyO3) for both
+   `state_put` / `state_puts` on Anvil gRPC.
+2. **Reads via storage API**: WebUI queries Anvil storage directly (pyO3) for both
    running jobs and history.
 3. **Atomic ack metadata**: `ack` / `ack_and_forward` must carry `state_puts` to keep
    message state and metadata in the same transaction.
 4. **No local metrics state**: Worker/master counters are removed; data is derived from
-   WorkQueue storage.
+   Anvil storage.
 
 ## Data Flow
 
 ```mermaid
 flowchart LR
-    StageWorker -->|"ack+state_puts (gRPC)"| WorkQueueBroker
-    StageWorker -->|"nack + state_put (gRPC)"| WorkQueueBroker
-    RayJobRunner -->|"state_put job metadata (gRPC)"| WorkQueueBroker
-    StageMaster -->|"state_put stage metadata (gRPC)"| WorkQueueBroker
-    WorkQueueRecovery -->|"timeout event write"| WorkQueueStorage
-    WebUI -->|"pyO3 WorkQueueStorageReader"| JobStateManager
+    StageWorker -->|"ack+state_puts (gRPC)"| AnvilBroker
+    StageWorker -->|"nack + state_put (gRPC)"| AnvilBroker
+    RayJobRunner -->|"state_put job metadata (gRPC)"| AnvilBroker
+    StageMaster -->|"state_put stage metadata (gRPC)"| AnvilBroker
+    AnvilRecovery -->|"timeout event write"| AnvilStorage
+    WebUI -->|"pyO3 AnvilStorageReader"| JobStateManager
 ```
 
-## Storage Schema (WorkQueue state)
+## Storage Schema (Anvil state)
 
 ### Job Index (global)
 
@@ -83,10 +83,10 @@ Written for each message on ack/nack (worker) and timeout (recovery):
 
 ## Components
 
-- **WorkQueueStateWriter**: gRPC writer used by `RayJobRunner` and `StageMaster`.
+- **AnvilStateWriter**: gRPC writer used by `RayJobRunner` and `StageMaster`.
 - **JobStateManager**: storage reader that aggregates job/stage/worker/event views.
 - **EmbeddedWebUIServer**: in-driver WebUI.
-- **Portal/History Server**: standalone readers over WorkQueue storage.
+- **Portal/History Server**: standalone readers over Anvil storage.
 
 ## Configuration
 
@@ -100,13 +100,13 @@ WebUIConfig(
 )
 ```
 
-### WorkQueue Storage
+### Anvil Storage
 
-WorkQueue DB path is configured in `JobConfig.workqueue_db_path` and is also the
+Anvil DB path is configured in `JobConfig.anvil_db_path` and is also the
 source of truth for WebUI history.
 
 ## Notes
 
-- WebUI reads from storage; it never talks to WorkQueue via RPC.
+- WebUI reads from storage; it never talks to Anvil via RPC.
 - `ack` / `ack_and_forward` must include `state_puts` in the same RPC for atomicity.
 - Timeout events are emitted in recovery (storage write) and surfaced via WebUI.

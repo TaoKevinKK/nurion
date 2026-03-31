@@ -125,7 +125,7 @@ def _make_job(source_config: OperatorConfig, collector_name: str) -> Job:
     job = Job(
         job_id=f"test_{uuid.uuid4().hex[:8]}",
         config=JobConfig(
-            workqueue_db_path="memory://",
+            anvil_db_path="memory://",
             claim_timeout_secs=2.0,
             recovery_interval_secs=0.5,
         ),

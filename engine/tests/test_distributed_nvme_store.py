@@ -21,7 +21,7 @@ Layer A: End-to-end pipeline tests on a local Ray cluster with NVMe store.
 Layer B: Multi-container cluster tests with node failure injection.
          Uses testcontainers for real network isolation and container kill/restart.
 
-All tests use real Ray clusters and WorkQueue brokers (no mocks).
+All tests use real Ray clusters and Anvil brokers (no mocks).
 """
 
 import asyncio

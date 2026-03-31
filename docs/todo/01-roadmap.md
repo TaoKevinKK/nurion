@@ -29,7 +29,7 @@ Prioritized by **business value**, not technical elegance. Each item answers:
 - **Status**: **Completed** (PR #59 + QueueGroup, 2026-03-06)
 - **Implemented**:
   - Shuffle routing: `StageWorker._shuffle_output_and_ack()` routes by `__target_partition`
-  - QueueGroup: first-class partition group abstraction in workqueue-rs
+  - QueueGroup: first-class partition group abstraction in anvil-rs
   - `AckAndScatter`: atomic ack upstream + push to N partition queues (exactly-once)
   - `ClaimFromGroup`: O(1) broker-directed claim with round-robin + work-stealing
   - `IsGroupFinished` / `MarkGroupFinished`: single-RPC completion checking
