@@ -172,13 +172,13 @@ class ModelPool:
         self._spawning_workers += 1
         try:
             worker = (
-                ray.remote(InferenceWorker)
+                ray.remote(InferenceWorker)  # type: ignore[assignment]
                 .options(**actor_options)
                 .remote(self._config, registry=self._registry, port=port, worker_id=worker_id)
             )
             # Bound actor-creation wait so unschedulable resources fail fast.
             await asyncio.wait_for(
-                worker.start.remote(),
+                worker.start.remote(),  # type: ignore[union-attr]
                 timeout=_SPAWN_WAIT_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError as exc:

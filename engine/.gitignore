@@ -1,0 +1,4 @@
+# Test data (large video/slice files, not tracked in git)
+# Duplicates root .gitignore rule for Ray working_dir compatibility:
+# Ray scans .gitignore from working_dir (engine/), not repo root.
+tests/testdata/resources/

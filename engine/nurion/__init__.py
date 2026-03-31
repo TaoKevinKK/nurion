@@ -36,6 +36,8 @@ from _internal.operators.sources import (
     SparkSourceV2Config,
     UnionSourceConfig,
 )
+
+# SparkSourceConfig / SparkSourceV2Config are None when [spark] extra is not installed
 from _internal.operators.llm import (
     EmbeddedLLMOperator,
     EmbeddedLLMOperatorConfig,
@@ -45,6 +47,7 @@ from _internal.operators.llm import (
 from _internal.core.nvme_payload_store import NvmeSplitPayloadStore, WritePolicy
 from _internal.serve import ModelConfig, ModelServiceManager, create_manager
 from _internal.serve.client import ModelClient
+from _internal.utils.arrow_tensor import arrow_to_ndarray_list, ndarray_list_to_arrow
 
 __all__ = [
     "__version__",
@@ -85,4 +88,6 @@ __all__ = [
     "ModelClient",
     "NvmeSplitPayloadStore",
     "WritePolicy",
+    "ndarray_list_to_arrow",
+    "arrow_to_ndarray_list",
 ]

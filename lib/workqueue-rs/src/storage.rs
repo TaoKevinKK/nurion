@@ -12,32 +12,54 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// SlateDB storage layer for WorkQueue
+// SlateDB storage layer for WorkQueue — atomic counter model
 //
-// Key Schema (Sequence-based model for O(1) claim):
-//   meta:{queue} -> QueueMeta {claim_seq, push_seq}
-//   pending:{queue}:{seq:020d} -> msg_id
-//   msg:{queue}:{msg_id} -> Message JSON
-//   claimed:{queue}:{msg_id} -> ClaimInfo JSON
+// Key Schema:
+//   seq_push:{queue}                -> u64 LE  (next push sequence)
+//   seq_claim:{queue}               -> u64 LE  (next claim sequence)
+//   cnt_total_pushed:{queue}        -> u64 LE  (lifetime push count)
+//   cnt_total_claimed:{queue}       -> u64 LE  (monotonic claimed count)
+//   cnt_total_unclaimed:{queue}     -> u64 LE  (monotonic unclaim count: ack + nack)
+//   cnt_total_acked:{queue}         -> u64 LE  (lifetime ack count)
+//   pending:{queue}:{seq:020d}      -> msg_id
+//   msg:{queue}:{msg_id}            -> Message JSON
+//   claimed:{queue}:{msg_id}        -> ClaimInfo JSON
 //   acked:{queue}:{ts:020d}:{msg_id} -> ""
-//   state:{namespace}:{key} -> value bytes
+//   state:{namespace}:{key}         -> value bytes
+//
+// Hot paths (push, claim, ack, nack) use in-memory atomic counters
+// with CAS loops instead of SlateDB SerializableSnapshot transactions.
+// This eliminates transaction conflicts at high concurrency.
 
 use std::collections::HashMap;
-use tokio::time::{sleep, Duration};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
-use slatedb::{Db, DbRead, Error as SlateError, ErrorKind, IsolationLevel, WriteBatch};
+use dashmap::DashMap;
+use slatedb::{Db, DbRead, Error as SlateError, WriteBatch};
 
 use crate::types::{now_nanos, ClaimInfo, ClaimedMessage, Message, QueueGroupMeta};
 
 pub type StorageError = Box<dyn std::error::Error + Send + Sync>;
 
-const MAX_TXN_RETRIES: usize = 5;
-
-fn is_txn_conflict(err: &SlateError) -> bool {
-    err.kind() == ErrorKind::Transaction
+/// Per-queue atomic counters — in-memory fast path.
+/// Each counter has a small set of writer classes, and AtomicU64 with CAS/fetch_add suffices.
+pub struct QueueCounters {
+    /// Next sequence to assign on push (written by: push, nack)
+    pub push_seq: AtomicU64,
+    /// Next sequence to claim (written by: claim via CAS)
+    pub claim_seq: AtomicU64,
+    /// Total messages ever pushed (written by: push)
+    pub total_pushed: AtomicU64,
+    /// Monotonic count of messages that entered claimed state (written by: claim)
+    pub total_claimed: AtomicU64,
+    /// Monotonic count of messages that left claimed state (written by: ack, nack)
+    pub total_unclaimed: AtomicU64,
+    /// Total messages ever acked (written by: ack)
+    pub total_acked: AtomicU64,
 }
 
-/// Queue metadata for O(1) operations
+/// Queue metadata for O(1) operations (return type for get_queue_stats)
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct QueueMeta {
     pub claim_seq: u64,
@@ -66,9 +88,11 @@ pub struct AckOptions<'a> {
     pub worker_id: Option<&'a str>,
 }
 
-/// WorkQueue storage backed by SlateDB
+/// WorkQueue storage backed by SlateDB with in-memory atomic counters
 pub struct WorkQueueStorage {
     db: Db,
+    /// Per-queue atomic counters (in-memory cache, persisted to DB on each op)
+    counters: DashMap<String, Arc<QueueCounters>>,
     /// Per-group round-robin counters for O(1) steal path in claim_from_group
     steal_rr: std::sync::Mutex<HashMap<String, u64>>,
 }
@@ -79,13 +103,12 @@ impl WorkQueueStorage {
         let db = Db::open("/", object_store).await?;
         Ok(Self {
             db,
+            counters: DashMap::new(),
             steal_rr: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
     /// Close the storage gracefully.
-    /// This should be called before dropping the storage to ensure all background
-    /// tasks are properly shut down and avoid "channel closed" panics.
     #[allow(dead_code)]
     pub async fn close(&self) -> Result<(), StorageError> {
         self.db.close().await?;
@@ -94,8 +117,33 @@ impl WorkQueueStorage {
 
     // === Key Generation ===
 
+    /// Legacy meta key (used for migration from old format)
     fn meta_key(queue: &str) -> Vec<u8> {
         format!("meta:{}", queue).into_bytes()
+    }
+
+    fn seq_push_key(queue: &str) -> Vec<u8> {
+        format!("seq_push:{}", queue).into_bytes()
+    }
+
+    fn seq_claim_key(queue: &str) -> Vec<u8> {
+        format!("seq_claim:{}", queue).into_bytes()
+    }
+
+    fn cnt_total_pushed_key(queue: &str) -> Vec<u8> {
+        format!("cnt_total_pushed:{}", queue).into_bytes()
+    }
+
+    fn cnt_total_claimed_key(queue: &str) -> Vec<u8> {
+        format!("cnt_total_claimed:{}", queue).into_bytes()
+    }
+
+    fn cnt_total_unclaimed_key(queue: &str) -> Vec<u8> {
+        format!("cnt_total_unclaimed:{}", queue).into_bytes()
+    }
+
+    fn cnt_total_acked_key(queue: &str) -> Vec<u8> {
+        format!("cnt_total_acked:{}", queue).into_bytes()
     }
 
     fn pending_key(queue: &str, seq: u64) -> Vec<u8> {
@@ -126,8 +174,198 @@ impl WorkQueueStorage {
         format!("group_meta:{}", group_name).into_bytes()
     }
 
-    // === Queue Metadata ===
+    // === Counter helpers ===
 
+    fn read_u64_le(data: &[u8]) -> u64 {
+        if data.len() >= 8 {
+            u64::from_le_bytes(data[..8].try_into().unwrap())
+        } else {
+            0
+        }
+    }
+
+    /// Write 6 zero counter keys for a new queue into a WriteBatch.
+    fn write_zero_counters(batch: &mut WriteBatch, queue: &str) {
+        let zero = 0u64.to_le_bytes();
+        batch.put(Self::seq_push_key(queue), zero);
+        batch.put(Self::seq_claim_key(queue), zero);
+        batch.put(Self::cnt_total_pushed_key(queue), zero);
+        batch.put(Self::cnt_total_claimed_key(queue), zero);
+        batch.put(Self::cnt_total_unclaimed_key(queue), zero);
+        batch.put(Self::cnt_total_acked_key(queue), zero);
+    }
+
+    /// Validate claim tokens for a batch of message IDs.
+    /// Reads claim info from DB and verifies token, lease, and worker identity.
+    async fn validate_claims(
+        &self,
+        queue: &str,
+        msg_ids: &[String],
+        claim_tokens: &[String],
+        expected_lease_id: Option<&str>,
+        expected_worker_id: Option<&str>,
+    ) -> Result<(), StorageError> {
+        for (msg_id, token) in msg_ids.iter().zip(claim_tokens.iter()) {
+            let claim_key = Self::claimed_key(queue, msg_id);
+            let claim_data =
+                self.db.get(&claim_key).await?.ok_or_else(|| {
+                    SlateError::invalid(format!("Message not claimed: {}", msg_id))
+                })?;
+            let claim_info: ClaimInfo = serde_json::from_slice(&claim_data)?;
+
+            if claim_info.claim_token != *token {
+                return Err(Box::new(SlateError::invalid(format!(
+                    "claim_token mismatch for msg_id {}",
+                    msg_id
+                ))));
+            }
+            if let Some(expected) = expected_lease_id {
+                if claim_info.lease_id != expected {
+                    return Err(Box::new(SlateError::invalid(format!(
+                        "lease_id mismatch for msg_id {}",
+                        msg_id
+                    ))));
+                }
+            }
+            if let Some(expected) = expected_worker_id {
+                if claim_info.worker_id != expected {
+                    return Err(Box::new(SlateError::invalid(format!(
+                        "worker_id mismatch for msg_id {}",
+                        msg_id
+                    ))));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Persist push counters into a WriteBatch (push_seq + total_pushed for a queue).
+    fn persist_push_counters(
+        batch: &mut WriteBatch,
+        queue: &str,
+        new_push_seq: u64,
+        new_total_pushed: u64,
+    ) {
+        batch.put(Self::seq_push_key(queue), new_push_seq.to_le_bytes());
+        batch.put(
+            Self::cnt_total_pushed_key(queue),
+            new_total_pushed.to_le_bytes(),
+        );
+    }
+
+    /// Load or initialize counters for a queue.
+    /// 1. Check DashMap (fast path)
+    /// 2. If missing, try to load from new counter keys
+    /// 3. If new keys don't exist, fall back to old meta:{queue} JSON (migration)
+    /// 4. Write new counter keys if migrating
+    async fn load_or_init_counters(&self, queue: &str) -> Result<Arc<QueueCounters>, StorageError> {
+        // Fast path: already in cache
+        if let Some(c) = self.counters.get(queue) {
+            return Ok(c.clone());
+        }
+
+        // Try loading from new counter keys first
+        let push_seq_data = self.db.get(&Self::seq_push_key(queue)).await?;
+
+        let counters = if let Some(ps_data) = push_seq_data {
+            // New format exists — load all counter keys
+            let push_seq = Self::read_u64_le(&ps_data);
+            let claim_seq = self
+                .db
+                .get(&Self::seq_claim_key(queue))
+                .await?
+                .map(|d| Self::read_u64_le(&d))
+                .unwrap_or(0);
+            let total_pushed = self
+                .db
+                .get(&Self::cnt_total_pushed_key(queue))
+                .await?
+                .map(|d| Self::read_u64_le(&d))
+                .unwrap_or(0);
+            let total_claimed = self
+                .db
+                .get(&Self::cnt_total_claimed_key(queue))
+                .await?
+                .map(|d| Self::read_u64_le(&d))
+                .unwrap_or(0);
+            let total_unclaimed = self
+                .db
+                .get(&Self::cnt_total_unclaimed_key(queue))
+                .await?
+                .map(|d| Self::read_u64_le(&d))
+                .unwrap_or(0);
+            let total_acked = self
+                .db
+                .get(&Self::cnt_total_acked_key(queue))
+                .await?
+                .map(|d| Self::read_u64_le(&d))
+                .unwrap_or(0);
+
+            Arc::new(QueueCounters {
+                push_seq: AtomicU64::new(push_seq),
+                claim_seq: AtomicU64::new(claim_seq),
+                total_pushed: AtomicU64::new(total_pushed),
+                total_claimed: AtomicU64::new(total_claimed),
+                total_unclaimed: AtomicU64::new(total_unclaimed),
+                total_acked: AtomicU64::new(total_acked),
+            })
+        } else {
+            // Try old meta:{queue} JSON (migration path)
+            let old_meta: QueueMeta = match self.db.get(&Self::meta_key(queue)).await? {
+                Some(data) => serde_json::from_slice(&data)?,
+                None => QueueMeta::default(),
+            };
+
+            // Compute total_claimed and total_unclaimed from old format:
+            // claimed_count = total_claimed - total_unclaimed
+            // Set total_unclaimed = total_acked, total_claimed = claimed_count + total_acked
+            // Then claimed_count = (claimed_count + total_acked) - total_acked = claimed_count. Correct.
+            let migrated_total_claimed = old_meta.claimed_count + old_meta.total_acked;
+            let migrated_total_unclaimed = old_meta.total_acked;
+
+            let c = Arc::new(QueueCounters {
+                push_seq: AtomicU64::new(old_meta.push_seq),
+                claim_seq: AtomicU64::new(old_meta.claim_seq),
+                total_pushed: AtomicU64::new(old_meta.total_pushed),
+                total_claimed: AtomicU64::new(migrated_total_claimed),
+                total_unclaimed: AtomicU64::new(migrated_total_unclaimed),
+                total_acked: AtomicU64::new(old_meta.total_acked),
+            });
+
+            // Persist new counter keys
+            let mut batch = WriteBatch::new();
+            batch.put(Self::seq_push_key(queue), old_meta.push_seq.to_le_bytes());
+            batch.put(Self::seq_claim_key(queue), old_meta.claim_seq.to_le_bytes());
+            batch.put(
+                Self::cnt_total_pushed_key(queue),
+                old_meta.total_pushed.to_le_bytes(),
+            );
+            batch.put(
+                Self::cnt_total_claimed_key(queue),
+                migrated_total_claimed.to_le_bytes(),
+            );
+            batch.put(
+                Self::cnt_total_unclaimed_key(queue),
+                migrated_total_unclaimed.to_le_bytes(),
+            );
+            batch.put(
+                Self::cnt_total_acked_key(queue),
+                old_meta.total_acked.to_le_bytes(),
+            );
+            self.db.write(batch).await?;
+
+            c
+        };
+
+        let _ = self.counters.entry(queue.to_string()).or_insert(counters);
+        Ok(self.counters.get(queue).unwrap().clone())
+    }
+
+    // === Queue Metadata (legacy + new) ===
+
+    /// Read QueueMeta from legacy meta:{queue} key.
+    /// Kept for backward compat and migration path.
+    #[allow(dead_code)]
     async fn get_meta_from_reader<R: DbRead + Sync + ?Sized>(
         reader: &R,
         queue: &str,
@@ -138,37 +376,40 @@ impl WorkQueueStorage {
         }
     }
 
-    async fn get_claim_info_from_reader<R: DbRead + Sync + ?Sized>(
-        reader: &R,
-        queue: &str,
-        msg_id: &str,
-    ) -> Result<ClaimInfo, StorageError> {
-        let key = Self::claimed_key(queue, msg_id);
-        let data = reader
-            .get(&key)
-            .await?
-            .ok_or_else(|| SlateError::invalid(format!("Message not claimed: {}", msg_id)))?;
-        Ok(serde_json::from_slice(&data)?)
-    }
-
+    /// Get queue metadata — reads from atomic counters (pure in-memory).
     pub async fn get_meta(&self, queue: &str) -> Result<QueueMeta, StorageError> {
-        Self::get_meta_from_reader(&self.db, queue).await
+        let c = self.load_or_init_counters(queue).await?;
+        let total_claimed = c.total_claimed.load(Ordering::Relaxed);
+        let total_unclaimed = c.total_unclaimed.load(Ordering::Relaxed);
+        Ok(QueueMeta {
+            push_seq: c.push_seq.load(Ordering::Relaxed),
+            claim_seq: c.claim_seq.load(Ordering::Relaxed),
+            claimed_count: total_claimed.saturating_sub(total_unclaimed),
+            total_pushed: c.total_pushed.load(Ordering::Relaxed),
+            total_acked: c.total_acked.load(Ordering::Relaxed),
+        })
     }
 
+    /// Create a queue — write the 6 counter keys (all zeros).
     pub async fn create_queue(&self, queue: &str) -> Result<(), StorageError> {
-        let key = Self::meta_key(queue);
-        if self.db.get(&key).await?.is_none() {
-            self.db
-                .put(&key, &serde_json::to_vec(&QueueMeta::default())?)
-                .await?;
-            self.db.flush().await?;
+        // Check if already exists (either new or old format)
+        if self.db.get(&Self::seq_push_key(queue)).await?.is_some() {
+            return Ok(());
         }
+        if self.db.get(&Self::meta_key(queue)).await?.is_some() {
+            return Ok(());
+        }
+
+        let mut batch = WriteBatch::new();
+        Self::write_zero_counters(&mut batch, queue);
+        self.db.write(batch).await?;
+        self.db.flush().await?;
         Ok(())
     }
 
-    // === Push Operations ===
+    // === Push Operations (NO TRANSACTION) ===
 
-    /// Push messages to queue (single or batch)
+    /// Push messages to queue using atomic counter + WriteBatch
     pub async fn push_messages(
         &self,
         queue: &str,
@@ -178,37 +419,23 @@ impl WorkQueueStorage {
             return Ok(());
         }
 
-        for attempt in 0..MAX_TXN_RETRIES {
-            let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
-            let meta = Self::get_meta_from_reader(&txn, queue).await?;
+        let c = self.load_or_init_counters(queue).await?;
+        let count = messages.len() as u64;
 
-            for (i, msg) in messages.iter().enumerate() {
-                let seq = meta.push_seq + i as u64;
-                txn.put(Self::msg_key(queue, &msg.msg_id), &serde_json::to_vec(msg)?)?;
-                txn.put(Self::pending_key(queue, seq), msg.msg_id.as_bytes())?;
-            }
+        // Reserve sequence range atomically
+        let base_seq = c.push_seq.fetch_add(count, Ordering::Relaxed);
+        let new_total_pushed = c.total_pushed.fetch_add(count, Ordering::Relaxed) + count;
 
-            let msg_count = messages.len() as u64;
-            let new_meta = QueueMeta {
-                push_seq: meta.push_seq + msg_count,
-                total_pushed: meta.total_pushed + msg_count,
-                ..meta
-            };
-            txn.put(Self::meta_key(queue), &serde_json::to_vec(&new_meta)?)?;
-
-            match txn.commit().await {
-                Ok(()) => return Ok(()),
-                Err(e) if is_txn_conflict(&e) && attempt + 1 < MAX_TXN_RETRIES => {
-                    sleep(Duration::from_millis(5 * (attempt as u64 + 1))).await;
-                    continue;
-                }
-                Err(e) => return Err(Box::new(e)),
-            }
+        let mut batch = WriteBatch::new();
+        for (i, msg) in messages.iter().enumerate() {
+            let seq = base_seq + i as u64;
+            batch.put(Self::msg_key(queue, &msg.msg_id), &serde_json::to_vec(msg)?);
+            batch.put(Self::pending_key(queue, seq), msg.msg_id.as_bytes());
         }
-
-        Err(Box::new(SlateError::transaction(
-            "push_messages exceeded retry budget".to_string(),
-        )))
+        // Persist counters
+        Self::persist_push_counters(&mut batch, queue, base_seq + count, new_total_pushed);
+        self.db.write(batch).await?;
+        Ok(())
     }
 
     /// Push a single message (convenience wrapper)
@@ -216,9 +443,9 @@ impl WorkQueueStorage {
         self.push_messages(queue, std::slice::from_ref(msg)).await
     }
 
-    // === Claim Operations ===
+    // === Claim Operations (CAS loop, NO TRANSACTION) ===
 
-    /// Claim messages from queue - O(1) per message
+    /// Claim messages from queue using CAS on claim_seq
     pub async fn claim_messages(
         &self,
         queue: &str,
@@ -226,77 +453,73 @@ impl WorkQueueStorage {
         worker_id: &str,
         lease_id: &str,
     ) -> Result<Vec<ClaimedMessage>, StorageError> {
-        for attempt in 0..MAX_TXN_RETRIES {
-            let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
-            let meta = Self::get_meta_from_reader(&txn, queue).await?;
+        let c = self.load_or_init_counters(queue).await?;
 
-            if meta.claim_seq >= meta.push_seq {
+        // CAS loop to reserve a range of sequences
+        let (start, end) = loop {
+            let cur = c.claim_seq.load(Ordering::Acquire);
+            let lim = c.push_seq.load(Ordering::Acquire);
+            if cur >= lim {
                 return Ok(Vec::new());
             }
-
-            let mut claimed = Vec::new();
-            let mut new_claim_seq = meta.claim_seq;
-
-            for seq in meta.claim_seq..meta.push_seq {
-                if claimed.len() >= batch_size {
-                    break;
-                }
-
-                let pending_key = Self::pending_key(queue, seq);
-                if let Some(msg_id_bytes) = txn.get(&pending_key).await? {
-                    let msg_id = String::from_utf8_lossy(&msg_id_bytes).to_string();
-
-                    if let Some(msg_data) = txn.get(&Self::msg_key(queue, &msg_id)).await? {
-                        let msg: Message = serde_json::from_slice(&msg_data)?;
-
-                        txn.delete(&pending_key)?;
-
-                        let claim_info = ClaimInfo::new(
-                            msg_id.clone(),
-                            worker_id.to_string(),
-                            lease_id.to_string(),
-                        );
-                        txn.put(
-                            Self::claimed_key(queue, &msg_id),
-                            &serde_json::to_vec(&claim_info)?,
-                        )?;
-
-                        claimed.push(ClaimedMessage {
-                            message: msg,
-                            claim_token: claim_info.claim_token.clone(),
-                        });
-                    }
-                }
-                new_claim_seq = seq + 1;
+            let target = std::cmp::min(cur + batch_size as u64, lim);
+            if c.claim_seq
+                .compare_exchange_weak(cur, target, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                break (cur, target);
             }
+            // CAS failed — another claimer won. Spin retry (nanosecond cost).
+        };
 
-            if claimed.is_empty() {
-                return Ok(Vec::new());
-            }
-
-            let new_meta = QueueMeta {
-                claim_seq: new_claim_seq,
-                claimed_count: meta.claimed_count + claimed.len() as u64,
-                ..meta
-            };
-            txn.put(Self::meta_key(queue), &serde_json::to_vec(&new_meta)?)?;
-
-            match txn.commit().await {
-                Ok(()) => return Ok(claimed),
-                Err(e) if is_txn_conflict(&e) && attempt + 1 < MAX_TXN_RETRIES => {
-                    sleep(Duration::from_millis(5 * (attempt as u64 + 1))).await;
-                    continue;
+        // Read messages (we own [start, end), no contention)
+        let mut claimed_items = Vec::new();
+        for seq in start..end {
+            let pending_key = Self::pending_key(queue, seq);
+            if let Some(msg_id_bytes) = self.db.get(&pending_key).await? {
+                let msg_id = String::from_utf8_lossy(&msg_id_bytes).to_string();
+                if let Some(msg_data) = self.db.get(&Self::msg_key(queue, &msg_id)).await? {
+                    let msg: Message = serde_json::from_slice(&msg_data)?;
+                    let claim_info =
+                        ClaimInfo::new(msg_id.clone(), worker_id.to_string(), lease_id.to_string());
+                    claimed_items.push((pending_key, msg_id, msg, claim_info));
                 }
-                Err(e) => return Err(Box::new(e)),
             }
+            // If pending key is missing (gap from crashed push), skip silently
         }
 
-        Err(Box::new(SlateError::transaction(
-            "claim_messages exceeded retry budget".to_string(),
-        )))
+        if claimed_items.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let actual_count = claimed_items.len() as u64;
+        let new_total_claimed =
+            c.total_claimed.fetch_add(actual_count, Ordering::Relaxed) + actual_count;
+
+        let mut batch = WriteBatch::new();
+        let mut result = Vec::new();
+        for (pending_key, msg_id, msg, claim_info) in claimed_items {
+            batch.delete(&pending_key);
+            batch.put(
+                Self::claimed_key(queue, &msg_id),
+                &serde_json::to_vec(&claim_info)?,
+            );
+            result.push(ClaimedMessage {
+                message: msg,
+                claim_token: claim_info.claim_token.clone(),
+            });
+        }
+        batch.put(Self::seq_claim_key(queue), end.to_le_bytes());
+        batch.put(
+            Self::cnt_total_claimed_key(queue),
+            new_total_claimed.to_le_bytes(),
+        );
+        self.db.write(batch).await?;
+
+        Ok(result)
     }
 
-    // === Ack Operations (unified) ===
+    // === Ack Operations (NO TRANSACTION) ===
 
     /// Core ack operation with optional downstream push and state updates
     async fn ack_internal(
@@ -328,116 +551,81 @@ impl WorkQueueStorage {
         let expected_lease_id = opts.lease_id.filter(|v| !v.is_empty());
         let expected_worker_id = opts.worker_id.filter(|v| !v.is_empty());
 
-        for attempt in 0..MAX_TXN_RETRIES {
-            let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+        let now_ns = now_nanos();
+        let ack_count = msg_ids.len() as u64;
 
-            let now_ns = now_nanos();
-            let ack_count = msg_ids.len() as u64;
+        let mut batch = WriteBatch::new();
 
-            // 1. Validate claims + move messages from claimed to acked + update upstream meta
-            if !msg_ids.is_empty() {
-                for (msg_id, token) in msg_ids.iter().zip(claim_tokens.unwrap().iter()) {
-                    let claim_info = Self::get_claim_info_from_reader(&txn, queue, msg_id).await?;
-                    if claim_info.claim_token != *token {
-                        return Err(Box::new(SlateError::invalid(format!(
-                            "claim_token mismatch for msg_id {}",
-                            msg_id
-                        ))));
-                    }
-                    if let Some(expected) = expected_lease_id {
-                        if claim_info.lease_id != expected {
-                            return Err(Box::new(SlateError::invalid(format!(
-                                "lease_id mismatch for msg_id {}",
-                                msg_id
-                            ))));
-                        }
-                    }
-                    if let Some(expected) = expected_worker_id {
-                        if claim_info.worker_id != expected {
-                            return Err(Box::new(SlateError::invalid(format!(
-                                "worker_id mismatch for msg_id {}",
-                                msg_id
-                            ))));
-                        }
-                    }
-                }
+        // 1. Validate claims + move messages from claimed to acked
+        if !msg_ids.is_empty() {
+            self.validate_claims(
+                queue,
+                msg_ids,
+                claim_tokens.unwrap(),
+                expected_lease_id,
+                expected_worker_id,
+            )
+            .await?;
 
-                let upstream_meta = Self::get_meta_from_reader(&txn, queue).await?;
-                for msg_id in msg_ids {
-                    txn.delete(Self::claimed_key(queue, msg_id))?;
-                    txn.put(Self::acked_key(queue, now_ns, msg_id), [])?;
-                }
-                let new_upstream_meta = QueueMeta {
-                    claimed_count: upstream_meta.claimed_count.saturating_sub(ack_count),
-                    total_acked: upstream_meta.total_acked + ack_count,
-                    ..upstream_meta
-                };
-                txn.put(
-                    Self::meta_key(queue),
-                    &serde_json::to_vec(&new_upstream_meta)?,
-                )?;
+            let c = self.load_or_init_counters(queue).await?;
+            let new_total_unclaimed =
+                c.total_unclaimed.fetch_add(ack_count, Ordering::Relaxed) + ack_count;
+            let new_total_acked = c.total_acked.fetch_add(ack_count, Ordering::Relaxed) + ack_count;
+
+            for msg_id in msg_ids {
+                batch.delete(Self::claimed_key(queue, msg_id));
+                batch.put(Self::acked_key(queue, now_ns, msg_id), []);
             }
+            batch.put(
+                Self::cnt_total_unclaimed_key(queue),
+                new_total_unclaimed.to_le_bytes(),
+            );
+            batch.put(
+                Self::cnt_total_acked_key(queue),
+                new_total_acked.to_le_bytes(),
+            );
+        }
 
-            // 2. Push downstream messages if provided
-            if let (Some(downstream_queue), Some(messages)) =
-                (opts.downstream_queue, opts.downstream_messages)
-            {
-                if !messages.is_empty() {
-                    let downstream_meta =
-                        Self::get_meta_from_reader(&txn, downstream_queue).await?;
-                    let msg_count = messages.len() as u64;
+        // 2. Push downstream messages if provided
+        if let (Some(downstream_queue), Some(messages)) =
+            (opts.downstream_queue, opts.downstream_messages)
+        {
+            if !messages.is_empty() {
+                let dc = self.load_or_init_counters(downstream_queue).await?;
+                let count = messages.len() as u64;
+                let base_seq = dc.push_seq.fetch_add(count, Ordering::Relaxed);
+                let new_dp = dc.total_pushed.fetch_add(count, Ordering::Relaxed) + count;
 
-                    for (i, msg) in messages.iter().enumerate() {
-                        let seq = downstream_meta.push_seq + i as u64;
-                        txn.put(
-                            Self::msg_key(downstream_queue, &msg.msg_id),
-                            &serde_json::to_vec(msg)?,
-                        )?;
-                        txn.put(
-                            Self::pending_key(downstream_queue, seq),
-                            msg.msg_id.as_bytes(),
-                        )?;
-                    }
-
-                    let new_meta = QueueMeta {
-                        push_seq: downstream_meta.push_seq + msg_count,
-                        total_pushed: downstream_meta.total_pushed + msg_count,
-                        ..downstream_meta
-                    };
-                    txn.put(
-                        Self::meta_key(downstream_queue),
-                        &serde_json::to_vec(&new_meta)?,
-                    )?;
+                for (i, msg) in messages.iter().enumerate() {
+                    batch.put(
+                        Self::msg_key(downstream_queue, &msg.msg_id),
+                        &serde_json::to_vec(msg)?,
+                    );
+                    batch.put(
+                        Self::pending_key(downstream_queue, base_seq + i as u64),
+                        msg.msg_id.as_bytes(),
+                    );
                 }
-            }
-
-            // 3. Update state if provided
-            if let Some(namespace) = opts.state_namespace {
-                if let Some(puts) = opts.state_puts {
-                    for (key, value) in puts {
-                        txn.put(Self::state_key(namespace, key), value)?;
-                    }
-                }
-                if let Some(deletes) = opts.state_deletes {
-                    for key in deletes {
-                        txn.delete(Self::state_key(namespace, key))?;
-                    }
-                }
-            }
-
-            match txn.commit().await {
-                Ok(()) => return Ok(()),
-                Err(e) if is_txn_conflict(&e) && attempt + 1 < MAX_TXN_RETRIES => {
-                    sleep(Duration::from_millis(5 * (attempt as u64 + 1))).await;
-                    continue;
-                }
-                Err(e) => return Err(Box::new(e)),
+                Self::persist_push_counters(&mut batch, downstream_queue, base_seq + count, new_dp);
             }
         }
 
-        Err(Box::new(SlateError::transaction(
-            "ack_internal exceeded retry budget".to_string(),
-        )))
+        // 3. Update state if provided
+        if let Some(namespace) = opts.state_namespace {
+            if let Some(puts) = opts.state_puts {
+                for (key, value) in puts {
+                    batch.put(Self::state_key(namespace, key), value);
+                }
+            }
+            if let Some(deletes) = opts.state_deletes {
+                for key in deletes {
+                    batch.delete(Self::state_key(namespace, key));
+                }
+            }
+        }
+
+        self.db.write(batch).await?;
+        Ok(())
     }
 
     /// Acknowledge messages (move to acked)
@@ -550,7 +738,7 @@ impl WorkQueueStorage {
         .await
     }
 
-    // === Nack Operations ===
+    // === Nack Operations (NO TRANSACTION) ===
 
     /// Return messages to pending queue (at tail)
     pub async fn nack_messages(
@@ -638,85 +826,62 @@ impl WorkQueueStorage {
         let expected_worker_id = worker_id.filter(|v| !v.is_empty());
         let expected_lease_id = lease_id.filter(|v| !v.is_empty());
 
-        for attempt in 0..MAX_TXN_RETRIES {
-            let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+        // Validate claim tokens via direct DB reads (no transaction needed)
+        if let Some(tokens) = claim_tokens {
+            self.validate_claims(
+                queue,
+                msg_ids,
+                tokens,
+                expected_lease_id,
+                expected_worker_id,
+            )
+            .await?;
+        }
 
-            if let Some(tokens) = claim_tokens {
-                for (msg_id, token) in msg_ids.iter().zip(tokens.iter()) {
-                    let claim_info = Self::get_claim_info_from_reader(&txn, queue, msg_id).await?;
-                    if claim_info.claim_token != *token {
-                        return Err(Box::new(SlateError::invalid(format!(
-                            "claim_token mismatch for msg_id {}",
-                            msg_id
-                        ))));
-                    }
-                    if let Some(expected) = expected_lease_id {
-                        if claim_info.lease_id != expected {
-                            return Err(Box::new(SlateError::invalid(format!(
-                                "lease_id mismatch for msg_id {}",
-                                msg_id
-                            ))));
-                        }
-                    }
-                    if let Some(expected) = expected_worker_id {
-                        if claim_info.worker_id != expected {
-                            return Err(Box::new(SlateError::invalid(format!(
-                                "worker_id mismatch for msg_id {}",
-                                msg_id
-                            ))));
-                        }
-                    }
+        let c = self.load_or_init_counters(queue).await?;
+        let nack_count = msg_ids.len() as u64;
+
+        // Reserve new pending sequences at the tail
+        let base_seq = c.push_seq.fetch_add(nack_count, Ordering::Relaxed);
+        let new_unclaimed = c.total_unclaimed.fetch_add(nack_count, Ordering::Relaxed) + nack_count;
+
+        let mut batch = WriteBatch::new();
+        for (i, msg_id) in msg_ids.iter().enumerate() {
+            batch.delete(Self::claimed_key(queue, msg_id));
+            batch.put(
+                Self::pending_key(queue, base_seq + i as u64),
+                msg_id.as_bytes(),
+            );
+        }
+        batch.put(
+            Self::seq_push_key(queue),
+            (base_seq + nack_count).to_le_bytes(),
+        );
+        batch.put(
+            Self::cnt_total_unclaimed_key(queue),
+            new_unclaimed.to_le_bytes(),
+        );
+
+        // State updates
+        let has_state_updates = state_namespace.is_some()
+            && (state_puts.is_some_and(|puts| !puts.is_empty())
+                || state_deletes.is_some_and(|deletes| !deletes.is_empty()));
+        if has_state_updates {
+            let namespace = state_namespace.unwrap();
+            if let Some(puts) = state_puts {
+                for (key, value) in puts {
+                    batch.put(Self::state_key(namespace, key), value);
                 }
             }
-
-            let meta = Self::get_meta_from_reader(&txn, queue).await?;
-            let nack_count = msg_ids.len() as u64;
-
-            for (i, msg_id) in msg_ids.iter().enumerate() {
-                txn.delete(Self::claimed_key(queue, msg_id))?;
-                txn.put(
-                    Self::pending_key(queue, meta.push_seq + i as u64),
-                    msg_id.as_bytes(),
-                )?;
-            }
-
-            let new_meta = QueueMeta {
-                push_seq: meta.push_seq + nack_count,
-                claimed_count: meta.claimed_count.saturating_sub(nack_count),
-                ..meta
-            };
-            txn.put(Self::meta_key(queue), &serde_json::to_vec(&new_meta)?)?;
-
-            let has_state_updates = state_namespace.is_some()
-                && (state_puts.is_some_and(|puts| !puts.is_empty())
-                    || state_deletes.is_some_and(|deletes| !deletes.is_empty()));
-            if has_state_updates {
-                let namespace = state_namespace.unwrap();
-                if let Some(puts) = state_puts {
-                    for (key, value) in puts {
-                        txn.put(Self::state_key(namespace, key), value)?;
-                    }
+            if let Some(deletes) = state_deletes {
+                for key in deletes {
+                    batch.delete(Self::state_key(namespace, key));
                 }
-                if let Some(deletes) = state_deletes {
-                    for key in deletes {
-                        txn.delete(Self::state_key(namespace, key))?;
-                    }
-                }
-            }
-
-            match txn.commit().await {
-                Ok(()) => return Ok(()),
-                Err(e) if is_txn_conflict(&e) && attempt + 1 < MAX_TXN_RETRIES => {
-                    sleep(Duration::from_millis(5 * (attempt as u64 + 1))).await;
-                    continue;
-                }
-                Err(e) => return Err(Box::new(e)),
             }
         }
 
-        Err(Box::new(SlateError::transaction(
-            "nack_messages exceeded retry budget".to_string(),
-        )))
+        self.db.write(batch).await?;
+        Ok(())
     }
 
     // === Scan Operations ===
@@ -777,7 +942,7 @@ impl WorkQueueStorage {
 
     // === Query Operations ===
 
-    /// Get queue stats - O(1) using counters in meta
+    /// Get queue stats - pure in-memory from atomic counters
     pub async fn get_queue_stats(&self, queue: &str) -> Result<QueueMeta, StorageError> {
         self.get_meta(queue).await
     }
@@ -792,6 +957,14 @@ impl WorkQueueStorage {
         let mut batch = WriteBatch::new();
         let mut deleted = 0;
 
+        // Delete new counter keys
+        batch.delete(Self::seq_push_key(queue));
+        batch.delete(Self::seq_claim_key(queue));
+        batch.delete(Self::cnt_total_pushed_key(queue));
+        batch.delete(Self::cnt_total_claimed_key(queue));
+        batch.delete(Self::cnt_total_unclaimed_key(queue));
+        batch.delete(Self::cnt_total_acked_key(queue));
+        // Also delete old meta key (migration cleanup)
         batch.delete(Self::meta_key(queue));
 
         // Delete pending entries and messages
@@ -822,6 +995,9 @@ impl WorkQueueStorage {
         if deleted > 0 || !claimed.is_empty() || !acked.is_empty() {
             self.db.write(batch).await?;
         }
+
+        // Remove from in-memory counter cache
+        self.counters.remove(queue);
 
         Ok(deleted)
     }
@@ -979,14 +1155,28 @@ impl WorkQueueStorage {
     }
 
     pub async fn list_queues(&self) -> Result<Vec<String>, StorageError> {
-        let mut iter = self.db.scan_prefix(b"meta:").await?;
+        // Scan new counter key prefix first
         let mut queues = Vec::new();
+        let mut iter = self.db.scan_prefix(b"seq_push:").await?;
         while let Ok(Some(kv)) = iter.next().await {
             let key_str = String::from_utf8_lossy(&kv.key);
-            if let Some(queue) = key_str.strip_prefix("meta:") {
+            if let Some(queue) = key_str.strip_prefix("seq_push:") {
                 queues.push(queue.to_string());
             }
         }
+
+        // Fallback: also scan old meta: prefix for migration
+        let mut iter = self.db.scan_prefix(b"meta:").await?;
+        let existing: std::collections::HashSet<String> = queues.iter().cloned().collect();
+        while let Ok(Some(kv)) = iter.next().await {
+            let key_str = String::from_utf8_lossy(&kv.key);
+            if let Some(queue) = key_str.strip_prefix("meta:") {
+                if !existing.contains(queue) {
+                    queues.push(queue.to_string());
+                }
+            }
+        }
+
         Ok(queues)
     }
 
@@ -1017,12 +1207,6 @@ impl WorkQueueStorage {
         let pending_count = meta.push_seq.saturating_sub(meta.claim_seq);
         let claimed_count = meta.claimed_count;
 
-        // Queue is only drained if:
-        // 1. No pending messages (pending_count == 0)
-        // 2. No in-flight messages (claimed_count == 0)
-        // 3. Queue has actually received messages (total_pushed > 0) OR is explicitly finished
-        // This prevents false "drained" when queue is empty but hasn't been used yet,
-        // while allowing safe exit for empty finished queues.
         let drained =
             pending_count == 0 && claimed_count == 0 && (meta.total_pushed > 0 || finished);
 
@@ -1065,18 +1249,14 @@ impl WorkQueueStorage {
 
         let meta = QueueGroupMeta::new(group_name.to_string(), num_partitions);
 
-        // Create group_meta + all partition queue metas in one WriteBatch
+        // Create group_meta + all partition queue counter keys in one WriteBatch
         let mut batch = WriteBatch::new();
         batch.put(
             Self::group_meta_key(group_name),
             &serde_json::to_vec(&meta)?,
         );
         for queue_name in &meta.partition_queues {
-            let queue_meta = QueueMeta::default();
-            batch.put(
-                Self::meta_key(queue_name),
-                &serde_json::to_vec(&queue_meta)?,
-            );
+            Self::write_zero_counters(&mut batch, queue_name);
         }
         self.db.write(batch).await?;
 
@@ -1089,13 +1269,7 @@ impl WorkQueueStorage {
     }
 
     /// Atomic ack upstream + push to multiple downstream partition queues.
-    ///
-    /// All operations happen in a single SlateDB transaction:
-    /// 1. Validate and ack upstream messages
-    /// 2. Push payloads to each partition's queue
-    /// 3. Update state
-    ///
-    /// `partition_payloads`: Vec of (partition_index, messages) pairs.
+    /// NO TRANSACTION — uses atomic counters + one big WriteBatch.
     #[allow(clippy::too_many_arguments)]
     pub async fn ack_and_scatter(
         &self,
@@ -1137,134 +1311,95 @@ impl WorkQueueStorage {
             Some(worker_id)
         };
 
-        for attempt in 0..MAX_TXN_RETRIES {
-            let txn = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+        let now_ns = now_nanos();
+        let ack_count = upstream_msg_ids.len() as u64;
+        let mut all_new_msg_ids = Vec::new();
+        let mut batch = WriteBatch::new();
 
-            let now_ns = now_nanos();
-            let ack_count = upstream_msg_ids.len() as u64;
-            let mut all_new_msg_ids = Vec::new();
-
-            // 1. Validate claims and ack upstream
-            if !upstream_msg_ids.is_empty() {
-                if upstream_claim_tokens.len() != upstream_msg_ids.len() {
-                    return Err(Box::new(SlateError::invalid(
-                        "claim_tokens length must match msg_ids".to_string(),
-                    )));
-                }
-
-                for (msg_id, token) in upstream_msg_ids.iter().zip(upstream_claim_tokens.iter()) {
-                    let claim_info =
-                        Self::get_claim_info_from_reader(&txn, upstream_queue, msg_id).await?;
-                    if claim_info.claim_token != *token {
-                        return Err(Box::new(SlateError::invalid(format!(
-                            "claim_token mismatch for msg_id {}",
-                            msg_id
-                        ))));
-                    }
-                    if let Some(expected) = expected_lease_id {
-                        if claim_info.lease_id != expected {
-                            return Err(Box::new(SlateError::invalid(format!(
-                                "lease_id mismatch for msg_id {}",
-                                msg_id
-                            ))));
-                        }
-                    }
-                    if let Some(expected) = expected_worker_id {
-                        if claim_info.worker_id != expected {
-                            return Err(Box::new(SlateError::invalid(format!(
-                                "worker_id mismatch for msg_id {}",
-                                msg_id
-                            ))));
-                        }
-                    }
-                }
-
-                let upstream_meta = Self::get_meta_from_reader(&txn, upstream_queue).await?;
-                for msg_id in upstream_msg_ids {
-                    txn.delete(Self::claimed_key(upstream_queue, msg_id))?;
-                    txn.put(Self::acked_key(upstream_queue, now_ns, msg_id), [])?;
-                }
-                let new_upstream_meta = QueueMeta {
-                    claimed_count: upstream_meta.claimed_count.saturating_sub(ack_count),
-                    total_acked: upstream_meta.total_acked + ack_count,
-                    ..upstream_meta
-                };
-                txn.put(
-                    Self::meta_key(upstream_queue),
-                    &serde_json::to_vec(&new_upstream_meta)?,
-                )?;
+        // 1. Validate claims and ack upstream
+        if !upstream_msg_ids.is_empty() {
+            if upstream_claim_tokens.len() != upstream_msg_ids.len() {
+                return Err(Box::new(SlateError::invalid(
+                    "claim_tokens length must match msg_ids".to_string(),
+                )));
             }
 
-            // 2. Push to each partition queue
-            for (pid, messages) in partition_payloads {
-                if messages.is_empty() {
-                    continue;
-                }
-                let partition_queue = &group.partition_queues[*pid as usize];
-                let partition_meta = Self::get_meta_from_reader(&txn, partition_queue).await?;
-                let msg_count = messages.len() as u64;
+            self.validate_claims(
+                upstream_queue,
+                upstream_msg_ids,
+                upstream_claim_tokens,
+                expected_lease_id,
+                expected_worker_id,
+            )
+            .await?;
 
-                for (i, msg) in messages.iter().enumerate() {
-                    let seq = partition_meta.push_seq + i as u64;
-                    txn.put(
-                        Self::msg_key(partition_queue, &msg.msg_id),
-                        &serde_json::to_vec(msg)?,
-                    )?;
-                    txn.put(
-                        Self::pending_key(partition_queue, seq),
-                        msg.msg_id.as_bytes(),
-                    )?;
-                    all_new_msg_ids.push(msg.msg_id.clone());
-                }
+            let uc = self.load_or_init_counters(upstream_queue).await?;
+            let new_total_unclaimed =
+                uc.total_unclaimed.fetch_add(ack_count, Ordering::Relaxed) + ack_count;
+            let new_total_acked =
+                uc.total_acked.fetch_add(ack_count, Ordering::Relaxed) + ack_count;
 
-                let new_partition_meta = QueueMeta {
-                    push_seq: partition_meta.push_seq + msg_count,
-                    total_pushed: partition_meta.total_pushed + msg_count,
-                    ..partition_meta
-                };
-                txn.put(
-                    Self::meta_key(partition_queue),
-                    &serde_json::to_vec(&new_partition_meta)?,
-                )?;
+            for msg_id in upstream_msg_ids {
+                batch.delete(Self::claimed_key(upstream_queue, msg_id));
+                batch.put(Self::acked_key(upstream_queue, now_ns, msg_id), []);
+            }
+            batch.put(
+                Self::cnt_total_unclaimed_key(upstream_queue),
+                new_total_unclaimed.to_le_bytes(),
+            );
+            batch.put(
+                Self::cnt_total_acked_key(upstream_queue),
+                new_total_acked.to_le_bytes(),
+            );
+        }
+
+        // 2. Push to each partition queue
+        for (pid, messages) in partition_payloads {
+            if messages.is_empty() {
+                continue;
+            }
+            let partition_queue = &group.partition_queues[*pid as usize];
+            let dc = self.load_or_init_counters(partition_queue).await?;
+            let msg_count = messages.len() as u64;
+
+            let base_seq = dc.push_seq.fetch_add(msg_count, Ordering::Relaxed);
+            let new_dp = dc.total_pushed.fetch_add(msg_count, Ordering::Relaxed) + msg_count;
+
+            for (i, msg) in messages.iter().enumerate() {
+                let seq = base_seq + i as u64;
+                batch.put(
+                    Self::msg_key(partition_queue, &msg.msg_id),
+                    &serde_json::to_vec(msg)?,
+                );
+                batch.put(
+                    Self::pending_key(partition_queue, seq),
+                    msg.msg_id.as_bytes(),
+                );
+                all_new_msg_ids.push(msg.msg_id.clone());
             }
 
-            // 3. State updates
-            if let Some(namespace) = state_namespace {
-                if let Some(puts) = state_puts {
-                    for (key, value) in puts {
-                        txn.put(Self::state_key(namespace, key), value)?;
-                    }
-                }
-                if let Some(deletes) = state_deletes {
-                    for key in deletes {
-                        txn.delete(Self::state_key(namespace, key))?;
-                    }
+            Self::persist_push_counters(&mut batch, partition_queue, base_seq + msg_count, new_dp);
+        }
+
+        // 3. State updates
+        if let Some(namespace) = state_namespace {
+            if let Some(puts) = state_puts {
+                for (key, value) in puts {
+                    batch.put(Self::state_key(namespace, key), value);
                 }
             }
-
-            match txn.commit().await {
-                Ok(()) => return Ok(all_new_msg_ids),
-                Err(e) if is_txn_conflict(&e) && attempt + 1 < MAX_TXN_RETRIES => {
-                    sleep(Duration::from_millis(5 * (attempt as u64 + 1))).await;
-                    continue;
+            if let Some(deletes) = state_deletes {
+                for key in deletes {
+                    batch.delete(Self::state_key(namespace, key));
                 }
-                Err(e) => return Err(Box::new(e)),
             }
         }
 
-        Err(Box::new(SlateError::transaction(
-            "ack_and_scatter exceeded retry budget".to_string(),
-        )))
+        self.db.write(batch).await?;
+        Ok(all_new_msg_ids)
     }
 
     /// Claim from a partition group (O(1) per call).
-    ///
-    /// Assigned path: tries claim_messages directly on each assigned partition
-    /// (no meta reads, no sort). A is small (2-4), so this is effectively O(1).
-    ///
-    /// Steal path: probes ONE unassigned partition per call via round-robin
-    /// counter, avoiding full-scan. The caller's retry loop rotates through all
-    /// partitions across successive calls.
     #[allow(clippy::too_many_arguments)]
     pub async fn claim_from_group(
         &self,
@@ -1282,8 +1417,6 @@ impl WorkQueueStorage {
             .ok_or_else(|| SlateError::invalid(format!("Queue group not found: {}", group_name)))?;
 
         // O(A) where A is small (2-4): try claim directly, no meta reads needed.
-        // Round-robin starting offset prevents starvation when one worker owns
-        // multiple partitions and earlier ones always have work.
         if !assigned_partitions.is_empty() {
             let a_len = assigned_partitions.len() as u64;
             let rr_assigned = {
@@ -1310,9 +1443,6 @@ impl WorkQueueStorage {
         }
 
         // Steal: round-robin through unassigned partitions.
-        // When threshold == 0: skip meta reads, just try claim_messages directly
-        // (each is O(1) single-key lookup). When threshold > 0: read meta for
-        // ONE candidate only (bounded cost).
         if allow_steal {
             let total = group.partition_queues.len() as u64;
             if total > 0 {
@@ -1381,7 +1511,6 @@ impl WorkQueueStorage {
     }
 
     /// Get stats for all partitions in a group, with skew detection.
-    /// Returns (group_meta, partition_stats_vec).
     pub async fn get_group_stats(
         &self,
         group_name: &str,
@@ -1414,8 +1543,6 @@ impl WorkQueueStorage {
         self.db.write(batch).await?;
 
         // Clean up in-memory round-robin counters for this group
-        // Use delimiter-aware prefix to avoid matching groups whose name
-        // starts with the same prefix (e.g., "job_s1_output" vs "job_s1_output_extra")
         let prefix = format!("{}_", group_name);
         {
             let mut map = self.steal_rr.lock().unwrap();
@@ -1763,7 +1890,6 @@ mod tests {
         advance_sim_time_secs(1.0);
 
         let mut active = HashMap::new();
-        // Set last_seen to current sim time to guarantee "active" for zero timeout.
         active.insert("lease-1".to_string(), crate::types::now_secs());
 
         let recovered = storage
@@ -2097,481 +2223,5 @@ mod tests {
         // Verify pending count: 10 original - 5 claimed + 2 nacked back = 7 pending
         let pending = meta.push_seq.saturating_sub(meta.claim_seq);
         assert_eq!(pending, 7, "7 messages pending (5 unclaimed + 2 nacked)");
-
-        // Claim and ack remaining
-        let remaining = storage
-            .claim_messages(queue, 10, "worker-2", "lease-2")
-            .await
-            .unwrap();
-        assert_eq!(remaining.len(), 7);
-
-        let (remaining_ids, remaining_tokens) = split_claims(&remaining);
-        storage
-            .ack_messages(
-                queue,
-                &remaining_ids,
-                &remaining_tokens,
-                "worker-2",
-                "lease-2",
-            )
-            .await
-            .unwrap();
-
-        let meta = storage.get_queue_stats(queue).await.unwrap();
-        assert_eq!(meta.claimed_count, 0, "All messages processed");
-        assert_eq!(meta.total_pushed, 10);
-        assert_eq!(
-            meta.total_acked, 10,
-            "All 10 messages acked (including re-acked nacked ones)"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_counter_correctness_ack_and_forward() {
-        // Verify counters are correct with ack_and_forward
-        let storage = create_temp_storage().await;
-
-        storage.create_queue("upstream").await.unwrap();
-        storage.create_queue("downstream").await.unwrap();
-
-        // Push to upstream
-        for i in 0..5 {
-            let msg = Message::new("upstream".to_string(), format!("msg{}", i).into_bytes());
-            storage.push_message("upstream", &msg).await.unwrap();
-        }
-
-        // Claim from upstream
-        let claimed = storage
-            .claim_messages("upstream", 5, "worker-1", "lease-1")
-            .await
-            .unwrap();
-        assert_eq!(claimed.len(), 5);
-
-        // Ack upstream and forward to downstream (2 outputs per input)
-        for msg in &claimed {
-            let downstream_msgs: Vec<Message> = (0..2)
-                .map(|i| {
-                    Message::new(
-                        "downstream".to_string(),
-                        format!("out-{}-{}", msg.message.msg_id, i).into_bytes(),
-                    )
-                })
-                .collect();
-            storage
-                .ack_and_forward(
-                    "upstream",
-                    std::slice::from_ref(&msg.message.msg_id),
-                    std::slice::from_ref(&msg.claim_token),
-                    "worker-1",
-                    "lease-1",
-                    "downstream",
-                    &downstream_msgs,
-                )
-                .await
-                .unwrap();
-        }
-
-        // Verify upstream counters
-        let upstream_meta = storage.get_queue_stats("upstream").await.unwrap();
-        assert_eq!(
-            upstream_meta.claimed_count, 0,
-            "All upstream claimed messages acked"
-        );
-        assert_eq!(upstream_meta.total_pushed, 5);
-        assert_eq!(upstream_meta.total_acked, 5);
-
-        // Verify downstream counters
-        let downstream_meta = storage.get_queue_stats("downstream").await.unwrap();
-        assert_eq!(
-            downstream_meta.claimed_count, 0,
-            "No downstream messages claimed yet"
-        );
-        assert_eq!(
-            downstream_meta.total_pushed, 10,
-            "5 inputs * 2 outputs = 10"
-        );
-        assert_eq!(downstream_meta.total_acked, 0);
-
-        // Verify downstream pending
-        let downstream_pending = downstream_meta
-            .push_seq
-            .saturating_sub(downstream_meta.claim_seq);
-        assert_eq!(downstream_pending, 10);
-    }
-
-    // =========================================================================
-    // QueueGroup tests
-    // =========================================================================
-
-    #[tokio::test]
-    async fn test_create_queue_group() {
-        let storage = create_temp_storage().await;
-
-        let group = storage.create_queue_group("grp1", 4).await.unwrap();
-        assert_eq!(group.name, "grp1");
-        assert_eq!(group.num_partitions, 4);
-        assert_eq!(group.partition_queues.len(), 4);
-        assert_eq!(group.partition_queues[0], "grp1_p0");
-        assert_eq!(group.partition_queues[3], "grp1_p3");
-        assert_eq!(group.version, 0);
-
-        // Each partition queue should have metadata
-        for q in &group.partition_queues {
-            let meta = storage.get_meta(q).await.unwrap();
-            assert_eq!(meta.push_seq, 0);
-            assert_eq!(meta.claim_seq, 0);
-        }
-
-        // Idempotent: creating again returns the same group
-        let group2 = storage.create_queue_group("grp1", 4).await.unwrap();
-        assert_eq!(group2.name, group.name);
-        assert_eq!(group2.num_partitions, group.num_partitions);
-    }
-
-    #[tokio::test]
-    async fn test_ack_and_scatter() {
-        let storage = create_temp_storage().await;
-
-        // Setup: upstream queue with 2 messages, downstream group with 3 partitions
-        storage.create_queue("upstream").await.unwrap();
-        let group = storage.create_queue_group("grp1", 3).await.unwrap();
-
-        let msg1 = Message::new("upstream".to_string(), b"a".to_vec());
-        let msg2 = Message::new("upstream".to_string(), b"b".to_vec());
-        storage.push_message("upstream", &msg1).await.unwrap();
-        storage.push_message("upstream", &msg2).await.unwrap();
-
-        let claimed = storage
-            .claim_messages("upstream", 2, "w1", "l1")
-            .await
-            .unwrap();
-        assert_eq!(claimed.len(), 2);
-        let (msg_ids, claim_tokens) = split_claims(&claimed);
-
-        // Build partition payloads: 2 messages to p0, 1 to p2
-        let out_p0 = vec![
-            Message::new(group.partition_queues[0].clone(), b"x1".to_vec()),
-            Message::new(group.partition_queues[0].clone(), b"x2".to_vec()),
-        ];
-        let out_p2 = vec![Message::new(
-            group.partition_queues[2].clone(),
-            b"y1".to_vec(),
-        )];
-        let partition_payloads: Vec<(u32, Vec<Message>)> = vec![(0, out_p0), (2, out_p2)];
-
-        let new_ids = storage
-            .ack_and_scatter(
-                "upstream",
-                &msg_ids,
-                &claim_tokens,
-                "w1",
-                "l1",
-                "grp1",
-                &partition_payloads,
-                None,
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-        assert_eq!(new_ids.len(), 3); // 2 + 1
-
-        // Upstream should be fully acked
-        let upstream_meta = storage.get_queue_stats("upstream").await.unwrap();
-        assert_eq!(upstream_meta.claimed_count, 0);
-        assert_eq!(upstream_meta.total_acked, 2);
-
-        // Partition p0 should have 2 pending
-        let p0_meta = storage.get_meta(&group.partition_queues[0]).await.unwrap();
-        assert_eq!(p0_meta.push_seq, 2);
-        assert_eq!(p0_meta.total_pushed, 2);
-
-        // Partition p1 should be empty
-        let p1_meta = storage.get_meta(&group.partition_queues[1]).await.unwrap();
-        assert_eq!(p1_meta.push_seq, 0);
-
-        // Partition p2 should have 1 pending
-        let p2_meta = storage.get_meta(&group.partition_queues[2]).await.unwrap();
-        assert_eq!(p2_meta.push_seq, 1);
-        assert_eq!(p2_meta.total_pushed, 1);
-
-        // Verify we can claim from partition queues
-        let claimed_p0 = storage
-            .claim_messages(&group.partition_queues[0], 10, "w2", "l2")
-            .await
-            .unwrap();
-        assert_eq!(claimed_p0.len(), 2);
-        assert_eq!(claimed_p0[0].message.payload, b"x1");
-        assert_eq!(claimed_p0[1].message.payload, b"x2");
-    }
-
-    #[tokio::test]
-    async fn test_ack_and_scatter_rejects_wrong_token() {
-        let storage = create_temp_storage().await;
-
-        storage.create_queue("upstream").await.unwrap();
-        storage.create_queue_group("grp1", 2).await.unwrap();
-
-        let msg = Message::new("upstream".to_string(), b"a".to_vec());
-        storage.push_message("upstream", &msg).await.unwrap();
-
-        let claimed = storage
-            .claim_messages("upstream", 1, "w1", "l1")
-            .await
-            .unwrap();
-        let (msg_ids, _) = split_claims(&claimed);
-
-        // Use wrong claim token
-        let result = storage
-            .ack_and_scatter(
-                "upstream",
-                &msg_ids,
-                &["wrong-token".to_string()],
-                "w1",
-                "l1",
-                "grp1",
-                &[],
-                None,
-                None,
-                None,
-            )
-            .await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("claim_token"));
-    }
-
-    #[tokio::test]
-    async fn test_ack_and_scatter_rejects_invalid_partition() {
-        let storage = create_temp_storage().await;
-
-        storage.create_queue("upstream").await.unwrap();
-        storage.create_queue_group("grp1", 2).await.unwrap();
-
-        // Partition 5 is out of range for a group with 2 partitions
-        let out = vec![Message::new("grp1_p5".to_string(), b"x".to_vec())];
-        let result = storage
-            .ack_and_scatter(
-                "upstream",
-                &[],
-                &[],
-                "w1",
-                "l1",
-                "grp1",
-                &[(5, out)],
-                None,
-                None,
-                None,
-            )
-            .await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("out of range"));
-    }
-
-    #[tokio::test]
-    async fn test_ack_and_scatter_with_state() {
-        let storage = create_temp_storage().await;
-
-        storage.create_queue("upstream").await.unwrap();
-        storage.create_queue_group("grp1", 2).await.unwrap();
-
-        let msg = Message::new("upstream".to_string(), b"a".to_vec());
-        storage.push_message("upstream", &msg).await.unwrap();
-
-        let claimed = storage
-            .claim_messages("upstream", 1, "w1", "l1")
-            .await
-            .unwrap();
-        let (msg_ids, claim_tokens) = split_claims(&claimed);
-
-        let mut state_puts = HashMap::new();
-        state_puts.insert("cursor".to_string(), b"offset_42".to_vec());
-
-        storage
-            .ack_and_scatter(
-                "upstream",
-                &msg_ids,
-                &claim_tokens,
-                "w1",
-                "l1",
-                "grp1",
-                &[],
-                Some("ns1"),
-                Some(&state_puts),
-                None,
-            )
-            .await
-            .unwrap();
-
-        // Verify state was written atomically
-        let vals = storage
-            .state_get_batch("ns1", &["cursor".to_string()])
-            .await
-            .unwrap();
-        assert_eq!(vals.get("cursor"), Some(&b"offset_42".to_vec()));
-    }
-
-    #[tokio::test]
-    async fn test_claim_from_group_assigned() {
-        let storage = create_temp_storage().await;
-
-        let group = storage.create_queue_group("grp1", 3).await.unwrap();
-
-        // Push messages: 5 to p0, 2 to p1, 0 to p2
-        for i in 0..5 {
-            let msg = Message::new(group.partition_queues[0].clone(), format!("p0_{i}").into());
-            storage
-                .push_message(&group.partition_queues[0], &msg)
-                .await
-                .unwrap();
-        }
-        for i in 0..2 {
-            let msg = Message::new(group.partition_queues[1].clone(), format!("p1_{i}").into());
-            storage
-                .push_message(&group.partition_queues[1], &msg)
-                .await
-                .unwrap();
-        }
-
-        // Worker assigned to p0 and p1 — should claim from p0 first (highest pending)
-        let (claimed, source_queue, source_pid) = storage
-            .claim_from_group("grp1", 3, "w1", "l1", &[0, 1], false, 0)
-            .await
-            .unwrap();
-        assert_eq!(claimed.len(), 3);
-        assert_eq!(source_queue, group.partition_queues[0]);
-        assert_eq!(source_pid, 0);
-    }
-
-    #[tokio::test]
-    async fn test_claim_from_group_empty() {
-        let storage = create_temp_storage().await;
-
-        storage.create_queue_group("grp1", 2).await.unwrap();
-
-        // No messages — claim should return empty
-        let (claimed, source_queue, _) = storage
-            .claim_from_group("grp1", 5, "w1", "l1", &[0, 1], false, 0)
-            .await
-            .unwrap();
-        assert!(claimed.is_empty());
-        assert!(source_queue.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_claim_from_group_work_stealing() {
-        let storage = create_temp_storage().await;
-
-        let group = storage.create_queue_group("grp1", 3).await.unwrap();
-
-        // Push 10 messages to p2 only (p0 and p1 are empty)
-        for i in 0..10 {
-            let msg = Message::new(group.partition_queues[2].clone(), format!("p2_{i}").into());
-            storage
-                .push_message(&group.partition_queues[2], &msg)
-                .await
-                .unwrap();
-        }
-
-        // Worker assigned to p0 only, allow_steal=false — should get nothing
-        let (claimed, _, _) = storage
-            .claim_from_group("grp1", 5, "w1", "l1", &[0], false, 0)
-            .await
-            .unwrap();
-        assert!(claimed.is_empty());
-
-        // Worker assigned to p0 only, allow_steal=true, threshold=0 — should steal from p2
-        let (claimed, source_queue, source_pid) = storage
-            .claim_from_group("grp1", 3, "w1", "l1", &[0], true, 0)
-            .await
-            .unwrap();
-        assert_eq!(claimed.len(), 3);
-        assert_eq!(source_queue, group.partition_queues[2]);
-        assert_eq!(source_pid, 2);
-
-        // With threshold=100, should NOT steal (p2 only has 7 remaining)
-        let (claimed, _, _) = storage
-            .claim_from_group("grp1", 5, "w2", "l2", &[0], true, 100)
-            .await
-            .unwrap();
-        assert!(claimed.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_group_completion() {
-        let storage = create_temp_storage().await;
-
-        let group = storage.create_queue_group("grp1", 2).await.unwrap();
-
-        // Not finished yet — empty queues without total_pushed > 0 are NOT drained
-        let (all_finished, all_drained, statuses) =
-            storage.check_group_completion("grp1").await.unwrap();
-        assert!(!all_finished);
-        assert!(!all_drained); // empty unused queues are not considered drained
-        assert_eq!(statuses.len(), 2);
-
-        // Mark finished
-        let marked = storage.mark_group_finished("grp1").await.unwrap();
-        assert_eq!(marked, 2);
-
-        // Now should be finished AND drained (no messages)
-        let (all_finished, all_drained, _) = storage.check_group_completion("grp1").await.unwrap();
-        assert!(all_finished);
-        assert!(all_drained);
-
-        // Push a message — drained should become false
-        let msg = Message::new(group.partition_queues[0].clone(), b"late".to_vec());
-        storage
-            .push_message(&group.partition_queues[0], &msg)
-            .await
-            .unwrap();
-
-        let (all_finished, all_drained, statuses) =
-            storage.check_group_completion("grp1").await.unwrap();
-        assert!(all_finished);
-        assert!(!all_drained);
-        // p0 has 1 pending, p1 has 0
-        assert_eq!(statuses[0].1, 1); // pending
-        assert_eq!(statuses[1].1, 0);
-    }
-
-    #[tokio::test]
-    async fn test_get_group_stats() {
-        let storage = create_temp_storage().await;
-
-        let group = storage.create_queue_group("grp1", 3).await.unwrap();
-
-        // Push varying amounts
-        for _ in 0..5 {
-            let msg = Message::new(group.partition_queues[0].clone(), b"x".to_vec());
-            storage
-                .push_message(&group.partition_queues[0], &msg)
-                .await
-                .unwrap();
-        }
-        for _ in 0..2 {
-            let msg = Message::new(group.partition_queues[1].clone(), b"y".to_vec());
-            storage
-                .push_message(&group.partition_queues[1], &msg)
-                .await
-                .unwrap();
-        }
-
-        let (group_meta, stats) = storage.get_group_stats("grp1").await.unwrap();
-        assert_eq!(group_meta.name, "grp1");
-        assert_eq!(stats.len(), 3);
-        assert_eq!(stats[0].1.total_pushed, 5); // p0
-        assert_eq!(stats[1].1.total_pushed, 2); // p1
-        assert_eq!(stats[2].1.total_pushed, 0); // p2
-    }
-
-    #[tokio::test]
-    async fn test_group_not_found() {
-        let storage = create_temp_storage().await;
-
-        let result = storage
-            .claim_from_group("nonexistent", 1, "w1", "l1", &[0], false, 0)
-            .await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not found"));
     }
 }

@@ -29,6 +29,8 @@
 #[allow(clippy::await_holding_lock)] // SIM_TIME_LOCK is intentionally held across awaits to serialize time-sensitive tests
 mod tests {
     use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
 
     use rand::prelude::*;
     use rand::rngs::StdRng;
@@ -626,5 +628,194 @@ mod tests {
         assert_eq!(meta.push_seq, 105); // 5 + 5*20 nack re-pushes
 
         set_sim_time_nanos(0);
+    }
+
+    // =====================================================================
+    // High-concurrency stress tests (atomic counter validation)
+    // =====================================================================
+
+    /// 500 concurrent claimers on 10000 messages — no duplicates, no losses.
+    #[tokio::test]
+    async fn test_500_concurrent_claims() {
+        use std::sync::atomic::AtomicU64;
+
+        let storage = WorkQueueStorage::new("memory://").await.unwrap();
+        let storage = Arc::new(storage);
+        let queue = "stress_q";
+        storage.create_queue(queue).await.unwrap();
+
+        // Push 10000 messages
+        let mut msgs = Vec::new();
+        for i in 0..10000u64 {
+            msgs.push(Message::new(
+                queue.to_string(),
+                format!("msg_{i}").into_bytes(),
+            ));
+        }
+        for chunk in msgs.chunks(100) {
+            storage.push_messages(queue, chunk).await.unwrap();
+        }
+
+        // 500 concurrent claimers, each claiming batch_size=1
+        let mut handles = Vec::new();
+        let total_claimed = Arc::new(AtomicU64::new(0));
+        let claimed_ids = Arc::new(std::sync::Mutex::new(HashSet::new()));
+
+        for worker_id in 0..500u32 {
+            let s = storage.clone();
+            let tc = total_claimed.clone();
+            let ci = claimed_ids.clone();
+            handles.push(tokio::spawn(async move {
+                let wid = format!("w_{worker_id}");
+                let lid = format!("l_{worker_id}");
+                loop {
+                    let claimed = s.claim_messages(queue, 1, &wid, &lid).await.unwrap();
+                    if claimed.is_empty() {
+                        break;
+                    }
+                    tc.fetch_add(claimed.len() as u64, Ordering::Relaxed);
+                    let mut ids = ci.lock().unwrap();
+                    for c in &claimed {
+                        assert!(
+                            ids.insert(c.message.msg_id.clone()),
+                            "DUPLICATE CLAIM: {}",
+                            c.message.msg_id
+                        );
+                    }
+                }
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        assert_eq!(total_claimed.load(Ordering::Relaxed), 10000);
+        assert_eq!(claimed_ids.lock().unwrap().len(), 10000);
+
+        // Verify stats
+        let stats = storage.get_queue_stats(queue).await.unwrap();
+        assert_eq!(stats.claim_seq, stats.push_seq); // all claimed
+        assert_eq!(stats.claimed_count, 10000); // all in-flight
+    }
+
+    /// Simultaneous push + claim + ack from many workers.
+    /// Phase 1: push all messages. Phase 2: claim+ack all messages concurrently.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn test_concurrent_push_claim_ack() {
+        use std::sync::atomic::AtomicU64;
+
+        let storage = Arc::new(WorkQueueStorage::new("memory://").await.unwrap());
+        let queue = "pca_q";
+        storage.create_queue(queue).await.unwrap();
+
+        // Phase 1: push 5000 messages concurrently from 50 pushers
+        let total_pushed = Arc::new(AtomicU64::new(0));
+        let mut push_handles = Vec::new();
+        for pid in 0..50u32 {
+            let s = storage.clone();
+            let tp = total_pushed.clone();
+            push_handles.push(tokio::spawn(async move {
+                for i in 0..100u32 {
+                    let msg = Message::new(queue.to_string(), format!("p{pid}_m{i}").into_bytes());
+                    s.push_message(queue, &msg).await.unwrap();
+                    tp.fetch_add(1, Ordering::Relaxed);
+                }
+            }));
+        }
+        for h in push_handles {
+            h.await.unwrap();
+        }
+        assert_eq!(total_pushed.load(Ordering::Relaxed), 5000);
+
+        // Phase 2: 100 workers claim+ack concurrently
+        let total_acked = Arc::new(AtomicU64::new(0));
+        let mut work_handles = Vec::new();
+        for wid in 0..100u32 {
+            let s = storage.clone();
+            let ta = total_acked.clone();
+            work_handles.push(tokio::spawn(async move {
+                let w = format!("w_{wid}");
+                let l = format!("l_{wid}");
+                loop {
+                    let claimed = s.claim_messages(queue, 1, &w, &l).await.unwrap();
+                    if claimed.is_empty() {
+                        break;
+                    }
+                    let msg_ids: Vec<String> =
+                        claimed.iter().map(|c| c.message.msg_id.clone()).collect();
+                    let tokens: Vec<String> =
+                        claimed.iter().map(|c| c.claim_token.clone()).collect();
+                    s.ack_messages(queue, &msg_ids, &tokens, &w, &l)
+                        .await
+                        .unwrap();
+                    ta.fetch_add(claimed.len() as u64, Ordering::Relaxed);
+                }
+            }));
+        }
+        for h in work_handles {
+            h.await.unwrap();
+        }
+
+        let acked = total_acked.load(Ordering::Relaxed);
+        assert_eq!(acked, 5000); // all messages acked
+
+        let stats = storage.get_queue_stats(queue).await.unwrap();
+        assert_eq!(stats.claimed_count, 0); // nothing in-flight
+        assert_eq!(stats.total_acked, 5000);
+    }
+
+    /// 200 workers claiming from a 4-partition group simultaneously.
+    #[tokio::test]
+    async fn test_concurrent_claim_from_group() {
+        let storage = Arc::new(WorkQueueStorage::new("memory://").await.unwrap());
+        let group = "stress_grp";
+        storage.create_queue_group(group, 4).await.unwrap();
+
+        // Push 2000 messages across partitions
+        for pid in 0..4u32 {
+            let q = format!("{group}_p{pid}");
+            let msgs: Vec<Message> = (0..500)
+                .map(|i| Message::new(q.clone(), format!("p{pid}_m{i}").into_bytes()))
+                .collect();
+            for chunk in msgs.chunks(50) {
+                storage.push_messages(&q, chunk).await.unwrap();
+            }
+        }
+
+        let claimed_ids = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let mut handles = Vec::new();
+
+        for wid in 0..200u32 {
+            let s = storage.clone();
+            let ci = claimed_ids.clone();
+            let assigned: Vec<u32> = vec![wid % 4]; // each worker assigned to 1 partition
+            handles.push(tokio::spawn(async move {
+                let w = format!("w_{wid}");
+                let l = format!("l_{wid}");
+                loop {
+                    let (claimed, _, _) = s
+                        .claim_from_group(group, 1, &w, &l, &assigned, true, 0)
+                        .await
+                        .unwrap();
+                    if claimed.is_empty() {
+                        break;
+                    }
+                    let mut ids = ci.lock().unwrap();
+                    for c in &claimed {
+                        assert!(
+                            ids.insert(c.message.msg_id.clone()),
+                            "DUPLICATE: {}",
+                            c.message.msg_id
+                        );
+                    }
+                }
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+        assert_eq!(claimed_ids.lock().unwrap().len(), 2000);
     }
 }

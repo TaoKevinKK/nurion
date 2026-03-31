@@ -476,6 +476,11 @@ class RayJobRunner:
             # Start autoscaler if configured
             self._start_autoscaler()
 
+            # Eager fill: scale stages up to available capacity immediately,
+            # without waiting for the first autoscaler tick.
+            if self._autoscaler:
+                await self._autoscaler.eager_fill(self._masters)
+
             # Give asyncio tasks a chance to start executing
             await asyncio.sleep(0)
             self.logger.info("Entering main run loop")

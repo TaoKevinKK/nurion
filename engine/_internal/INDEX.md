@@ -267,11 +267,13 @@
 - **`JobStatus`** — `job_id`, `is_running`, `stages`, `elapsed_time`, `error`
 
 ### `runtime/autoscaler.py`
-- **`SimpleAutoscaler`** — queue-depth-driven worker scaling
+- **`SimpleAutoscaler`** — resource-aware worker scaling with AIMD cooldowns
   - Reads queue depth from `QueueStatsClient`
   - Calls `StageMaster.scale_up/down()` on each tick
-  - Proactive resource check via `ray.available_resources()` before scale-up
-- **`StageAutoscaleConfig`** — `enabled`, `check_interval_s`, `scale_up_lag_threshold`, `scale_down_lag_threshold`, `cooldown_s`, `max_scale_step`
+  - `_get_spawnable_count()` — queries `ray.available_resources()` to compute how many workers CAN be added (not just "can one worker fit?")
+  - `eager_fill()` — one-shot post-startup scale-up to fill available capacity immediately
+  - AIMD cooldowns: `cooldown_up_s=15` (aggressive), `cooldown_down_s=60` (conservative)
+- **`StageAutoscaleConfig`** — `enabled`, `check_interval_s`, `scale_up_lag_threshold`, `scale_down_lag_threshold`, `cooldown_up_s`, `cooldown_down_s`, `max_scale_step`
 - **`StageMetrics`** — per-stage metrics snapshot for scaling decisions
 
 ### `runtime/backpressure.py`

@@ -138,10 +138,15 @@ class WorkerManager:
         """Assign partition IDs to a worker (round-robin distribution).
 
         Returns:
-            Tuple of partition IDs, or None if not downstream of a shuffle.
+            Tuple of partition IDs, or None if upstream is not a group.
         """
-        if self._runtime.upstream_num_partitions <= 0:
+        if self._runtime.upstream_num_partitions == 0:
             return None
+        # For single-partition groups: explicitly assign partition 0 to all
+        # workers so claim_from_group gets a concrete partition list (not None,
+        # which some broker versions treat as "no partitions assigned").
+        if self._runtime.upstream_num_partitions == 1:
+            return (0,)
 
         n_partitions = self._runtime.upstream_num_partitions
         indices = [

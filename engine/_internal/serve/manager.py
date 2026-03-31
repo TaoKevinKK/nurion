@@ -112,8 +112,8 @@ class ModelServiceManager:
             actor_options["lifetime"] = "detached"
             actor_options["namespace"] = SERVE_NAMESPACE
 
-        self._registry = ray.remote(ModelRegistry).options(**actor_options).remote()
-        ray.get(self._registry.start.remote())
+        self._registry = ray.remote(ModelRegistry).options(**actor_options).remote()  # type: ignore[assignment]
+        ray.get(self._registry.start.remote())  # type: ignore[union-attr]
 
         mode = "detached" if detached else "attached"
         logger.info(f"ModelServiceManager initialized (mode={mode})")
@@ -138,7 +138,7 @@ class ModelServiceManager:
 
     def get_registry(self) -> ray.actor.ActorHandle:
         """Get the registry actor handle."""
-        return self._registry
+        return self._registry  # type: ignore[return-value]
 
     def _write_model_state(self, model_id: str, status: str) -> None:
         """Write model lifecycle metadata into WorkQueue state."""
@@ -218,7 +218,7 @@ class ModelServiceManager:
         # Pool is a plain object, not a Ray actor
         pool = ModelPool(
             config=config,
-            registry=self._registry,
+            registry=self._registry,  # type: ignore[arg-type]
             detached=self._detached,
             allocator=self._allocator,
             state_writer=self._state_writer,
@@ -510,7 +510,7 @@ def create_manager(
         options["lifetime"] = "detached"
         options["namespace"] = SERVE_NAMESPACE
     return (
-        ray.remote(ModelServiceManager)
+        ray.remote(ModelServiceManager)  # type: ignore[return-value]
         .options(**options)
         .remote(autoscale_config, detached, broker_endpoint)
     )

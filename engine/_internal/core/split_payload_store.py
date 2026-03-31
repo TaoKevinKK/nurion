@@ -282,12 +282,22 @@ class RaySplitPayloadStore(SplitPayloadStore):
         if key.startswith(self.JVM_ARROW_PREFIX):
             return self._get_from_arrow_data(key)
 
-        # Standard path: lookup from actor's registered refs
-        ref_wrapper = ray.get(self._actor.get_ref.remote(key))
+        # Standard path: lookup from actor's registered refs.
+        # Fail fast with timeout — don't block indefinitely on dead actors/objects.
+        _TIMEOUT = 30
+        try:
+            ref_wrapper = ray.get(self._actor.get_ref.remote(key), timeout=_TIMEOUT)
+        except ray.exceptions.GetTimeoutError:
+            logger.warning(f"Timeout getting ref for key {key} after {_TIMEOUT}s")
+            return None
         if ref_wrapper is None:
             return None
 
-        data = ray.get(ref_wrapper["ref"])
+        try:
+            data = ray.get(ref_wrapper["ref"], timeout=_TIMEOUT)
+        except ray.exceptions.GetTimeoutError:
+            logger.warning(f"Timeout getting payload data for key {key} after {_TIMEOUT}s")
+            return None
         return self._convert_to_payload(data, split_id=key)
 
     def _get_from_arrow_data(self, key: str) -> Optional[SplitPayload]:

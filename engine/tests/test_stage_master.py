@@ -499,3 +499,55 @@ class TestStageWorkerPayloadCleanup:
         mock_payload_store.get_with_hint.assert_called_once()
         assert mock_payload_store.get_with_hint.call_args[0][0] == payload_key
         mock_payload_store.delete.assert_called_once_with(payload_key)
+
+    @pytest.mark.asyncio
+    async def test_payload_unreachable_raises_runtime_error(self, workqueue_backend):
+        """When payload_store returns None, worker must raise RuntimeError (fail fast).
+
+        Regression: previously the worker would nack and return None, causing the
+        message to be re-enqueued endlessly.  The job would hang forever instead of
+        surfacing the error.
+        """
+        from _internal.core.stage_worker import StageWorker, WorkerRuntime
+
+        WorkerClass = StageWorker.__ray_actor_class__
+
+        payload_key = "unreachable_payload"
+        mock_payload_store = MagicMock()
+        # Simulate payload unreachable (Flight timeout, Ray object lost, S3 down)
+        mock_payload_store.get_with_hint.return_value = None
+        mock_payload_store.get.return_value = None
+        mock_payload_store.get_location.return_value = None
+        mock_payload_store.flush_pending_writes.return_value = None
+
+        runtime = WorkerRuntime(
+            worker_id="w_fail_fast",
+            job_id="job_fail_fast",
+            stage_id="stage_fail_fast",
+            broker_endpoint=QueueEndpoint(
+                host=workqueue_backend.host,
+                port=workqueue_backend.port,
+                storage_url="memory://",
+            ),
+            upstream=QueueRef.queue("fail_fast_upstream"),
+        )
+
+        worker = WorkerClass(runtime, MockStage(), mock_payload_store)
+        worker.queue_client = workqueue_backend.client
+
+        workqueue_backend.client.create_queue("fail_fast_upstream")
+        msg = DataQueueMessage(
+            message_id="msg_unreachable_001",
+            split_id="s1",
+            payload_key=payload_key,
+            metadata={},
+        )
+        workqueue_backend.client.push("fail_fast_upstream", msg.to_bytes())
+
+        records = workqueue_backend.client.claim(
+            "fail_fast_upstream", batch_size=1, timeout_ms=1000
+        )
+        assert len(records) == 1
+
+        with pytest.raises(RuntimeError, match="Payload unreachable"):
+            await worker._process_and_ack(records)

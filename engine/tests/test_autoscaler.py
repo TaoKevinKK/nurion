@@ -102,11 +102,12 @@ class TestStageAutoscaleConfig:
     def test_default_config(self):
         config = StageAutoscaleConfig()
         assert config.enabled is True
-        assert config.check_interval_s == 15.0
-        assert config.scale_up_lag_threshold == 1000
+        assert config.check_interval_s == 10.0
+        assert config.scale_up_lag_threshold == 500
         assert config.scale_down_lag_threshold == 100
-        assert config.cooldown_s == 60.0
-        assert config.max_scale_step == 2
+        assert config.cooldown_up_s == 15.0
+        assert config.cooldown_down_s == 60.0
+        assert config.max_scale_step == 32
 
     def test_custom_config(self):
         config = StageAutoscaleConfig(
@@ -261,14 +262,14 @@ class TestScalingDecisions:
 
         assert "stage_a" not in decisions  # Already at min
 
-    def test_skip_source_stages(self, autoscaler):
-        """Should skip source stages."""
+    def test_source_with_fixed_parallelism_skipped(self, autoscaler):
+        """Source stage with min==max (fixed parallelism) should not scale."""
         metrics = {
             "source": StageMetrics(
                 stage_id="source",
-                worker_count=2,
-                min_workers=1,
-                max_workers=8,
+                worker_count=4,
+                min_workers=4,
+                max_workers=4,
                 input_queue_lag=5000,
                 is_source=True,
             )
@@ -302,7 +303,7 @@ class TestCooldown:
 
     async def test_cooldown_prevents_rapid_scaling(self):
         """Scaling should be blocked during cooldown period."""
-        config = StageAutoscaleConfig(cooldown_s=60.0)
+        config = StageAutoscaleConfig(cooldown_up_s=60.0, cooldown_down_s=60.0)
         autoscaler = SimpleAutoscaler(config)
 
         master = MockStageMaster(
@@ -327,7 +328,9 @@ class TestCooldown:
 
     async def test_scaling_after_cooldown(self):
         """Scaling should work after cooldown period."""
-        config = StageAutoscaleConfig(cooldown_s=0.1)  # Short cooldown for testing
+        config = StageAutoscaleConfig(
+            cooldown_up_s=0.1, cooldown_down_s=0.1
+        )  # Short cooldown for testing
         autoscaler = SimpleAutoscaler(config)
 
         master = MockStageMaster(
@@ -430,7 +433,7 @@ class TestScaleExecution:
         assert len(master._workers) == 5
 
     async def test_scale_down_removes_workers(self):
-        config = StageAutoscaleConfig(cooldown_s=0)  # No cooldown for testing
+        config = StageAutoscaleConfig(cooldown_up_s=0, cooldown_down_s=0)  # No cooldown for testing
         autoscaler = SimpleAutoscaler(config)
 
         master = MockStageMaster(worker_count=5, min_workers=1)
@@ -441,7 +444,7 @@ class TestScaleExecution:
         assert len(master._workers) == 2
 
     async def test_scale_down_respects_min_workers(self):
-        config = StageAutoscaleConfig(cooldown_s=0)
+        config = StageAutoscaleConfig(cooldown_up_s=0, cooldown_down_s=0)
         autoscaler = SimpleAutoscaler(config)
 
         master = MockStageMaster(worker_count=3, min_workers=2)
@@ -459,7 +462,7 @@ class TestResourceAwareScaling:
 
     async def test_scale_up_skipped_when_insufficient_cpus(self, monkeypatch):
         """Scale-up should be skipped when cluster lacks CPU resources."""
-        config = StageAutoscaleConfig(cooldown_s=0)
+        config = StageAutoscaleConfig(cooldown_up_s=0, cooldown_down_s=0)
         autoscaler = SimpleAutoscaler(config)
 
         master = MockStageMaster(worker_count=2, num_cpus=2.0, num_gpus=0.0)
@@ -475,7 +478,7 @@ class TestResourceAwareScaling:
 
     async def test_scale_up_skipped_when_insufficient_gpus(self, monkeypatch):
         """Scale-up should be skipped when cluster lacks GPU resources."""
-        config = StageAutoscaleConfig(cooldown_s=0)
+        config = StageAutoscaleConfig(cooldown_up_s=0, cooldown_down_s=0)
         autoscaler = SimpleAutoscaler(config)
 
         master = MockStageMaster(worker_count=2, num_cpus=0.5, num_gpus=1.0)
@@ -490,7 +493,7 @@ class TestResourceAwareScaling:
 
     async def test_scale_up_proceeds_with_sufficient_resources(self, monkeypatch):
         """Scale-up should proceed when cluster has enough resources."""
-        config = StageAutoscaleConfig(cooldown_s=0)
+        config = StageAutoscaleConfig(cooldown_up_s=0, cooldown_down_s=0)
         autoscaler = SimpleAutoscaler(config)
 
         master = MockStageMaster(worker_count=2, num_cpus=1.0, num_gpus=1.0)
@@ -504,7 +507,7 @@ class TestResourceAwareScaling:
 
     async def test_scale_up_proceeds_when_zero_cpu_required(self, monkeypatch):
         """Workers requiring 0 CPU should not be blocked by CPU check."""
-        config = StageAutoscaleConfig(cooldown_s=0)
+        config = StageAutoscaleConfig(cooldown_up_s=0, cooldown_down_s=0)
         autoscaler = SimpleAutoscaler(config)
 
         master = MockStageMaster(worker_count=2, num_cpus=0, num_gpus=0.0)
@@ -519,7 +522,7 @@ class TestResourceAwareScaling:
 
     async def test_scale_down_not_affected_by_resource_check(self, monkeypatch):
         """Resource check should only gate scale-up, not scale-down."""
-        config = StageAutoscaleConfig(cooldown_s=0)
+        config = StageAutoscaleConfig(cooldown_up_s=0, cooldown_down_s=0)
         autoscaler = SimpleAutoscaler(config)
 
         master = MockStageMaster(worker_count=4, min_workers=1, num_cpus=2.0)
@@ -534,7 +537,7 @@ class TestResourceAwareScaling:
 
     async def test_resource_check_error_does_not_block_scaling(self, monkeypatch):
         """If ray.available_resources() fails, scale-up should proceed."""
-        config = StageAutoscaleConfig(cooldown_s=0)
+        config = StageAutoscaleConfig(cooldown_up_s=0, cooldown_down_s=0)
         autoscaler = SimpleAutoscaler(config)
 
         master = MockStageMaster(worker_count=2)
@@ -549,3 +552,97 @@ class TestResourceAwareScaling:
 
         # Should proceed despite error
         assert len(master._workers) == 4
+
+
+# ============================================================================
+# New Tests: Resource-Aware Scaling & Source-Aware Autoscaling
+# ============================================================================
+
+
+class TestGetSpawnableCount:
+    """Tests for _get_spawnable_count."""
+
+    def test_gpu_stage_limited_by_available_gpus(self, monkeypatch):
+        monkeypatch.setattr("ray.available_resources", lambda: {"GPU": 8.0, "CPU": 100.0})
+        autoscaler = SimpleAutoscaler()
+        stage = MagicMock()
+        stage.num_gpus = 1.0
+        stage.num_cpus = 1.0
+        assert autoscaler._get_spawnable_count(stage, max_needed=20) == 8
+
+    def test_gpu_stage_limited_by_available_cpus(self, monkeypatch):
+        monkeypatch.setattr("ray.available_resources", lambda: {"GPU": 16.0, "CPU": 4.0})
+        autoscaler = SimpleAutoscaler()
+        stage = MagicMock()
+        stage.num_gpus = 1.0
+        stage.num_cpus = 2.0
+        # min(16 GPUs / 1, 4 CPUs / 2) = min(16, 2) = 2
+        assert autoscaler._get_spawnable_count(stage, max_needed=20) == 2
+
+    def test_cpu_stage(self, monkeypatch):
+        monkeypatch.setattr("ray.available_resources", lambda: {"CPU": 32.0})
+        autoscaler = SimpleAutoscaler()
+        stage = MagicMock()
+        stage.num_gpus = 0
+        stage.num_cpus = 4.0
+        assert autoscaler._get_spawnable_count(stage, max_needed=100) == 8
+
+    def test_capped_by_max_needed(self, monkeypatch):
+        monkeypatch.setattr("ray.available_resources", lambda: {"GPU": 96.0, "CPU": 500.0})
+        autoscaler = SimpleAutoscaler()
+        stage = MagicMock()
+        stage.num_gpus = 1.0
+        stage.num_cpus = 1.0
+        assert autoscaler._get_spawnable_count(stage, max_needed=10) == 10
+
+    def test_ray_unavailable_returns_max(self, monkeypatch):
+        monkeypatch.setattr("ray.available_resources", lambda: (_ for _ in ()).throw(RuntimeError))
+        autoscaler = SimpleAutoscaler()
+        stage = MagicMock()
+        stage.num_gpus = 1.0
+        stage.num_cpus = 1.0
+        assert autoscaler._get_spawnable_count(stage, max_needed=5) == 5
+
+
+class TestSplitCooldowns:
+    """Tests for AIMD-style split cooldowns (up fast, down slow)."""
+
+    def test_default_cooldowns(self):
+        config = StageAutoscaleConfig()
+        assert config.cooldown_up_s == 15.0
+        assert config.cooldown_down_s == 60.0
+
+
+@pytest.mark.asyncio
+class TestEagerFill:
+    """Tests for eager_fill post-startup scaling."""
+
+    async def test_eager_fill_scales_non_source_stages(self, monkeypatch):
+        monkeypatch.setattr("ray.available_resources", lambda: {"GPU": 6.0, "CPU": 50.0})
+        autoscaler = SimpleAutoscaler()
+
+        # Source stage — should be skipped
+        source = MockStageMaster(stage_id="source", worker_count=10, max_workers=100)
+        source._source = MagicMock()  # Mark as source
+
+        # GPU stage — should be filled
+        gpu_stage = MockStageMaster(
+            stage_id="stage_0", worker_count=2, max_workers=96, num_gpus=1.0, num_cpus=1.0
+        )
+
+        masters = {"source": source, "stage_0": gpu_stage}
+        await autoscaler.eager_fill(masters)
+
+        # Source unchanged
+        assert len(source._workers) == 10
+        # GPU stage filled up to available (6 GPUs)
+        assert len(gpu_stage._workers) == 8  # 2 + 6
+
+    async def test_eager_fill_noop_when_already_at_max(self, monkeypatch):
+        monkeypatch.setattr("ray.available_resources", lambda: {"GPU": 10.0, "CPU": 50.0})
+        autoscaler = SimpleAutoscaler()
+
+        stage = MockStageMaster(stage_id="stage_0", worker_count=8, max_workers=8, num_gpus=1.0)
+        await autoscaler.eager_fill({"stage_0": stage})
+
+        assert len(stage._workers) == 8  # No change

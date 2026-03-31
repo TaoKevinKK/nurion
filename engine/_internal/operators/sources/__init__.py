@@ -13,16 +13,25 @@ from _internal.operators.sources.lance import (
     LanceSplitPlanner,
 )
 from _internal.core.source import SplitPlanner
-from _internal.operators.sources.spark import (
-    SparkSource,
-    SparkSourceConfig,
-    SparkSplitPlanner,
-)
-from _internal.operators.sources.sparkv2 import (
-    SparkSourceV2Config,
-    SparkDirectProducer,
-)
 from _internal.operators.sources.union import UnionSourceConfig, UnionSplitPlanner
+
+# Spark sources require optional [spark] extra (pyspark + nurion-raydp)
+try:
+    from _internal.operators.sources.spark import (
+        SparkSource,
+        SparkSourceConfig,
+        SparkSplitPlanner,
+    )
+    from _internal.operators.sources.sparkv2 import (
+        SparkSourceV2Config,
+        SparkDirectProducer,
+    )
+except ImportError:
+    SparkSource = None  # type: ignore[assignment,misc]
+    SparkSourceConfig = None  # type: ignore[assignment,misc]
+    SparkSplitPlanner = None  # type: ignore[assignment,misc]
+    SparkSourceV2Config = None  # type: ignore[assignment,misc]
+    SparkDirectProducer = None  # type: ignore[assignment,misc]
 
 __all__ = [
     # Anti-join source

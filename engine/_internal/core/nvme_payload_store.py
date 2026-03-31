@@ -45,7 +45,10 @@ from __future__ import annotations
 import errno
 import logging
 import os
+import select
 import shutil
+import subprocess
+import sys
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from enum import Enum
@@ -427,6 +430,147 @@ class FlightPayloadServer(flight.FlightServerBase):
 
 
 # =============================================================================
+# Flight Server via Ray Actor (gRPC isolation + lifecycle management)
+# =============================================================================
+
+# Well-known port for the per-node Flight payload server.
+FLIGHT_SERVER_PORT = 18815
+
+
+import ray  # noqa: E402 — deferred import, only used by _FlightServerActor below
+
+
+@ray.remote(num_cpus=0)
+class _FlightServerActor:
+    """Ray actor that owns a Flight server subprocess.
+
+    Runs one per node.  The actor's lifecycle is managed by Ray (survives
+    worker actor exits).  The subprocess provides gRPC isolation from Ray.
+    """
+
+    def __init__(self, root_dir: str, port: int):
+        self._port = port
+        self._root_dir = root_dir
+        self._proc: Optional[subprocess.Popen] = None
+        self._start_server()
+
+    def _start_server(self) -> None:
+        # Run _flight_server_proc.py as a script (not -m module) because
+        # inside Ray workers the code lives in a temporary working_dir that
+        # isn't on the subprocess's PYTHONPATH.  The script only imports
+        # pyarrow (no _internal), so running it directly works everywhere.
+        script = os.path.join(os.path.dirname(__file__), "_flight_server_proc.py")
+
+        self._proc = subprocess.Popen(
+            [
+                sys.executable,
+                script,
+                "--root-dir",
+                self._root_dir,
+                "--port",
+                str(self._port),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+        )
+
+        assert self._proc.stdout is not None
+        ready, _, _ = select.select([self._proc.stdout], [], [], 10.0)
+        if not ready:
+            stderr_tail = ""
+            if self._proc.stderr:
+                stderr_tail = self._proc.stderr.read(2048).decode(errors="replace")
+            self._proc.kill()
+            self._proc.wait()
+            raise RuntimeError(f"Flight server subprocess timed out. stderr: {stderr_tail}")
+
+        line = self._proc.stdout.readline().decode().strip()
+        self._proc.stdout.close()
+        if self._proc.stderr:
+            self._proc.stderr.close()
+
+        if line.startswith("FLIGHT_READY:"):
+            self._port = int(line.split(":", 1)[1])
+        elif line.startswith("FLIGHT_PORT_IN_USE:"):
+            self._proc.wait()
+            self._proc = None  # Already running from another actor
+        else:
+            raise RuntimeError(f"Flight server failed: {line}")
+
+    def get_port(self) -> int:
+        return self._port
+
+    def is_alive(self) -> bool:
+        if self._proc is None:
+            return True  # Port in use = someone else owns it
+        return self._proc.poll() is None
+
+
+class FlightServerProcess:
+    """Per-node Arrow Flight server managed by a Ray actor.
+
+    The Ray actor owns the Flight subprocess, so it survives worker exits
+    (Ray actor lifecycle is independent of stage worker actors).
+
+    Singleton per node enforced by fixed port + Ray named actor.
+    """
+
+    _lock: ClassVar[threading.Lock] = threading.Lock()
+    _cache: ClassVar[Dict[str, "FlightServerProcess"]] = {}
+
+    def __init__(self, port: int):
+        self.port = port
+
+    @classmethod
+    def get_or_start(
+        cls,
+        job_dirs: List[str],
+        port: int = FLIGHT_SERVER_PORT,
+        max_concurrent_reads: int = 8,
+    ) -> "FlightServerProcess":
+        """Return per-node Flight server, starting a Ray actor if needed."""
+        from _internal.utils.network import get_node_ip
+
+        node_ip = get_node_ip()
+        actor_name = f"flight_server_{node_ip}"
+        root = os.path.dirname(job_dirs[0]) if job_dirs else "/tmp"
+
+        with cls._lock:
+            # Check cache first (same process, already resolved)
+            if actor_name in cls._cache:
+                return cls._cache[actor_name]
+
+            # Try to connect to existing named actor
+            try:
+                actor = ray.get_actor(actor_name)
+                actual_port = ray.get(actor.get_port.remote(), timeout=5)
+                instance = cls(actual_port)
+                cls._cache[actor_name] = instance
+                logger.info(f"Reusing existing Flight server actor on {node_ip}:{actual_port}")
+                return instance
+            except (ValueError, ray.exceptions.GetTimeoutError):
+                pass  # Actor doesn't exist or unresponsive
+
+            # Schedule actor on THIS node
+            current_node = ray.get_runtime_context().get_node_id()
+            actor = _FlightServerActor.options(  # type: ignore[attr-defined]
+                name=actor_name,
+                lifetime="detached",
+                scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
+                    node_id=current_node,
+                    soft=False,
+                ),
+            ).remote(root, port)
+
+            actual_port = ray.get(actor.get_port.remote(), timeout=15)
+            instance = cls(actual_port)
+            cls._cache[actor_name] = instance
+            logger.info(f"Started Flight server actor on {node_ip}:{actual_port}")
+            return instance
+
+
+# =============================================================================
 # NvmeSplitPayloadStore
 # =============================================================================
 
@@ -549,8 +693,11 @@ class NvmeSplitPayloadStore(SplitPayloadStore):
             self._s3_fs.mkdirs(self._s3_root, exist_ok=True)
             self._s3_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="s3-upload")
 
-        # Flight server
-        server = FlightPayloadServer.get_or_start(
+        # Flight server — subprocess for gRPC isolation from Ray.
+        # Arrow Flight's gRPC shares C++ global state with Ray's internal gRPC;
+        # running both in one process causes the Flight server thread to silently
+        # die.  Subprocess isolation eliminates this conflict.
+        server = FlightServerProcess.get_or_start(
             self._disk_pool.all_job_dirs, self._flight_port_config
         )
         node_ip = self._resolve_node_ip()
@@ -766,11 +913,16 @@ class NvmeSplitPayloadStore(SplitPayloadStore):
 
     # -- Flight client -------------------------------------------------------
 
+    # Timeout for Arrow Flight reads (connect + do_get).  Fail fast — don't
+    # block workers for minutes on unreachable Flight servers.
+    FLIGHT_TIMEOUT_S = 10
+
     def _flight_get(self, endpoint: str, key: str) -> Optional[pa.Table]:
-        """Fetch from remote node via Arrow Flight."""
+        """Fetch from remote node via Arrow Flight (with timeout)."""
         client = self._get_or_create_client(endpoint)
         try:
-            reader = client.do_get(flight.Ticket(key.encode()))
+            opts = flight.FlightCallOptions(timeout=self.FLIGHT_TIMEOUT_S)
+            reader = client.do_get(flight.Ticket(key.encode()), opts)
             return reader.read_all()
         except Exception:
             # Any Flight error (unavailable, timeout, internal) — drop cached connection
@@ -779,5 +931,8 @@ class NvmeSplitPayloadStore(SplitPayloadStore):
 
     def _get_or_create_client(self, endpoint: str) -> flight.FlightClient:
         if endpoint not in self._flight_clients:
-            self._flight_clients[endpoint] = flight.connect(endpoint)
+            self._flight_clients[endpoint] = flight.connect(
+                endpoint,
+                generic_options=[("grpc.keepalive_timeout_ms", 5000)],
+            )
         return self._flight_clients[endpoint]

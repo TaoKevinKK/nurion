@@ -14,41 +14,19 @@
 
 // In-memory state for WorkQueue - minimal coordination layer
 //
-// With the storage-only model, state only provides:
-// - Claim locks: serialize concurrent claims per queue
+// With atomic counters + CAS in storage, state only provides:
 // - Queue registry: track known queues for stats
+// - Lease management: track worker heartbeats
 
 use dashmap::DashMap;
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
 use crate::types::now_secs;
-/// Per-queue state - just a lock for claim serialization
-pub struct QueueState {
-    /// Lock for serializing claim operations on this queue.
-    /// Using tokio::sync::Mutex to allow holding across await.
-    pub claim_lock: Mutex<()>,
-}
-
-impl QueueState {
-    pub fn new() -> Self {
-        Self {
-            claim_lock: Mutex::new(()),
-        }
-    }
-}
-
-impl Default for QueueState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 /// WorkQueue coordination state - minimal, no message storage
 pub struct WorkQueueState {
-    /// Per-queue state (claim locks)
-    queues: DashMap<String, Arc<QueueState>>,
+    /// Known queue names (for stats listing)
+    queues: DashMap<String, ()>,
     /// Lease last-seen timestamps (seconds since epoch)
     leases: DashMap<String, f64>,
 }
@@ -61,12 +39,9 @@ impl WorkQueueState {
         }
     }
 
-    /// Get or create queue state
-    pub fn get_or_create_queue(&self, queue: &str) -> Arc<QueueState> {
-        self.queues
-            .entry(queue.to_string())
-            .or_insert_with(|| Arc::new(QueueState::new()))
-            .clone()
+    /// Register a queue name
+    pub fn get_or_create_queue(&self, queue: &str) {
+        self.queues.entry(queue.to_string()).or_insert(());
     }
 
     /// Check if queue exists in registry
@@ -113,12 +88,12 @@ mod tests {
     fn test_queue_state_creation() {
         let state = WorkQueueState::new();
 
-        let queue_state = state.get_or_create_queue("test-queue");
+        state.get_or_create_queue("test-queue");
         assert!(state.queue_exists("test-queue"));
 
-        // Getting again should return same instance
-        let queue_state2 = state.get_or_create_queue("test-queue");
-        assert!(Arc::ptr_eq(&queue_state, &queue_state2));
+        // Getting again should not panic
+        state.get_or_create_queue("test-queue");
+        assert!(state.queue_exists("test-queue"));
     }
 
     #[test]

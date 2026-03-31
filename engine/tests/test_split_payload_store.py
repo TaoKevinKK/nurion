@@ -12,15 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for FsspecSplitPayloadStore."""
+"""Unit tests for FsspecSplitPayloadStore and RaySplitPayloadStore."""
 
 from __future__ import annotations
+
+from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
 
 from _internal.core.models import SplitPayload
 from _internal.core.split_payload_store import (
     FsspecSplitPayloadStore,
+    RaySplitPayloadStore,
     _sanitize_key,
 )
 
@@ -192,3 +195,75 @@ class TestFsspecSplitPayloadStore:
         assert retrieved is not None
         assert retrieved.data.num_rows == 100_000
         assert retrieved.data.equals(payload.data)
+
+
+# ---------------------------------------------------------------------------
+# RaySplitPayloadStore — timeout and failure path tests
+# ---------------------------------------------------------------------------
+
+
+class TestRaySplitPayloadStoreTimeout:
+    """Tests for RaySplitPayloadStore.get() timeout handling.
+
+    Regression: previously ray.get() had no timeout, causing workers to block
+    indefinitely when the actor or object store became unreachable.
+    """
+
+    def test_actor_timeout_returns_none(self):
+        """When the actor call times out, get() returns None (not hangs)."""
+        store = RaySplitPayloadStore.__new__(RaySplitPayloadStore)
+        store._actor_name = "test_timeout_store"
+        store._actor = MagicMock()
+
+        # Simulate actor.get_ref.remote() returning a ref that times out
+        fake_remote_ref = MagicMock()
+        store._actor.get_ref.remote.return_value = fake_remote_ref
+
+        import ray.exceptions
+
+        with patch("ray.get", side_effect=ray.exceptions.GetTimeoutError("")):
+            result = store.get("some_key")
+
+        assert result is None
+
+    def test_object_data_timeout_returns_none(self):
+        """When the object ref times out, get() returns None."""
+        store = RaySplitPayloadStore.__new__(RaySplitPayloadStore)
+        store._actor_name = "test_data_timeout_store"
+        store._actor = MagicMock()
+
+        fake_ref = MagicMock()
+        store._actor.get_ref.remote.return_value = fake_ref
+
+        import ray.exceptions
+
+        call_count = 0
+
+        def mock_ray_get(ref, timeout=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # First call (get_ref) succeeds
+                return {"ref": MagicMock()}
+            # Second call (get data) times out
+            raise ray.exceptions.GetTimeoutError("")
+
+        with patch("ray.get", side_effect=mock_ray_get):
+            result = store.get("some_key")
+
+        assert result is None
+        assert call_count == 2
+
+    def test_missing_key_returns_none(self):
+        """When the actor returns None for a key, get() returns None (normal path)."""
+        store = RaySplitPayloadStore.__new__(RaySplitPayloadStore)
+        store._actor_name = "test_missing_store"
+        store._actor = MagicMock()
+
+        fake_ref = MagicMock()
+        store._actor.get_ref.remote.return_value = fake_ref
+
+        with patch("ray.get", return_value=None):
+            result = store.get("missing_key")
+
+        assert result is None

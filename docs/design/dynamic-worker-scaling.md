@@ -18,15 +18,18 @@ _Created: December 2025_
 | **Worker Scale Up/Down** | ✅ Complete | Via `WorkerManager` |
 | **Cooldown Period** | ✅ Complete | Prevents thrashing |
 | **Manual Override API** | ❌ Deprioritized | Low value for batch workloads; removed from TODO |
-| **Resource-Aware Scaling** | ✅ Complete | `_check_cluster_resources()` queries `ray.available_resources()` before scale-up |
+| **Resource-Aware Scaling** | ✅ Complete | `_get_spawnable_count()` queries `ray.available_resources()` for quantitative resource check |
+| **Eager Fill** | ✅ Complete | `eager_fill()` scales to available capacity immediately after startup |
+| **AIMD Cooldowns** | ✅ Complete | `cooldown_up_s=15`, `cooldown_down_s=60` — fast scale-up, slow scale-down |
 | **Bottleneck Prioritization** | ❌ Not Implemented | Future work |
 
 **Current Implementation:**
 - Threshold-based scaling using WorkQueue pending/claimed
+- Resource-aware step sizing via `_get_spawnable_count()` (quantitative, not boolean)
+- Eager fill on startup to immediately use available cluster capacity
+- AIMD cooldowns: aggressive scale-up (15s), conservative scale-down (60s)
 - Scale down only when pending is low and claimed == 0
-- Configurable check interval (default 15s)
-- Cooldown between scaling decisions
-- Manual intervention via runner API
+- Configurable check interval (default 10s)
 - Backpressure is evaluated by a job-level controller using WorkQueue stats
 
 ---
@@ -438,4 +441,107 @@ The simple design should be revisited if Solstice evolves to support:
 
 ---
 
-_Last updated: February 2026_
+## 12. Resource-Aware Scaling (March 2026)
+
+### Motivation
+
+On elastic K8s clusters (e.g., SageMaker HyperPod), GPU nodes appear and disappear due to scheduling, spot reclaim, or hardware faults. The original autoscaler had two problems:
+
+1. **Slow ramp-up**: `max_scale_step=2` meant 48 autoscaler cycles to fill 96 GPUs (~48 minutes with 60s cooldown). Every idle GPU minute is wasted compute.
+2. **Boolean resource check**: `_check_cluster_resources()` only answered "can I add one worker?" — not "how many can I add?" When a node with 8 GPUs returned, only 2 workers were added per tick.
+
+### Changes
+
+#### `_get_spawnable_count(stage, max_needed) -> int`
+
+Replaced the boolean `_check_cluster_resources()` with a quantitative check:
+
+```python
+available = ray.available_resources()
+if gpu_stage:
+    count = min(available_gpus / per_gpu, available_cpus / per_cpu)
+elif cpu_stage:
+    count = available_cpus / per_cpu
+return min(count, max_needed)
+```
+
+Used in `_execute_decisions()` to cap the actual scale-up step by what the cluster can support right now. When a node with 8 GPUs returns, this returns 8 — the autoscaler spawns 8 workers in one tick.
+
+#### `eager_fill(masters)`
+
+One-shot scale-up called by `RayJobRunner` right after all stages start:
+
+```
+Job Start → StageMaster.start() spawns min_workers → eager_fill() fills to available capacity
+```
+
+Bridges the gap between `min_workers` (conservative) and current cluster capacity without waiting for the first autoscaler tick + queue lag buildup. Skips source stages (backpressure handles their rate).
+
+#### AIMD Cooldowns
+
+Inspired by TCP congestion control and K8s HPA stabilization windows:
+
+| Direction | Cooldown | Rationale |
+|-----------|----------|-----------|
+| Scale UP | 15s | GPUs are expensive; fill fast |
+| Scale DOWN | 60s | Brief dips are normal; don't overreact |
+
+Replaced the single `cooldown_s` field with `cooldown_up_s` and `cooldown_down_s`.
+
+#### Updated Defaults
+
+| Parameter | Old | New | Rationale |
+|-----------|-----|-----|-----------|
+| `check_interval_s` | 15.0 | 10.0 | Faster response to node changes |
+| `scale_up_lag_threshold` | 1000 | 500 | Scale up sooner |
+| `cooldown` | 60s (both) | 15s up / 60s down | AIMD asymmetry |
+| `max_scale_step` | 2 | 32 | Allow filling a full node in one step |
+
+### Stage Parallelism Strategy (for integrators)
+
+When using Nurion from a host framework (e.g., LAX), stages should be configured as:
+
+| Stage Type | Parallelism | Why |
+|------------|-------------|-----|
+| Source | Fixed int | Backpressure pauses idle workers; paused workers are cheap (~0.5 CPU). Autoscaler skips source. |
+| Processing (GPU) | `(min, max)` tuple | `min` from `available_resources()` (safe start), `max` from `cluster_resources()` (target). `eager_fill` + autoscaler bridge the gap. |
+| Processing (CPU) | `(min, max)` tuple | Same pattern as GPU but CPU-based. |
+| Sink | `(min, max)` tuple | No downstream backpressure protection. Autoscaler scales based on output queue lag. |
+
+### Interaction with RecoveryManager
+
+No coordination needed. They operate independently:
+
+1. Worker dies → `RecoveryManager` respawns (exponential backoff 0.5-5s)
+2. If node gone → `spawn_worker(is_min_worker=False)` times out (30s)
+3. Autoscaler tick → `_get_spawnable_count()` sees 0 available → skips scale-up
+4. Node returns → `_get_spawnable_count()` detects GPUs → autoscaler scales up
+
+### Industry References
+
+- **TCP AIMD**: Scale up additively (proportional to available resources), scale down conservatively — prevents flapping
+- **K8s HPA**: Stabilization window = our `cooldown_down_s`; custom metrics = our queue lag
+- **Flink Reactive Mode**: Parallelism adjusts to cluster size — our `eager_fill` + autoscaler achieves the same
+
+---
+
+_Last updated: March 2026_
+
+## Resolved: Arrow Flight + Ray gRPC Conflict (March 2026)
+
+Arrow Flight's gRPC shares C++ global state with Ray's internal gRPC. When
+both run in the same process, the Flight server daemon thread silently dies.
+
+**Root cause**: gRPC-core uses process-global singletons for the completion
+queue, timer manager, and DNS resolver. Arrow Flight and Ray each initialize
+these globals independently. The second initialization corrupts the first,
+and the Flight server's `serve()` loop exits without raising.
+
+**Fix**: `FlightServerProcess` — runs the Flight server in a subprocess instead
+of a daemon thread. Full process isolation means separate gRPC globals.
+
+- Entry point: `_internal/core/_flight_server_proc.py`
+- Lifecycle: `PR_SET_PDEATHSIG` auto-kills subprocess when parent dies
+- Communication: stdout for port (readiness signal), stdin for `add_dirs`
+- Same `FlightPayloadServer` in-process class remains available for tests
+- `NvmeSplitPayloadStore._ensure_initialized()` now uses `FlightServerProcess`

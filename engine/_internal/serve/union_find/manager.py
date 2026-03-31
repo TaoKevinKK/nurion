@@ -132,7 +132,7 @@ class UnionFindServiceManager:
                     payload_store=payload_store,
                 )
             )
-            self._shards.append(shard)
+            self._shards.append(shard)  # type: ignore[arg-type]
 
         if wait_ready:
             futures = [shard.ping.remote() for shard in self._shards]

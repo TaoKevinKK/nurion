@@ -29,6 +29,7 @@ QueueGroup Model:
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from typing import TYPE_CHECKING, Any, Dict, Optional, Protocol
 
@@ -48,6 +49,12 @@ from _internal.webui.state.schema import encode_json, job_namespace, stage_key, 
 if TYPE_CHECKING:
     from _internal.core.stage import Stage, StageRuntime
     from _internal.runtime.queue_stats import QueueRef
+
+# Stage-level no-progress timeout. If no worker successfully processes a
+# message within this window, the stage is marked as failed. Prevents jobs
+# from hanging forever due to broker overload, deadlocks, or data issues.
+# Override via environment variable; 0 disables.
+_NO_PROGRESS_TIMEOUT_S = float(os.environ.get("NURION_NO_PROGRESS_TIMEOUT_S", "600"))
 
 
 class BackpressureProvider(Protocol):
@@ -108,6 +115,7 @@ class StageMaster:
         self._failure_message: Optional[str] = None
         self._start_time: Optional[float] = None
         self._upstream_finished = False
+        self._last_progress_time: Optional[float] = None  # set when first worker completes
 
         # Worker and recovery managers (created in _init_managers)
         self._worker_manager: Optional[WorkerManager] = None
@@ -307,6 +315,7 @@ class StageMaster:
         # --- Worker-based run loop ---
         assert self._worker_manager is not None
         assert self._recovery_manager is not None
+        self._last_progress_time = time.monotonic()
 
         try:
             while self._running and not self._finished:
@@ -314,6 +323,19 @@ class StageMaster:
                 # (e.g., schema mismatch detected inside plan_splits).
                 if self._source_manager:
                     self._source_manager.raise_if_production_failed()
+
+                # No-progress timeout: if no worker has completed successfully
+                # within the window, assume the stage is stuck and fail fast.
+                if _NO_PROGRESS_TIMEOUT_S > 0 and self._last_progress_time is not None:
+                    no_progress_s = time.monotonic() - self._last_progress_time
+                    if no_progress_s > _NO_PROGRESS_TIMEOUT_S:
+                        self._failed = True
+                        self._failure_message = (
+                            f"Stage {self.stage_id}: no progress for "
+                            f"{no_progress_s:.0f}s (limit: {_NO_PROGRESS_TIMEOUT_S:.0f}s)"
+                        )
+                        self.logger.error(self._failure_message)
+                        break
 
                 if self._worker_manager.worker_count == 0:
                     if self._has_unprocessed_messages():
@@ -338,20 +360,31 @@ class StageMaster:
                     self._write_worker_state(wid, "FAILED")
 
                 if failed:
-                    self._recovery_manager.record_failures(
-                        len(failed), self._worker_manager.worker_count
-                    )
-                    result = await self._recovery_manager.recover_failed_workers(
-                        failed_worker_ids=failed,
-                    )
-                    if result.should_give_up:
-                        self._failed = True
-                        self._failure_message = result.give_up_reason
-                        self.logger.error(
-                            f"Stage {self.stage_id} giving up: {result.give_up_reason}"
+                    # When upstream is finished and the input queue is drained,
+                    # worker failures are expected (idle timeout — no more work).
+                    # Skip recovery so worker_count can reach 0 and the master
+                    # exits cleanly on the next iteration.
+                    if self._upstream_finished and not self._has_unprocessed_messages():
+                        self.logger.info(
+                            f"Stage {self.stage_id}: upstream finished and queue drained, "
+                            f"not recovering {len(failed)} idle workers"
                         )
-                        break
-                elif completed:
+                    else:
+                        self._recovery_manager.record_failures(
+                            len(failed), self._worker_manager.worker_count
+                        )
+                        result = await self._recovery_manager.recover_failed_workers(
+                            failed_worker_ids=failed,
+                        )
+                        if result.should_give_up:
+                            self._failed = True
+                            self._failure_message = result.give_up_reason
+                            self.logger.error(
+                                f"Stage {self.stage_id} giving up: {result.give_up_reason}"
+                            )
+                            break
+                if completed:
+                    self._last_progress_time = time.monotonic()
                     self._recovery_manager.record_success()
 
                 if self._failed:

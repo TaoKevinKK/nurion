@@ -59,6 +59,9 @@ class LanceSinkConfig(OperatorConfig):
     storage_options: Optional[Dict[str, str]] = None
     """Storage options for S3/cloud backends (e.g., aws_access_key_id, endpoint_url)."""
 
+    column_renames: Optional[Dict[str, str]] = None
+    """Rename columns before writing (e.g., {"_rowid": "original_row_id"})."""
+
     # Merge upstream splits into larger fragments
     merge_batch_size: int = 10
     """Number of upstream messages to merge before writing a fragment.
@@ -121,6 +124,7 @@ class LanceSink(SinkOperator):
 
         self.table_path = config.table_path
         self.blob_columns: Set[str] = set(config.blob_columns)
+        self.column_renames = config.column_renames
 
         if config.storage_options:
             self.storage_options = config.storage_options
@@ -175,6 +179,15 @@ class LanceSink(SinkOperator):
         """
         table = batch.data
 
+        # Apply column renames (e.g., _rowid → original_row_id) before
+        # dropping reserved columns, so the data is preserved under a new name.
+        if self.column_renames:
+            for old_name, new_name in self.column_renames.items():
+                if old_name in table.column_names:
+                    table = table.rename_columns(
+                        [new_name if c == old_name else c for c in table.column_names]
+                    )
+
         # Drop reserved Lance column names (columnar drop, no row iteration)
         reserved = [c for c in table.column_names if c in {"_rowid", "_rowaddr"}]
         if reserved:
@@ -202,7 +215,14 @@ class LanceSink(SinkOperator):
 
             table = pa.table(dict(zip(table.column_names, new_columns)), schema=new_schema)
 
-        return table
+        # Force buffer alignment via IPC round-trip. Arrow IPC always writes
+        # aligned buffers. combine_chunks() alone is insufficient — Lance's
+        # Rust FFI panics on buffers deserialized from NVMe payload store.
+        sink_buf = pa.BufferOutputStream()
+        writer = pa.ipc.new_stream(sink_buf, table.schema)
+        writer.write_table(table)
+        writer.close()
+        return pa.ipc.open_stream(sink_buf.getvalue()).read_all()
 
     def close(self) -> None:
         """No cleanup needed -- no buffer, no queue client."""

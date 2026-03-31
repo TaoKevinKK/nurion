@@ -30,6 +30,7 @@ Source workers claim from planner queue (single queue, not QueueGroup).
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, NamedTuple, Optional
@@ -54,6 +55,11 @@ from _internal.testing.fault_injection import (
 )
 from _internal.utils.logging import create_ray_logger
 from _internal.webui.state.schema import encode_json, event_key, job_namespace, split_key
+
+# Worker-level idle timeout: if no messages claimed within this window,
+# assume broker is unresponsive and fail fast (RecoveryManager respawns).
+# Override via environment variable; 0 disables.
+_IDLE_TIMEOUT_S = float(os.environ.get("NURION_WORKER_IDLE_TIMEOUT_S", "300"))
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -234,6 +240,8 @@ class StageWorker:
         merge = self._merge_upstream
         pending: list[WorkQueueRecord] = []
 
+        last_claimed_time = time.time()
+
         while self._running:
             try:
                 records = self.queue_client.claim(
@@ -243,6 +251,7 @@ class StageWorker:
                 )
 
                 if records:
+                    last_claimed_time = time.time()
                     pending.extend(records)
                 else:
                     if self._should_exit():
@@ -250,6 +259,12 @@ class StageWorker:
                             await self._process_and_ack(pending)
                             pending.clear()
                         break
+                    idle_s = time.time() - last_claimed_time
+                    if _IDLE_TIMEOUT_S > 0 and idle_s > _IDLE_TIMEOUT_S:
+                        raise RuntimeError(
+                            f"Worker {self.worker_id} idle for {idle_s:.0f}s "
+                            f"— broker may be unresponsive. Failing fast."
+                        )
                     # Flush partial group if queue is idle
                     if pending:
                         await self._process_and_ack(pending)
@@ -265,6 +280,8 @@ class StageWorker:
 
             except asyncio.CancelledError:
                 self.logger.info(f"Worker {self.worker_id} cancelled")
+                raise
+            except RuntimeError:
                 raise
             except Exception as e:
                 if self._is_broker_error(e):
@@ -284,11 +301,21 @@ class StageWorker:
         assert self._runtime.upstream is not None and self._runtime.upstream.is_group
 
         group_name = self._runtime.upstream.name
-        assigned = list(self._runtime.assigned_partition_ids or [])
+        # None = no partition affinity (claim from any); [] would mean "owns nothing".
+        assigned = (
+            list(self._runtime.assigned_partition_ids)
+            if self._runtime.assigned_partition_ids
+            else None
+        )
         merge = self._merge_upstream
         pending: list[WorkQueueRecord] = []
         # Track which partition queue the current pending batch came from
         current_source_queue: Optional[str] = None
+
+        # Idle timeout: if no messages claimed for this long, assume broker
+        # is stuck and fail fast.  Prevents jobs from hanging forever when
+        # the broker deadlocks under high concurrency.
+        last_claimed_time = time.time()
 
         while self._running:
             try:
@@ -302,6 +329,7 @@ class StageWorker:
                 )
 
                 if records:
+                    last_claimed_time = time.time()
                     # If source queue changed, flush the old batch first
                     if pending and current_source_queue and current_source_queue != source_queue:
                         await self._process_and_ack(
@@ -318,6 +346,14 @@ class StageWorker:
                             )
                             pending.clear()
                         break
+                    # Idle timeout: broker may be deadlocked
+                    idle_s = time.time() - last_claimed_time
+                    if _IDLE_TIMEOUT_S > 0 and idle_s > _IDLE_TIMEOUT_S:
+                        raise RuntimeError(
+                            f"Worker {self.worker_id} idle for {idle_s:.0f}s "
+                            f"without claiming any messages — broker may be "
+                            f"unresponsive. Failing fast."
+                        )
                     # Flush partial group if queue is idle
                     if pending and current_source_queue:
                         await self._process_and_ack(
@@ -336,6 +372,11 @@ class StageWorker:
 
             except asyncio.CancelledError:
                 self.logger.info(f"Worker {self.worker_id} cancelled")
+                raise
+            except RuntimeError:
+                # Let RuntimeError propagate (idle timeout, broker_unavailable).
+                # The outer run() handler logs it and the master sees it as a
+                # worker failure — triggering recovery or clean exit.
                 raise
             except Exception as e:
                 if self._is_broker_error(e):
@@ -487,17 +528,21 @@ class StageWorker:
                     message.metadata.get("payload_loc"),
                 )
                 if payload is None:
-                    self.logger.error(
-                        f"Payload missing for key {message.payload_key}, "
-                        f"nacking {len(records)} records"
-                    )
+                    # Fail fast: nack messages back to queue (so other workers
+                    # can retry), then raise to kill this worker.  If the
+                    # underlying issue persists, repeated worker deaths will
+                    # eventually fail the job — which is the correct behavior.
                     self._nack_all(
                         msg_ids,
                         claim_tokens,
-                        reason="payload_missing",
+                        reason="payload_unreachable",
                         upstream_queue_override=nack_queue,
                     )
-                    return None
+                    raise RuntimeError(
+                        f"Payload unreachable for key {message.payload_key} "
+                        f"(location: {message.metadata.get('payload_loc')}). "
+                        f"Records nacked, worker dying for respawn."
+                    )
                 tables.append(payload.data)
                 parent_split_ids.append(message.split_id)
                 consumed_payload_keys.append(message.payload_key)

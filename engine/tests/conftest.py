@@ -225,6 +225,29 @@ def workqueue_broker_and_client(tmp_path):
     time.sleep(0.1)  # Brief pause for cleanup
 
 
+@pytest.fixture(autouse=True)
+def _use_thread_flight(monkeypatch, request):
+    """Patch FlightServerProcess.get_or_start to use thread-based FlightPayloadServer.
+
+    FlightServerProcess launches a Ray detached actor + subprocess for gRPC
+    isolation (production requirement).  Tests use thread-based server instead
+    to avoid Ray actor lifecycle issues in CI.
+    """
+    try:
+        from _internal.core.nvme_payload_store import FlightPayloadServer, FlightServerProcess
+    except ImportError:
+        return
+
+    if request.cls and request.cls.__name__ == "TestFlightServerProcess":
+        return
+
+    def _thread_start(job_dirs, port=0, max_concurrent_reads=8):
+        server = FlightPayloadServer.get_or_start(job_dirs, port)
+        return FlightServerProcess(server.port)
+
+    monkeypatch.setattr(FlightServerProcess, "get_or_start", staticmethod(_thread_start))
+
+
 @pytest.fixture(scope="session", autouse=True)
 def ensure_spark_testdata():
     """Ensure Spark test data files exist before any tests run."""

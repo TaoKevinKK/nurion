@@ -28,6 +28,7 @@ use tokio::time::timeout;
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
 
+#[allow(unused_imports)]
 use crate::state::WorkQueueState;
 use crate::storage::WorkQueueStorage;
 use crate::types::Message;
@@ -81,11 +82,7 @@ impl WorkQueue for WorkQueueService {
             1
         };
 
-        // Get claim lock for this queue (serialize concurrent claims)
-        let queue_state = self.state.get_or_create_queue(&req.queue);
-        let _claim_guard = queue_state.claim_lock.lock().await;
-
-        // Claim directly from storage - O(1) per message!
+        // CAS-based claim in storage — no external lock needed
         let claimed = match self
             .storage
             .claim_messages(&req.queue, batch_size, &req.worker_id, &req.lease_id)
@@ -105,7 +102,7 @@ impl WorkQueue for WorkQueueService {
         let claim_tokens: Vec<String> = claimed.iter().map(|c| c.claim_token.clone()).collect();
 
         // Check if there are more messages
-        let has_more = match self.storage.get_meta(&req.queue).await {
+        let has_more = match self.storage.get_queue_stats(&req.queue).await {
             Ok(meta) => meta.claim_seq < meta.push_seq,
             Err(_) => false,
         };
@@ -465,7 +462,7 @@ impl WorkQueue for WorkQueueService {
         // Create in storage
         match self.storage.create_queue(&req.queue).await {
             Ok(()) => {
-                // Also create in state (for claim lock)
+                // Register in state (for stats listing)
                 self.state.get_or_create_queue(&req.queue);
                 Ok(Response::new(CreateQueueResponse { created: true }))
             }
@@ -626,7 +623,7 @@ impl WorkQueue for WorkQueueService {
             .await
         {
             Ok(meta) => {
-                // Also create claim locks for each partition queue
+                // Register partition queues in state (for stats listing)
                 for queue_name in &meta.partition_queues {
                     self.state.get_or_create_queue(queue_name);
                 }
