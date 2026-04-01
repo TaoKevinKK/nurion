@@ -88,7 +88,7 @@ message counts based on observed payload size.**
 
 ```python
 @dataclass
-class PipelineFlowConfig:
+class WorkflowFlowConfig:
     buffer_memory_fraction: float = 0.4
     # Fraction of node memory reserved for pipeline buffers.
     # Remaining 60%: worker RSS, Ray object store, OS, GPU memory.
@@ -103,7 +103,7 @@ class PipelineFlowConfig:
 
 ```python
 def compute_stage_bounds(stages: List[Stage], node_memory_bytes: int,
-                         config: PipelineFlowConfig) -> Dict[str, int]:
+                         config: WorkflowFlowConfig) -> Dict[str, int]:
     total_budget = int(node_memory_bytes * config.buffer_memory_fraction)
     total_workers = sum(s.max_parallelism for s in stages if s.downstream)
 
@@ -389,7 +389,7 @@ class NvmeNodeService:
 
 ```python
 @dataclass
-class PipelineFlowConfig:
+class WorkflowFlowConfig:
     buffer_memory_fraction: float = 0.4
     # Fraction of node memory for pipeline buffers.
     # Default 0.4 means: 40% buffers, 60% for workers + Ray + OS + GPU.
@@ -404,7 +404,7 @@ class PipelineFlowConfig:
 # Usage:
 job = Job(
     stages=[...],
-    flow_config=PipelineFlowConfig(),  # default works for most workloads
+    flow_config=WorkflowFlowConfig(),  # default works for most workloads
 )
 ```
 
@@ -427,7 +427,7 @@ job = Job(
 | Add `max_pending` to QueueGroup metadata | `lib/anvil-rs/src/storage.rs` | S |
 | `push_messages` returns `QueueFull` when at bound | `lib/anvil-rs/src/storage.rs` | S |
 | `ack_and_scatter` respects downstream bound | `lib/anvil-rs/src/storage.rs` | M |
-| `PipelineFlowConfig` dataclass | `core/job.py` | S |
+| `WorkflowFlowConfig` dataclass | `core/job.py` | S |
 | `compute_stage_bounds()` at pipeline startup | `runtime/ray_runner.py` | M |
 | `AdaptiveQueueBound` (payload size EMA) | `core/managers/source_manager.py` | S |
 | SourceManager push loop respects bound | `core/managers/source_manager.py` | S |

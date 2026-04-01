@@ -155,11 +155,20 @@ class StageMaster:
         self._queue_client.start()
         self.logger.info(f"Connected to broker at {broker_url}")
 
-        # All inter-stage output uses QueueGroup
-        self._queue_client.create_queue_group(self._output_group_name, self._num_partitions)
+        # All inter-stage output uses QueueGroup.
+        # Divide total budget by partition count so aggregate stays within budget.
+        # Floor of 1 prevents integer division to zero (which means unlimited).
+        total_bound = self.runtime.max_pending_total
+        per_partition = max(total_bound // max(self._num_partitions, 1), 1) if total_bound > 0 else 0
+        self._queue_client.create_queue_group(
+            self._output_group_name,
+            self._num_partitions,
+            max_pending_per_partition=per_partition,
+        )
         self.logger.info(
             f"Created output group '{self._output_group_name}' with "
             f"{self._num_partitions} partition(s) for stage {self.stage_id}"
+            f"{f', max_pending_per_partition={per_partition}' if per_partition else ''}"
         )
 
     def _init_managers(self) -> None:

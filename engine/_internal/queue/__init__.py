@@ -35,10 +35,18 @@ from _internal.queue.anvil import (
     AnvilRecord,
 )
 from _internal.queue.anvil_storage import AnvilStorageReader
+from _internal.queue.errors import (
+    AnvilError,
+    ClaimTokenError,
+    QueueFullError,
+)
 
 __all__ = [
     "AnvilBrokerManager",
     "AnvilQueueClient",
+    "AnvilError",
     "AnvilRecord",
     "AnvilStorageReader",
+    "ClaimTokenError",
+    "QueueFullError",
 ]

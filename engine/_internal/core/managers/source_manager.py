@@ -34,6 +34,7 @@ from tenacity import (
 
 from _internal.core.models import SourceQueueMessage, Split
 from _internal.core.source import DirectProduceContext, DirectProducer, SplitPlanner
+from _internal.queue.errors import QueueFullError
 from _internal.testing.fault_injection import InjectedFaultError
 
 if TYPE_CHECKING:
@@ -289,7 +290,13 @@ class SourceManager:
         split: Split,
         idx: int,
     ) -> None:
-        """Produce a split with retry logic."""
+        """Produce a split with retry logic.
+
+        Handles two categories of transient errors:
+        - Network / broker errors: retried via tenacity (exponential backoff).
+        - QueueFull (bounded queue): retried with a fixed 1s sleep to let
+          downstream workers drain, up to 60 attempts (~ 60s).
+        """
 
         def before_sleep_callback(retry_state: RetryCallState) -> None:
             exc = retry_state.outcome.exception() if retry_state.outcome else None
@@ -314,4 +321,21 @@ class SourceManager:
             )
             queue_client.push(self._planner_queue_name, message.to_bytes())
 
-        await _do_produce()
+        max_queue_full_retries = 60
+        for attempt in range(max_queue_full_retries):
+            try:
+                await _do_produce()
+                return
+            except QueueFullError:
+                if attempt % 10 == 0:
+                    self._logger.info(
+                        f"Source {self._stage_id}: bounded queue full, "
+                        f"waiting for downstream to drain "
+                        f"(attempt {attempt + 1}/{max_queue_full_retries})"
+                    )
+                await asyncio.sleep(1.0)
+                continue
+        raise RuntimeError(
+            f"Source {self._stage_id}: bounded queue full for "
+            f"{max_queue_full_retries}s, giving up on split {split.split_id}"
+        )

@@ -48,6 +48,7 @@ from _internal.core.models import (
 from _internal.core.operator import Operator, OperatorRuntime
 from _internal.core.split_payload_store import SplitPayloadStore
 from _internal.queue import AnvilQueueClient, AnvilRecord
+from _internal.queue.errors import QueueFullError
 from _internal.testing.fault_injection import (
     FAULT_AFTER_PROCESS,
     FAULT_BEFORE_PROCESS,
@@ -448,14 +449,12 @@ class StageWorker:
         if isinstance(collected, RawOutputBytes):
             # Sink commit: forward raw bytes to commit queue
             if self._output.commit_queue_name and collected.payloads:
-                self.queue_client.ack_and_forward(
+                await self._ack_and_forward_with_retry(
                     upstream_queue=upstream_queue,
-                    upstream_msg_ids=batch.msg_ids,
-                    upstream_claim_tokens=batch.claim_tokens,
+                    batch=batch,
                     downstream_queue=self._output.commit_queue_name,
                     downstream_payloads=collected.payloads,
-                    state_namespace=job_namespace(self.job_id),
-                    state_puts=event_puts,
+                    event_puts=event_puts,
                 )
             else:
                 self.queue_client.ack(
@@ -737,14 +736,68 @@ class StageWorker:
                 scatter.setdefault(0, []).append(out_msg.to_bytes())
 
         self.payload_store.flush_pending_writes()
-        self.queue_client.ack_and_scatter(
-            upstream_queue=upstream_queue,
-            upstream_msg_ids=batch.msg_ids,
-            upstream_claim_tokens=batch.claim_tokens,
-            group_name=self._output.group_name,
-            partition_payloads=scatter,
-            state_namespace=job_namespace(self.job_id),
-            state_puts=event_puts,
+
+        # Retry ack_and_scatter if downstream queue is full (bounded queue).
+        # The worker should wait and retry rather than dying and respawning.
+        max_retries = 30
+        for attempt in range(max_retries):
+            try:
+                self.queue_client.ack_and_scatter(
+                    upstream_queue=upstream_queue,
+                    upstream_msg_ids=batch.msg_ids,
+                    upstream_claim_tokens=batch.claim_tokens,
+                    group_name=self._output.group_name,
+                    partition_payloads=scatter,
+                    state_namespace=job_namespace(self.job_id),
+                    state_puts=event_puts,
+                )
+                break
+            except QueueFullError:
+                if attempt % 10 == 0:
+                    self.logger.info(
+                        f"Worker {self.worker_id}: downstream queue full, "
+                        f"waiting for drain (attempt {attempt + 1}/{max_retries})"
+                    )
+                await asyncio.sleep(1.0)
+                continue
+        else:
+            raise RuntimeError(
+                f"Worker {self.worker_id}: downstream queue full for {max_retries}s, giving up"
+            )
+
+    async def _ack_and_forward_with_retry(
+        self,
+        upstream_queue: str,
+        batch: _ParsedBatch,
+        downstream_queue: str,
+        downstream_payloads: list[bytes],
+        event_puts: Dict[str, bytes],
+    ) -> None:
+        """ack_and_forward with QueueFull retry for bounded queues."""
+        assert self.queue_client is not None
+        max_retries = 30
+        for attempt in range(max_retries):
+            try:
+                self.queue_client.ack_and_forward(
+                    upstream_queue=upstream_queue,
+                    upstream_msg_ids=batch.msg_ids,
+                    upstream_claim_tokens=batch.claim_tokens,
+                    downstream_queue=downstream_queue,
+                    downstream_payloads=downstream_payloads,
+                    state_namespace=job_namespace(self.job_id),
+                    state_puts=event_puts,
+                )
+                return
+            except QueueFullError:
+                if attempt % 10 == 0:
+                    self.logger.info(
+                        f"Worker {self.worker_id}: downstream queue full, "
+                        f"waiting for drain (attempt {attempt + 1}/{max_retries})"
+                    )
+                await asyncio.sleep(1.0)
+                continue
+        raise RuntimeError(
+            f"Worker {self.worker_id}: downstream queue full for {max_retries}s, giving up"
         )
 
     # =========================================================================

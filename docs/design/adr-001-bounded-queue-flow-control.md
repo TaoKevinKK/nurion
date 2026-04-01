@@ -160,7 +160,7 @@ the bound correctly.
 
 ## Action Items
 
-1. [ ] **Phase 1 (P0)**: Bounded queue in Anvil broker — `max_pending` enforcement, `QueueFull` error, `PipelineFlowConfig`, `compute_stage_bounds()`, `AdaptiveQueueBound`, SourceManager incremental push
+1. [ ] **Phase 1 (P0)**: Bounded queue in Anvil broker — `max_pending` enforcement, `QueueFull` error, `WorkflowFlowConfig`, `compute_stage_bounds()`, `AdaptiveQueueBound`, SourceManager incremental push
 2. [ ] **Phase 2 (P1)**: Autoscaler signal update — `source_blocked_ratio`, `worker_idle_ratio`, replace lag-based signals
 3. [ ] **Phase 3 (P1)**: Safety net — `NodeHealthGuard`, `NvmeNodeService` (Flight + health guard)
 4. [ ] **Phase 4 (P2)**: Continuous throttle — `throttle_ratio` in `BackpressureSignal` for smoother control

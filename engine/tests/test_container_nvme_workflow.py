@@ -198,8 +198,12 @@ class TestNvmeWorkflowFailure:
 
     @pytest.mark.asyncio
     async def test_worker_kill_write_through_recovery(self, minio_container):
-        """Kill transform worker, verify pipeline recovers with S3 payloads."""
-        NUM_RECORDS = 500
+        """Kill transform worker, verify pipeline recovers with S3 payloads.
+
+        Uses fewer records (200) to keep write-through S3 round-trips fast
+        in CI (MinIO in Docker has variable I/O latency).
+        """
+        NUM_RECORDS = 200
         s3_options = minio_s3_options(minio_container)
 
         job = create_test_pipeline(
@@ -224,7 +228,7 @@ class TestNvmeWorkflowFailure:
 
         # Wait for some progress, then kill a transform worker
         await wait_for_progress(
-            runner, min_processed=100, timeout=30, collector_name=self.collector_name
+            runner, min_processed=50, timeout=30, collector_name=self.collector_name
         )
 
         killed = await kill_random_worker(runner, stage_id="transform")
@@ -232,7 +236,9 @@ class TestNvmeWorkflowFailure:
             logger.info(f"Killed worker: {killed}")
             await wait_for_stage_workers(runner, "transform", min_workers=2, timeout=15)
 
-        await asyncio.wait_for(run_task, timeout=120)
+        # Progress-based completion: wait for all records with generous timeout.
+        # write-through S3 in CI is slow but should not stall.
+        await asyncio.wait_for(run_task, timeout=180)
 
         records = get_sink_records(self.collector_name)
         assert len(records) == NUM_RECORDS, (

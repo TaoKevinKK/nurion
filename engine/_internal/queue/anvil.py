@@ -15,6 +15,10 @@
 """
 Anvil Implementation - Single-queue Multi-consumer Model.
 
+Exceptions:
+    QueueFullError: Raised when a bounded queue reaches its max_pending limit.
+                    Callers should retry after a short delay.
+
 Components:
 - AnvilBrokerManager: Manages embedded Rust broker lifecycle
 - AnvilQueueClient: Client for claim/ack operations
@@ -56,6 +60,7 @@ from anvil_py import BrokerConfig, BrokerError, AnvilBroker, AnvilRustClient
 
 from _internal.utils.logging import create_ray_logger
 from _internal.queue.anvil_storage import AnvilStorageReader
+from _internal.queue.errors import raise_typed as _raise_typed
 
 
 # =============================================================================
@@ -258,9 +263,9 @@ class AnvilQueueClient:
         return self._running and self._client is not None
 
     # Admin
-    def create_queue(self, queue: str) -> None:
+    def create_queue(self, queue: str, max_pending: int = 0) -> None:
         client = self._check()
-        client.create_queue(queue)
+        client.create_queue(queue, max_depth=max_pending)
 
     def delete_queue(self, queue: str) -> None:
         client = self._check()
@@ -269,11 +274,19 @@ class AnvilQueueClient:
     # Producer
     def push(self, queue: str, value: bytes, metadata: Optional[Dict[str, str]] = None) -> str:
         client = self._check()
-        return client.push(queue, value, metadata or {})
+        try:
+            return client.push(queue, value, metadata or {})
+        except RuntimeError as e:
+            _raise_typed(e)
+            raise
 
     def push_batch(self, queue: str, values: List[bytes]) -> List[str]:
         client = self._check()
-        return client.push_batch(queue, values)
+        try:
+            return client.push_batch(queue, values)
+        except RuntimeError as e:
+            _raise_typed(e)
+            raise
 
     # Consumer
     def claim(self, queue: str, batch_size: int = 1, timeout_ms: int = 5000) -> List[AnvilRecord]:
@@ -291,14 +304,18 @@ class AnvilQueueClient:
         state_deletes: Optional[List[str]] = None,
     ) -> int:
         client = self._check()
-        return client.ack(
-            queue,
-            msg_ids,
-            claim_tokens=claim_tokens,
-            state_namespace=state_namespace,
-            state_puts=state_puts,
-            state_deletes=state_deletes,
-        )
+        try:
+            return client.ack(
+                queue,
+                msg_ids,
+                claim_tokens=claim_tokens,
+                state_namespace=state_namespace,
+                state_puts=state_puts,
+                state_deletes=state_deletes,
+            )
+        except RuntimeError as e:
+            _raise_typed(e)
+            raise
 
     def nack(
         self,
@@ -335,16 +352,20 @@ class AnvilQueueClient:
         state_deletes: Optional[List[str]] = None,
     ) -> List[str]:
         client = self._check()
-        return client.ack_and_forward(
-            upstream_queue,
-            upstream_msg_ids,
-            upstream_claim_tokens,
-            downstream_queue,
-            downstream_payloads,
-            state_namespace=state_namespace,
-            state_puts=state_puts,
-            state_deletes=state_deletes,
-        )
+        try:
+            return client.ack_and_forward(
+                upstream_queue,
+                upstream_msg_ids,
+                upstream_claim_tokens,
+                downstream_queue,
+                downstream_payloads,
+                state_namespace=state_namespace,
+                state_puts=state_puts,
+                state_deletes=state_deletes,
+            )
+        except RuntimeError as e:
+            _raise_typed(e)
+            raise
 
     # State
     def state_get(self, namespace: str, keys: List[str]) -> Dict[str, bytes]:
@@ -381,10 +402,19 @@ class AnvilQueueClient:
         client = self._check()
         return client.get_group_stats(group_name)
 
-    def create_queue_group(self, group_name: str, num_partitions: int) -> Dict:
-        """Create a group of partition queues atomically."""
+    def create_queue_group(
+        self, group_name: str, num_partitions: int, max_pending_per_partition: int = 0
+    ) -> Dict:
+        """Create a group of partition queues atomically.
+
+        Args:
+            group_name: Name for the queue group.
+            num_partitions: Number of partition queues to create.
+            max_pending_per_partition: Maximum pending messages per partition
+                queue. 0 means unlimited (default).
+        """
         client = self._check()
-        return client.create_queue_group(group_name, num_partitions)
+        return client.create_queue_group(group_name, num_partitions, max_pending_per_partition)
 
     def ack_and_scatter(
         self,
@@ -399,16 +429,20 @@ class AnvilQueueClient:
     ) -> List[str]:
         """Atomically ack upstream + push to multiple partition queues."""
         client = self._check()
-        return client.ack_and_scatter(
-            upstream_queue,
-            upstream_msg_ids,
-            upstream_claim_tokens,
-            group_name,
-            partition_payloads,
-            state_namespace=state_namespace,
-            state_puts=state_puts,
-            state_deletes=state_deletes,
-        )
+        try:
+            return client.ack_and_scatter(
+                upstream_queue,
+                upstream_msg_ids,
+                upstream_claim_tokens,
+                group_name,
+                partition_payloads,
+                state_namespace=state_namespace,
+                state_puts=state_puts,
+                state_deletes=state_deletes,
+            )
+        except RuntimeError as e:
+            _raise_typed(e)
+            raise
 
     def claim_from_group(
         self,

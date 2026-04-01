@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 import ray
 
-from _internal.core.job import Job
+from _internal.core.job import Job, WorkflowFlowConfig
 
 if TYPE_CHECKING:
     from _internal.core.stage import Stage
@@ -57,6 +57,57 @@ from _internal.runtime.backpressure import JobBackpressureController
 from _internal.runtime.queue_stats import QueueRef, QueueStatsClient, StageQueueConfig
 from _internal.utils.logging import create_ray_logger
 from _internal.webui.state.writer import AnvilStateWriter
+
+
+def compute_stage_bounds(
+    job: "Job",
+    node_memory_bytes: int,
+    flow_config: "WorkflowFlowConfig",
+) -> Dict[str, int]:
+    """Compute max_pending for each inter-stage queue.
+
+    Allocates a fraction of node memory as buffer budget, divides across
+    stages proportional to downstream worker count, and converts to message
+    counts using conservative payload size estimates.
+
+    Args:
+        job: The pipeline job with stages and DAG edges.
+        node_memory_bytes: Total node memory in bytes.
+        flow_config: Pipeline flow control configuration.
+
+    Returns:
+        Dict mapping stage_id to max_pending (for that stage's output queue).
+    """
+    total_budget = int(node_memory_bytes * flow_config.buffer_memory_fraction)
+
+    # Collect downstream stages with their worker counts.
+    # For fan-out stages (multiple downstreams), sum all downstream parallelism.
+    stage_workers: Dict[str, int] = {}
+    for stage_id, stage in job.stages.items():
+        downstream_ids = job.dag_edges.get(stage_id, [])
+        if not downstream_ids:
+            continue  # sink stage, no output queue to bound
+        total_ds_workers = sum(job.stages[ds_id].max_parallelism for ds_id in downstream_ids)
+        stage_workers[stage_id] = total_ds_workers
+
+    total_workers = sum(stage_workers.values()) or 1
+
+    bounds: Dict[str, int] = {}
+    for stage_id, ds_workers in stage_workers.items():
+        stage = job.stages[stage_id]
+        # Budget proportional to downstream worker count
+        stage_budget = total_budget * ds_workers / total_workers
+
+        # Estimate payload size: batch_size * 1KB/row (conservative)
+        est_payload = max(stage.batch_size * 1024, 1024)  # at least 1KB
+
+        max_pending = max(
+            int(stage_budget / est_payload),
+            ds_workers * flow_config.min_prefetch,  # floor: GPU never starves
+        )
+        bounds[stage_id] = max_pending
+
+    return bounds
 
 
 @dataclass
@@ -131,6 +182,7 @@ class RayJobRunner:
         self._queue_stats_client: Optional[QueueStatsClient] = None
         self._backpressure_controller: Optional[JobBackpressureController] = None
         self._stage_queue_configs: Dict[str, StageQueueConfig] = {}
+        self._stage_bounds: Dict[str, int] = {}
 
         # State
         self._initialized = False
@@ -231,6 +283,15 @@ class RayJobRunner:
 
         # Create shared Anvil broker for all stages (if using Anvil)
         await self._create_shared_broker()
+
+        # Compute per-stage queue bounds for flow control
+        import psutil  # type: ignore[import-untyped]
+
+        node_memory = psutil.virtual_memory().total
+        flow_config = self.job.config.flow_config if self.job.config else WorkflowFlowConfig()
+        self._stage_bounds = compute_stage_bounds(self.job, node_memory, flow_config)
+        if self._stage_bounds:
+            self.logger.info(f"Computed stage bounds: {self._stage_bounds}")
 
         # Initialize state writer (gRPC) for WebUI metadata
         if self.job.config.webui.enabled and self._broker_endpoint:
@@ -335,6 +396,7 @@ class RayJobRunner:
             upstream=upstream,
             claim_timeout_secs=self.job.config.claim_timeout_secs,
             upstream_num_partitions=upstream_num_partitions,
+            max_pending_total=self._stage_bounds.get(stage.stage_id, 0),
         )
 
     def _stage_info(self, stage: "Stage") -> Dict[str, Any]:

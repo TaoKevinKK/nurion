@@ -26,6 +26,23 @@ if TYPE_CHECKING:
 
 
 @dataclass
+class WorkflowFlowConfig:
+    """Workflow-level flow control configuration.
+
+    Controls inter-stage queue bounds to prevent OOM, disk-full, and
+    network saturation while keeping GPUs fed.
+    """
+
+    buffer_memory_fraction: float = 0.4
+    # Fraction of node memory reserved for pipeline buffers.
+    # Remaining: worker RSS, Ray object store, OS, GPU memory.
+
+    min_prefetch: int = 2
+    # Minimum buffered messages per downstream worker.
+    # Prevents GPU starvation even when memory budget is tight.
+
+
+@dataclass
 class WebUIConfig:
     """Configuration for WebUI debugging interface.
 
@@ -66,6 +83,7 @@ class JobConfig:
     webui: WebUIConfig = field(default_factory=WebUIConfig)
     payload_store_uri: str = "ray://"
     payload_store_options: Dict[str, Any] = field(default_factory=dict)
+    flow_config: WorkflowFlowConfig = field(default_factory=WorkflowFlowConfig)
 
 
 class Job:

@@ -56,6 +56,7 @@ class StageRuntime:
     upstream: Optional["QueueRef"] = None
     claim_timeout_secs: float = 60.0
     upstream_num_partitions: int = 0
+    max_pending_total: int = 0  # 0 = unlimited. Total budget for output queue (divided by partitions at creation).
 
 
 # =============================================================================

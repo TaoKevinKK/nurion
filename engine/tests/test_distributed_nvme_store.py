@@ -261,7 +261,7 @@ class TestNvmeStoreWorkerFailure:
             runner, min_processed=100, timeout=30, collector_name=self.collector_name
         )
 
-        killed = kill_random_worker(runner, stage_id="transform")
+        killed = await kill_random_worker(runner, stage_id="transform")
         if killed:
             logger.info(f"Killed worker: {killed}")
             # Wait for replacement worker
