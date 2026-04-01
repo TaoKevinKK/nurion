@@ -159,7 +159,9 @@ class StageMaster:
         # Divide total budget by partition count so aggregate stays within budget.
         # Floor of 1 prevents integer division to zero (which means unlimited).
         total_bound = self.runtime.max_pending_total
-        per_partition = max(total_bound // max(self._num_partitions, 1), 1) if total_bound > 0 else 0
+        per_partition = (
+            max(total_bound // max(self._num_partitions, 1), 1) if total_bound > 0 else 0
+        )
         self._queue_client.create_queue_group(
             self._output_group_name,
             self._num_partitions,

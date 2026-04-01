@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -178,14 +178,14 @@ class HealthCheckResponse(ApiModel):
     version: str = "1.0.0"
 
 
-class FieldType(str, Enum):
+class FieldType(StrEnum):
     TEXT = "text"
     NUMBER = "number"
     BOOLEAN = "boolean"
     OPTIONS = "options"
 
 
-class FilterOperator(str, Enum):
+class FilterOperator(StrEnum):
     CONTAINS = "contains"
     EQUALS = "equals"
     NOT_EQUALS = "not_equals"
