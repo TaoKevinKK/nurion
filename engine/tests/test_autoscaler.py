@@ -52,9 +52,7 @@ class MockStageMaster:
     ):
         self.stage_id = stage_id
         self._workers = {f"worker_{i}": MagicMock() for i in range(worker_count)}
-        self._running = True
-        self._finished = False
-        self._source = None  # Not a source stage by default
+        self._source_manager = None  # Not a source stage by default
 
         # Stage (replaces config)
         self.stage = MagicMock()
@@ -623,7 +621,7 @@ class TestEagerFill:
 
         # Source stage — should be skipped
         source = MockStageMaster(stage_id="source", worker_count=10, max_workers=100)
-        source._source = MagicMock()  # Mark as source
+        source._source_manager = MagicMock()  # Mark as source
 
         # GPU stage — should be filled
         gpu_stage = MockStageMaster(

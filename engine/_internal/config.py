@@ -136,6 +136,7 @@ _TYPE_MAP: dict[str, type] = {
     "str": str,
 }
 
+
 def _read_from_env() -> EngineConfig:
     """Build an EngineConfig by reading env vars, falling back to defaults."""
     kwargs: dict[str, Any] = {}

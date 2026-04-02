@@ -95,6 +95,8 @@ class TestWorkerFaultRecovery:
                 modulo=FILTER_MODULO,
                 remainder=FILTER_REMAINDER,
             ),
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
         )
 
         runner = RayJobRunner(job)
@@ -152,6 +154,8 @@ class TestWorkerFaultRecovery:
             with_checksum=True,
             source_data=source_data,
             transform_config=ExplodeConfig(factor=EXPLODE_FACTOR),
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
         )
 
         runner = RayJobRunner(job)
@@ -218,6 +222,8 @@ class TestWorkerFaultRecovery:
                 modulo=FILTER_MODULO,
                 remainder=FILTER_REMAINDER,
             ),
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
         )
 
         runner = RayJobRunner(job)
@@ -275,6 +281,8 @@ class TestWorkerFaultRecovery:
             with_checksum=True,
             source_data=source_data,
             transform_config=ExplodeConfig(factor=EXPLODE_FACTOR),
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
         )
 
         runner = RayJobRunner(job)
@@ -369,6 +377,8 @@ class TestExactlyOnceSemantics:
                 filter_remainder=FILTER_REMAINDER,
                 explode_factor=EXPLODE_FACTOR,
             ),
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
         )
 
         runner = RayJobRunner(job)
@@ -434,6 +444,8 @@ class TestExactlyOnceSemantics:
             with_checksum=True,
             source_data=source_data,
             transform_config=ExplodeConfig(factor=EXPLODE_FACTOR),
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
         )
 
         runner = RayJobRunner(job)
@@ -496,6 +508,8 @@ class TestExactlyOnceSemantics:
                 modulo=FILTER_MODULO,
                 remainder=FILTER_REMAINDER,
             ),
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
         )
 
         runner = RayJobRunner(job)
@@ -556,6 +570,8 @@ class TestExactlyOnceSemantics:
                 filter_remainder=FILTER_REMAINDER,
                 explode_factor=EXPLODE_FACTOR,
             ),
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
         )
 
         runner = RayJobRunner(job)

@@ -477,8 +477,8 @@ def create_test_pipeline(
     job_id: Optional[str] = None,
     transform_config: Optional[OperatorConfig] = None,
     anvil_db_path: str = "memory://",
-    claim_timeout_secs: float = 2.0,  # Fast recovery for tests (default 2s)
-    recovery_interval_secs: float = 0.5,  # Fast recovery interval for tests (default 0.5s)
+    claim_timeout_secs: float = 30.0,  # Must exceed worst-case split processing time in CI
+    recovery_interval_secs: float = 5.0,  # Recovery check interval
     payload_store_uri: str = "ray://",
     payload_store_options: Optional[Dict[str, Any]] = None,
 ) -> Job:

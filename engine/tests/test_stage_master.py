@@ -26,7 +26,7 @@ import pyarrow as pa
 import pytest
 from dataclasses import dataclass
 from typing import List
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 from _internal.core.models import (
     DataQueueMessage,
@@ -325,18 +325,14 @@ class TestSourceManagerBackpressure:
             return call_count <= 3
 
         manager = SourceManager(_StubPlanner(), "job_bp", "stage_bp")
-        mock_worker_manager = MagicMock()
-        mock_worker_manager.notify_safe_to_exit = AsyncMock()
 
         manager.start_split_production(
             queue_client=anvil_backend.client,
-            worker_manager=mock_worker_manager,
             backpressure_fn=backpressure_fn,
             running_fn=lambda: running_flag[0],
         )
 
         # _production_task completes once all splits are pushed + queue marked finished.
-        # _poll_queue_drained is a separate subtask and won't block this await.
         await asyncio.wait_for(manager._production_task, timeout=5.0)
 
         stats = anvil_backend.client.get_stats(manager.planner_queue_name)
@@ -346,7 +342,6 @@ class TestSourceManagerBackpressure:
             "A split was likely dropped by the old `continue` bug."
         )
 
-        # Stop the floating _poll_queue_drained task.
         running_flag[0] = False
         await asyncio.sleep(0.15)
         await manager.stop()
@@ -477,6 +472,7 @@ class TestStageWorkerPayloadCleanup:
         )
 
         worker = WorkerClass(runtime, MockStage(), mock_payload_store)
+        worker._init_operator()
         # Re-use the test backend's already-started client.
         worker.queue_client = anvil_backend.client
 
@@ -490,7 +486,7 @@ class TestStageWorkerPayloadCleanup:
         )
         anvil_backend.client.push("cleanup_upstream", msg.to_bytes())
 
-        records = anvil_backend.client.claim("cleanup_upstream", batch_size=1, timeout_ms=1000)
+        records, _ = anvil_backend.client.claim("cleanup_upstream", batch_size=1, timeout_ms=1000)
         assert len(records) == 1, "Expected to claim 1 record"
 
         await worker._process_and_ack(records)
@@ -533,6 +529,7 @@ class TestStageWorkerPayloadCleanup:
         )
 
         worker = WorkerClass(runtime, MockStage(), mock_payload_store)
+        worker._init_operator()
         worker.queue_client = anvil_backend.client
 
         anvil_backend.client.create_queue("fail_fast_upstream")
@@ -544,7 +541,7 @@ class TestStageWorkerPayloadCleanup:
         )
         anvil_backend.client.push("fail_fast_upstream", msg.to_bytes())
 
-        records = anvil_backend.client.claim("fail_fast_upstream", batch_size=1, timeout_ms=1000)
+        records, _ = anvil_backend.client.claim("fail_fast_upstream", batch_size=1, timeout_ms=1000)
         assert len(records) == 1
 
         with pytest.raises(RuntimeError, match="Payload unreachable"):

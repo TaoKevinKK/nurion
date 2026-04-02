@@ -48,6 +48,7 @@ class TestOptionalDependencyPlaceholder:
     def test_subclassing_raises_import_error(self):
         Cls = optional_dependency_placeholder("FooConfig", "bar")
         with pytest.raises(ImportError, match=r"FooConfig requires the \[bar\] extra"):
+
             class SubFoo(Cls):
                 pass
 
@@ -80,8 +81,7 @@ def _hide_module(root_module: str):
     # Save and remove all cached (sub)modules
     saved = {}
     to_remove = [
-        key for key in sys.modules
-        if key == root_module or key.startswith(root_module + ".")
+        key for key in sys.modules if key == root_module or key.startswith(root_module + ".")
     ]
     for key in to_remove:
         saved[key] = sys.modules.pop(key)
@@ -108,6 +108,7 @@ def _reload_sources():
         if key.startswith("_internal.operators.sources"):
             del sys.modules[key]
     import _internal.operators.sources as mod
+
     return mod
 
 
@@ -117,6 +118,7 @@ def _reload_sinks():
         if key.startswith("_internal.operators.sinks"):
             del sys.modules[key]
     import _internal.operators.sinks as mod
+
     return mod
 
 
@@ -133,7 +135,9 @@ class TestLanceMissing:
     def test_lance_source_config_raises_on_use(self):
         with _hide_module("lance"):
             mod = _reload_sources()
-            with pytest.raises(ImportError, match=r"LanceTableSourceConfig requires the \[lance\] extra"):
+            with pytest.raises(
+                ImportError, match=r"LanceTableSourceConfig requires the \[lance\] extra"
+            ):
                 mod.LanceTableSourceConfig(table_uri="s3://bucket/table")
 
     def test_sinks_init_loads_without_lance(self):
@@ -151,7 +155,9 @@ class TestLanceMissing:
     def test_lance_commit_policy_raises_on_use(self):
         with _hide_module("lance"):
             mod = _reload_sinks()
-            with pytest.raises(ImportError, match=r"LanceCommitPolicy requires the \[lance\] extra"):
+            with pytest.raises(
+                ImportError, match=r"LanceCommitPolicy requires the \[lance\] extra"
+            ):
                 mod.LanceCommitPolicy()
 
 
@@ -167,7 +173,9 @@ class TestIcebergMissing:
     def test_iceberg_source_config_raises_on_use(self):
         with _hide_module("pyiceberg"):
             mod = _reload_sources()
-            with pytest.raises(ImportError, match=r"IcebergSourceConfig requires the \[iceberg\] extra"):
+            with pytest.raises(
+                ImportError, match=r"IcebergSourceConfig requires the \[iceberg\] extra"
+            ):
                 mod.IcebergSourceConfig(catalog_name="default", table_id="db.table")
 
 

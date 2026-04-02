@@ -94,6 +94,8 @@ class TestRandomFailureInjection:
         )
 
         job = create_test_pipeline(
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
             num_records=NUM_RECORDS,
             batch_size=BATCH_SIZE,  # 25 splits for longer processing
             min_workers=3,
@@ -182,6 +184,8 @@ class TestRandomFailureInjection:
         expected_count = NUM_RECORDS * EXPLODE_FACTOR
 
         job = create_test_pipeline(
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
             num_records=NUM_RECORDS,
             batch_size=150,
             min_workers=2,
@@ -269,6 +273,8 @@ class TestCombinedFailures:
         )
 
         job = create_test_pipeline(
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
             num_records=NUM_RECORDS,
             batch_size=500,
             min_workers=3,
@@ -361,6 +367,8 @@ class TestCombinedFailures:
         )
 
         job = create_test_pipeline(
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
             num_records=NUM_RECORDS,
             batch_size=100,  # Small batches = 100 splits = slow enough for chaos injection
             min_workers=2,

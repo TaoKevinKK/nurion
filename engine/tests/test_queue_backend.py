@@ -81,7 +81,7 @@ class TestAnvilQueueClient:
         assert msg_id  # Should be a non-empty string
 
         # Claim
-        records = client.claim(queue, batch_size=1, timeout_ms=1000)
+        records, _ = client.claim(queue, batch_size=1, timeout_ms=1000)
         assert len(records) == 1
         assert records[0].value == b"hello anvil"
         assert records[0].msg_id == msg_id
@@ -96,7 +96,7 @@ class TestAnvilQueueClient:
         assert acked == 1
 
         # Claim again should be empty
-        records = client.claim(queue, batch_size=1, timeout_ms=100)
+        records, _ = client.claim(queue, batch_size=1, timeout_ms=100)
         assert len(records) == 0
 
     def test_ack_requires_claim_token(self, anvil_broker_and_client):
@@ -106,7 +106,7 @@ class TestAnvilQueueClient:
         client.create_queue(queue)
 
         client.push(queue, b"hello anvil")
-        records = client.claim(queue, batch_size=1, timeout_ms=1000)
+        records, _ = client.claim(queue, batch_size=1, timeout_ms=1000)
         assert len(records) == 1
 
         with pytest.raises(ValueError):
@@ -119,7 +119,7 @@ class TestAnvilQueueClient:
         client.create_queue(queue)
 
         client.push(queue, b"hello anvil")
-        records = client.claim(queue, batch_size=1, timeout_ms=1000)
+        records, _ = client.claim(queue, batch_size=1, timeout_ms=1000)
         assert len(records) == 1
 
         with pytest.raises(RuntimeError):
@@ -132,7 +132,7 @@ class TestAnvilQueueClient:
         client.create_queue(queue)
 
         client.push(queue, b"hello anvil")
-        records = client.claim(queue, batch_size=1, timeout_ms=1000)
+        records, _ = client.claim(queue, batch_size=1, timeout_ms=1000)
         assert len(records) == 1
 
         with pytest.raises(ValueError):
@@ -150,7 +150,7 @@ class TestAnvilQueueClient:
         assert len(msg_ids) == 5
 
         # Claim all
-        records = client.claim(queue, batch_size=10, timeout_ms=1000)
+        records, _ = client.claim(queue, batch_size=10, timeout_ms=1000)
         assert len(records) == 5
 
     def test_nack_returns_to_queue(self, anvil_broker_and_client):
@@ -161,7 +161,7 @@ class TestAnvilQueueClient:
 
         # Push and claim
         msg_id = client.push(queue, b"test message")
-        records = client.claim(queue, batch_size=1, timeout_ms=1000)
+        records, _ = client.claim(queue, batch_size=1, timeout_ms=1000)
         assert len(records) == 1
         assert records[0].claim_token
 
@@ -174,7 +174,7 @@ class TestAnvilQueueClient:
         assert nacked == 1
 
         # Should be able to claim again
-        records = client.claim(queue, batch_size=1, timeout_ms=1000)
+        records, _ = client.claim(queue, batch_size=1, timeout_ms=1000)
         assert len(records) == 1
         assert records[0].msg_id == msg_id
 
@@ -185,7 +185,7 @@ class TestAnvilQueueClient:
         client.create_queue(queue)
 
         client.push(queue, b"test message")
-        records = client.claim(queue, batch_size=1, timeout_ms=1000)
+        records, _ = client.claim(queue, batch_size=1, timeout_ms=1000)
         assert len(records) == 1
 
         with pytest.raises(RuntimeError):
@@ -198,7 +198,7 @@ class TestAnvilQueueClient:
         client.create_queue(queue)
 
         client.push(queue, b"test message")
-        records = client.claim(queue, batch_size=1, timeout_ms=1000)
+        records, _ = client.claim(queue, batch_size=1, timeout_ms=1000)
         assert len(records) == 1
 
         with pytest.raises(ValueError):
@@ -211,12 +211,12 @@ class TestAnvilQueueClient:
         client.create_queue(queue)
 
         client.push(queue, b"test message")
-        records = client.claim(queue, batch_size=1, timeout_ms=1000)
+        records, _ = client.claim(queue, batch_size=1, timeout_ms=1000)
         assert len(records) == 1
         token1 = records[0].claim_token
 
         client.nack(queue, [records[0].msg_id], claim_tokens=[token1])
-        records2 = client.claim(queue, batch_size=1, timeout_ms=1000)
+        records2, _ = client.claim(queue, batch_size=1, timeout_ms=1000)
         assert len(records2) == 1
         assert records2[0].claim_token != token1
 
@@ -227,13 +227,13 @@ class TestAnvilQueueClient:
         client.create_queue(queue)
 
         client.push(queue, b"test message")
-        records = client.claim(queue, batch_size=1, timeout_ms=1000)
+        records, _ = client.claim(queue, batch_size=1, timeout_ms=1000)
         assert len(records) == 1
         token1 = records[0].claim_token
         msg_id = records[0].msg_id
 
         client.nack(queue, [msg_id], claim_tokens=[token1])
-        records2 = client.claim(queue, batch_size=1, timeout_ms=1000)
+        records2, _ = client.claim(queue, batch_size=1, timeout_ms=1000)
         assert len(records2) == 1
 
         with pytest.raises(RuntimeError):
@@ -255,7 +255,7 @@ class TestAnvilQueueClient:
         assert stats["claimed_count"] == 0
 
         # Claim some
-        records = client.claim(queue, batch_size=2, timeout_ms=1000)
+        records, _ = client.claim(queue, batch_size=2, timeout_ms=1000)
         assert len(records) == 2
 
         stats = client.get_stats(queue)
@@ -279,7 +279,7 @@ class TestAnvilAckAndForward:
         client.push(upstream, b"input data")
 
         # Claim from upstream
-        records = client.claim(upstream, batch_size=1, timeout_ms=1000)
+        records, _ = client.claim(upstream, batch_size=1, timeout_ms=1000)
         assert len(records) == 1
         assert records[0].claim_token
 
@@ -294,11 +294,11 @@ class TestAnvilAckAndForward:
         assert len(new_ids) == 1
 
         # Upstream should be empty
-        upstream_records = client.claim(upstream, batch_size=1, timeout_ms=100)
+        upstream_records, _ = client.claim(upstream, batch_size=1, timeout_ms=100)
         assert len(upstream_records) == 0
 
         # Downstream should have the message
-        downstream_records = client.claim(downstream, batch_size=1, timeout_ms=1000)
+        downstream_records, _ = client.claim(downstream, batch_size=1, timeout_ms=1000)
         assert len(downstream_records) == 1
         assert downstream_records[0].value == b"output data"
 
@@ -311,7 +311,7 @@ class TestAnvilAckAndForward:
         client.create_queue(downstream)
 
         client.push(upstream, b"input data")
-        records = client.claim(upstream, batch_size=1, timeout_ms=1000)
+        records, _ = client.claim(upstream, batch_size=1, timeout_ms=1000)
         assert len(records) == 1
 
         with pytest.raises(ValueError):
@@ -332,7 +332,7 @@ class TestAnvilAckAndForward:
         client.create_queue(downstream)
 
         client.push(upstream, b"input data")
-        records = client.claim(upstream, batch_size=1, timeout_ms=1000)
+        records, _ = client.claim(upstream, batch_size=1, timeout_ms=1000)
         assert len(records) == 1
 
         with pytest.raises(ValueError):
@@ -370,8 +370,8 @@ class TestAnvilMultiClient:
             assert id2
 
             # Both clients can claim messages
-            records1 = client1.claim(queue, batch_size=1, timeout_ms=1000)
-            records2 = client2.claim(queue, batch_size=1, timeout_ms=1000)
+            records1, _ = client1.claim(queue, batch_size=1, timeout_ms=1000)
+            records2, _ = client2.claim(queue, batch_size=1, timeout_ms=1000)
 
             # Both clients got one message each (competing consumers)
             assert len(records1) == 1

@@ -15,7 +15,7 @@
 """Source manager: handles SplitPlanner and DirectProducer lifecycle for StageMaster.
 
 Encapsulates all source-related logic: planner queue creation, async split
-production with backpressure, queue completion polling, and DirectProducer execution.
+production with backpressure, and DirectProducer execution.
 """
 
 from __future__ import annotations
@@ -39,7 +39,6 @@ from _internal.queue.errors import QueueFullError
 from _internal.testing.fault_injection import InjectedFaultError
 
 if TYPE_CHECKING:
-    from _internal.core.managers import WorkerManager
     from _internal.core.models import QueueEndpoint
     from _internal.queue import AnvilQueueClient
 
@@ -117,15 +116,15 @@ class SourceManager:
     def start_split_production(
         self,
         queue_client: "AnvilQueueClient",
-        worker_manager: "WorkerManager",
         backpressure_fn: Callable[[], Awaitable[bool]],
         running_fn: Callable[[], bool],
     ) -> None:
         """Create planner queue and launch async split production.
 
         Workers can start consuming immediately while splits are being produced.
-        When production finishes, the planner queue is marked as finished and
-        workers are notified to exit once the queue is drained.
+        When production finishes, the planner queue is marked as finished so
+        the broker knows no more messages will arrive. Workers detect the
+        drained state on their own via the broker's drained flag.
         """
         assert self._planner_queue_name is not None
 
@@ -133,7 +132,7 @@ class SourceManager:
         self._logger.info(f"Created planner queue {self._planner_queue_name}")
 
         self._production_task = asyncio.create_task(
-            self._run_production(queue_client, worker_manager, backpressure_fn, running_fn),
+            self._run_production(queue_client, backpressure_fn, running_fn),
             name=f"split_production_{self._stage_id}",
         )
 
@@ -173,7 +172,6 @@ class SourceManager:
     async def _run_production(
         self,
         queue_client: "AnvilQueueClient",
-        worker_manager: "WorkerManager",
         backpressure_fn: Callable[[], Awaitable[bool]],
         running_fn: Callable[[], bool],
     ) -> None:
@@ -187,10 +185,6 @@ class SourceManager:
             # Mark planner queue as finished so workers know no more data
             if running_fn():
                 self._mark_queue_finished(queue_client)
-                asyncio.create_task(
-                    self._poll_queue_drained(queue_client, worker_manager, running_fn),
-                    name=f"poll_source_completion_{self._stage_id}",
-                )
         except asyncio.CancelledError:
             self._logger.debug("Split production cancelled")
             raise
@@ -254,37 +248,6 @@ class SourceManager:
             self._logger.info(f"Marked planner queue {self._planner_queue_name} as finished")
         except Exception as e:
             self._logger.warning(f"Failed to mark planner queue as finished: {e}")
-
-    async def _poll_queue_drained(
-        self,
-        queue_client: "AnvilQueueClient",
-        worker_manager: "WorkerManager",
-        running_fn: Callable[[], bool],
-    ) -> None:
-        """Poll planner queue until drained, then notify workers to exit."""
-        assert self._planner_queue_name is not None
-
-        cfg = get_config()
-        poll_interval = cfg.stage_completion_poll_interval_s
-        max_consecutive_errors = cfg.stage_completion_max_errors
-        consecutive_errors = 0
-
-        while running_fn():
-            try:
-                result = queue_client.is_queue_finished(self._planner_queue_name)
-                consecutive_errors = 0
-                if result.get("safe_to_exit", False):
-                    self._logger.debug(
-                        f"Source {self._stage_id} planner queue drained, notifying workers"
-                    )
-                    await worker_manager.notify_safe_to_exit()
-                    return
-            except Exception as e:
-                consecutive_errors += 1
-                if consecutive_errors >= max_consecutive_errors:
-                    raise RuntimeError(f"Failed to poll planner queue completion: {e}") from e
-
-            await asyncio.sleep(poll_interval)
 
     async def _produce_split_with_retry(
         self,

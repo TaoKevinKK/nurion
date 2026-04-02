@@ -41,7 +41,7 @@ Example:
     # On Worker
     client = AnvilQueueClient("master-host:50051", worker_id="worker-1")
     client.start()
-    messages = client.claim("my-queue", batch_size=10)
+    messages, drained = client.claim("my-queue", batch_size=10)
     client.ack(
         "my-queue",
         [m.msg_id for m in messages],
@@ -87,11 +87,25 @@ class AnvilBrokerManager:
         self.db_path = db_path
         self.port = port
         self.host = host
-        self.startup_timeout = startup_timeout if startup_timeout is not None else cfg.broker_startup_timeout_s
-        self.claim_timeout_secs = claim_timeout_secs if claim_timeout_secs is not None else cfg.broker_claim_timeout_s
-        self.recovery_interval_secs = recovery_interval_secs if recovery_interval_secs is not None else cfg.broker_recovery_interval_s
-        self.acked_retention_secs = acked_retention_secs if acked_retention_secs is not None else cfg.broker_acked_retention_s
-        self.gc_interval_secs = gc_interval_secs if gc_interval_secs is not None else cfg.broker_gc_interval_s
+        self.startup_timeout = (
+            startup_timeout if startup_timeout is not None else cfg.broker_startup_timeout_s
+        )
+        self.claim_timeout_secs = (
+            claim_timeout_secs if claim_timeout_secs is not None else cfg.broker_claim_timeout_s
+        )
+        self.recovery_interval_secs = (
+            recovery_interval_secs
+            if recovery_interval_secs is not None
+            else cfg.broker_recovery_interval_s
+        )
+        self.acked_retention_secs = (
+            acked_retention_secs
+            if acked_retention_secs is not None
+            else cfg.broker_acked_retention_s
+        )
+        self.gc_interval_secs = (
+            gc_interval_secs if gc_interval_secs is not None else cfg.broker_gc_interval_s
+        )
 
         self._broker: Optional[AnvilBroker] = None
         self._running = False
@@ -213,7 +227,9 @@ def _compute_heartbeat_interval(claim_timeout_secs: Optional[float]) -> Optional
     cfg = get_config()
     if claim_timeout_secs <= 0:
         return cfg.heartbeat_min_interval_s
-    return max(cfg.heartbeat_min_interval_s, min(cfg.heartbeat_max_interval_s, claim_timeout_secs / 2))
+    return max(
+        cfg.heartbeat_min_interval_s, min(cfg.heartbeat_max_interval_s, claim_timeout_secs / 2)
+    )
 
 
 class AnvilQueueClient:
@@ -292,10 +308,17 @@ class AnvilQueueClient:
             raise
 
     # Consumer
-    def claim(self, queue: str, batch_size: int = 1, timeout_ms: int = 5000) -> List[AnvilRecord]:
+    def claim(
+        self, queue: str, batch_size: int = 1, timeout_ms: int = 5000
+    ) -> tuple[list[AnvilRecord], bool]:
+        """Claim messages from a queue.
+
+        Returns (records, upstream_drained). upstream_drained is True when
+        records is empty AND the queue is finished + fully drained.
+        """
         client = self._check()
-        messages = client.claim(queue, batch_size, timeout_ms)
-        return [AnvilRecord.from_message(m) for m in messages]
+        messages, drained = client.claim(queue, batch_size, timeout_ms)
+        return [AnvilRecord.from_message(m) for m in messages], drained
 
     def ack(
         self,
@@ -455,10 +478,15 @@ class AnvilQueueClient:
         assigned_partitions: Optional[List[int]] = None,
         allow_steal: bool = False,
         steal_pending_threshold: int = 0,
-    ) -> "tuple[List[AnvilRecord], str, int]":
-        """Claim from a partition group (broker picks partition)."""
+    ) -> "tuple[list[AnvilRecord], str, int, bool]":
+        """Claim from a partition group (broker picks partition).
+
+        Returns (records, source_queue, source_partition, upstream_drained).
+        upstream_drained is True when records is empty AND the group is
+        finished + fully drained.
+        """
         client = self._check()
-        messages, source_queue, source_partition = client.claim_from_group(
+        messages, source_queue, source_partition, drained = client.claim_from_group(
             group_name,
             batch_size=batch_size,
             timeout_ms=timeout_ms,
@@ -470,6 +498,7 @@ class AnvilQueueClient:
             [AnvilRecord.from_message(m) for m in messages],
             source_queue,
             source_partition,
+            drained,
         )
 
     def is_group_finished(self, group_name: str) -> Dict:

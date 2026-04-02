@@ -32,6 +32,7 @@ import ray
 
 from _internal.config import get_config
 from _internal.core.job import Job, WorkflowFlowConfig
+from _internal.core.stage_master import _StageState
 
 if TYPE_CHECKING:
     from _internal.core.stage import Stage
@@ -332,7 +333,7 @@ class RayJobRunner:
                 upstream_id = upstream_ids[0]
                 upstream_master = self._masters[upstream_id]
 
-                if not upstream_master._running:
+                if not upstream_master._state == _StageState.RUNNING:
                     await upstream_master.start()
 
                 upstream = QueueRef.group(upstream_master.get_output_group_name())
@@ -521,7 +522,7 @@ class RayJobRunner:
         try:
             # Start all masters that haven't been started
             for stage_id, master in self._masters.items():
-                if not master._running:
+                if not master._state == _StageState.RUNNING:
                     await master.start()
 
             # Create tasks for all master run loops

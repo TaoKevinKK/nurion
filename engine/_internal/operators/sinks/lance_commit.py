@@ -123,7 +123,7 @@ class LanceSinkCommitter:
         self._logger.info("Finalizing: draining commit queue for final commit")
 
         while True:
-            records = queue_client.claim(
+            records, _ = queue_client.claim(
                 commit_queue_name,
                 batch_size=100,
                 timeout_ms=500,
@@ -153,7 +153,7 @@ class LanceSinkCommitter:
         Messages are NOT acked here -- they are acked after a successful commit.
         """
         try:
-            records = queue_client.claim(
+            records, _ = queue_client.claim(
                 commit_queue_name,
                 batch_size=50,
                 timeout_ms=100,

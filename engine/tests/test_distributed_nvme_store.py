@@ -146,9 +146,25 @@ class TestNvmeStoreEndToEnd:
         )
 
         runner = RayJobRunner(job)
-        await runner.run()
+        try:
+            await runner.initialize()
+            await runner.run()
 
-        records = get_sink_records(self.collector_name)
+            records = get_sink_records(self.collector_name)
+            if len(records) != NUM_RECORDS:
+                from tests.utils.diagnostics import dump_data_loss_diagnostics
+
+                dump_data_loss_diagnostics(
+                    test_name="test_pipeline_data_integrity (nvme)",
+                    sink_data=records,
+                    expected_count=NUM_RECORDS,
+                    collector_name=self.collector_name,
+                    runner=runner,
+                    batch_size=100,
+                )
+        finally:
+            await runner.stop()
+
         assert len(records) == NUM_RECORDS, (
             f"Data integrity check failed: expected {NUM_RECORDS}, got {len(records)}"
         )

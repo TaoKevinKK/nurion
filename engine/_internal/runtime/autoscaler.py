@@ -53,11 +53,17 @@ class StageAutoscaleConfig:
     """
 
     enabled: bool = True
-    check_interval_s: float = field(default_factory=lambda: get_config().autoscaler_check_interval_s)
+    check_interval_s: float = field(
+        default_factory=lambda: get_config().autoscaler_check_interval_s
+    )
 
     # Scaling thresholds
-    scale_up_lag_threshold: int = field(default_factory=lambda: get_config().autoscaler_scale_up_lag)
-    scale_down_lag_threshold: int = field(default_factory=lambda: get_config().autoscaler_scale_down_lag)
+    scale_up_lag_threshold: int = field(
+        default_factory=lambda: get_config().autoscaler_scale_up_lag
+    )
+    scale_down_lag_threshold: int = field(
+        default_factory=lambda: get_config().autoscaler_scale_down_lag
+    )
 
     # AIMD cooldowns: scale UP fast, scale DOWN slow.
     cooldown_up_s: float = field(default_factory=lambda: get_config().autoscaler_cooldown_up_s)
@@ -135,7 +141,7 @@ class SimpleAutoscaler:
         allocated_gpu = 0.0
 
         for stage_id, master in masters.items():
-            if master._source is not None:
+            if master._source_manager is not None:
                 continue
             current = len(master._workers)
             headroom = master.stage.max_parallelism - current
@@ -223,7 +229,7 @@ class SimpleAutoscaler:
                 output_queue_size=output_stats.pending_count,
                 is_running=getattr(master, "_running", True),
                 is_finished=getattr(master, "_finished", False),
-                is_source=master._source is not None,
+                is_source=master._source_manager is not None,
             )
         return metrics
 

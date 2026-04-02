@@ -171,6 +171,8 @@ class TestExactlyOnceSemantics(StabilityTestBase):
         self.set_fault(FAULT_BEFORE_PROCESS, after_count=10)
 
         job = create_test_pipeline(
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
             num_records=NUM_RECORDS,
             batch_size=100,
             min_workers=2,
@@ -211,6 +213,8 @@ class TestExactlyOnceSemantics(StabilityTestBase):
         source_data = generate_test_data_with_checksum(NUM_RECORDS)
 
         job = create_test_pipeline(
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
             num_records=NUM_RECORDS,
             batch_size=100,
             min_workers=2,
@@ -261,6 +265,8 @@ class TestExactlyOnceSemantics(StabilityTestBase):
         self.set_fault(FAULT_AFTER_PROCESS, after_count=8)
 
         job = create_test_pipeline(
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
             num_records=NUM_RECORDS,
             batch_size=100,
             min_workers=2,
@@ -306,6 +312,8 @@ class TestExactlyOnceSemantics(StabilityTestBase):
         self.set_fault(FAULT_QUEUE_COMMIT, after_count=3)
 
         job = create_test_pipeline(
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
             num_records=NUM_RECORDS,
             batch_size=100,
             min_workers=2,
@@ -351,6 +359,8 @@ class TestCheckpointRecovery(StabilityTestBase):
         source_data = generate_test_data_with_checksum(NUM_RECORDS)
 
         job = create_test_pipeline(
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
             num_records=NUM_RECORDS,
             batch_size=100,
             min_workers=3,
@@ -393,6 +403,8 @@ class TestCheckpointRecovery(StabilityTestBase):
         source_data = generate_test_data_with_checksum(NUM_RECORDS)
 
         job = create_test_pipeline(
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
             num_records=NUM_RECORDS,
             batch_size=100,
             min_workers=4,
@@ -439,6 +451,8 @@ class TestCheckpointRecovery(StabilityTestBase):
         )
 
         job = create_test_pipeline(
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
             num_records=NUM_RECORDS,
             batch_size=100,
             min_workers=2,
@@ -530,6 +544,8 @@ class TestCheckpointRecovery(StabilityTestBase):
         source_data = generate_test_data_with_checksum(NUM_RECORDS)
 
         job = create_test_pipeline(
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
             num_records=NUM_RECORDS,
             batch_size=100,
             min_workers=2,
@@ -581,6 +597,8 @@ class TestDynamicScaling(StabilityTestBase):
         expected_count = NUM_RECORDS * EXPLODE_FACTOR
 
         job = create_test_pipeline(
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
             num_records=NUM_RECORDS,
             batch_size=100,
             min_workers=2,
@@ -615,6 +633,8 @@ class TestDynamicScaling(StabilityTestBase):
         source_data = generate_test_data_with_checksum(NUM_RECORDS)
 
         job = create_test_pipeline(
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
             num_records=NUM_RECORDS,
             batch_size=200,  # Larger batches = faster processing
             min_workers=1,
@@ -647,6 +667,8 @@ class TestDynamicScaling(StabilityTestBase):
         source_data = generate_test_data_with_checksum(NUM_RECORDS)
 
         job = create_test_pipeline(
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
             num_records=NUM_RECORDS,
             batch_size=100,
             min_workers=3,  # Must maintain at least 3
@@ -699,6 +721,8 @@ class TestDynamicScaling(StabilityTestBase):
         )
 
         job = create_test_pipeline(
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
             num_records=NUM_RECORDS,
             batch_size=100,
             min_workers=2,
@@ -754,6 +778,8 @@ class TestBackpressure(StabilityTestBase):
         source_data = generate_test_data_with_checksum(NUM_RECORDS)
 
         job = create_test_pipeline(
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
             num_records=NUM_RECORDS,
             batch_size=50,  # Many small batches
             min_workers=4,
@@ -789,6 +815,8 @@ class TestBackpressure(StabilityTestBase):
         self.set_fault(FAULT_QUEUE_PRODUCE, after_count=8)
 
         job = create_test_pipeline(
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
             num_records=NUM_RECORDS,
             batch_size=100,
             min_workers=2,
@@ -830,6 +858,8 @@ class TestBackpressure(StabilityTestBase):
         self.set_fault(FAULT_QUEUE_PRODUCE, after_count=15)
 
         job = create_test_pipeline(
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
             num_records=NUM_RECORDS,
             batch_size=50,
             min_workers=3,
@@ -880,6 +910,8 @@ class TestCombinedFaultScenarios(StabilityTestBase):
         self.set_fault(FAULT_BEFORE_PROCESS, after_count=10)
 
         job = create_test_pipeline(
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
             num_records=NUM_RECORDS,
             batch_size=100,
             min_workers=2,
@@ -917,6 +949,8 @@ class TestCombinedFaultScenarios(StabilityTestBase):
         self.set_fault(FAULT_AFTER_PROCESS, after_count=7)
 
         job = create_test_pipeline(
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
             num_records=NUM_RECORDS,
             batch_size=100,
             min_workers=2,
@@ -961,6 +995,8 @@ class TestCombinedFaultScenarios(StabilityTestBase):
         self.set_fault(FAULT_AFTER_PROCESS, after_count=6)
 
         job = create_test_pipeline(
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
             num_records=NUM_RECORDS,
             batch_size=100,
             min_workers=2,
@@ -1002,6 +1038,8 @@ class TestCombinedFaultScenarios(StabilityTestBase):
         self.set_fault(FAULT_QUEUE_FETCH, probability=0.05)
 
         job = create_test_pipeline(
+            claim_timeout_secs=10,
+            recovery_interval_secs=2,
             num_records=NUM_RECORDS,
             batch_size=100,
             min_workers=3,

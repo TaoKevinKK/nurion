@@ -28,10 +28,7 @@ def optional_dependency_placeholder(class_name: str, extra: str):
         except ImportError:
             MyClass = optional_dependency_placeholder("MyClass", "myextra")
     """
-    msg = (
-        f"{class_name} requires the [{extra}] extra. "
-        f"Install with: pip install engine[{extra}]"
-    )
+    msg = f"{class_name} requires the [{extra}] extra. Install with: pip install engine[{extra}]"
 
     class _Placeholder:
         def __init__(self, *args, **kwargs):

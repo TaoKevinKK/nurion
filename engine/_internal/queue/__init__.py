@@ -18,7 +18,7 @@ Example:
 
     client.create_queue("my-queue")
     client.push("my-queue", b"message data")
-    messages = client.claim("my-queue", batch_size=10)
+    messages, drained = client.claim("my-queue", batch_size=10)
     client.ack(
         "my-queue",
         [m.msg_id for m in messages],
