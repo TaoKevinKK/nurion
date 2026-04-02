@@ -32,18 +32,18 @@ duckdb = ["duckdb>=1.5.0"]
 # Dedup (MinHash)
 dedup = ["xxhash>=3.6.0"]
 
-# WebUI (dashboard + metrics)
+# WebUI (dashboard + profiling)
 webui = [
     "slatedb>=0.11.0",
     "fastapi>=0.135.0",
     "jinja2>=3.1.6",
     "uvicorn>=0.42.0",
     "sse-starlette>=3.3.0",
-    "prometheus-client>=0.24.0",
+    "py-spy>=0.4.1",
 ]
 
 # Model inference serving
-serve = ["py-spy>=0.4.1"]
+serve = ["prometheus-client>=0.24.0"]
 
 # Spark integration
 spark = ["nurion-raydp", "pyspark==3.5.6"]

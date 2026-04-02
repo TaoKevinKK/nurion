@@ -28,11 +28,12 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, Optional
 
 import ray
 
+from _internal.config import get_config
 from _internal.runtime.queue_stats import QueueStatsClient, StageQueueConfig
 from _internal.utils.logging import create_ray_logger
 
@@ -43,19 +44,25 @@ if TYPE_CHECKING:
 
 @dataclass
 class StageAutoscaleConfig:
-    """Configuration for the autoscaler."""
+    """Configuration for the autoscaler.
+
+    Defaults are sourced from centralized :func:`_internal.config.get_config`
+    so that ``NURION_AUTOSCALER_*`` env vars (or :func:`configure` calls)
+    take effect without touching per-stage configs.  Explicit values passed
+    at construction time always win.
+    """
 
     enabled: bool = True
-    check_interval_s: float = 10.0
+    check_interval_s: float = field(default_factory=lambda: get_config().autoscaler_check_interval_s)
 
     # Scaling thresholds
-    scale_up_lag_threshold: int = 500
-    scale_down_lag_threshold: int = 100
+    scale_up_lag_threshold: int = field(default_factory=lambda: get_config().autoscaler_scale_up_lag)
+    scale_down_lag_threshold: int = field(default_factory=lambda: get_config().autoscaler_scale_down_lag)
 
     # AIMD cooldowns: scale UP fast, scale DOWN slow.
-    cooldown_up_s: float = 15.0
-    cooldown_down_s: float = 60.0
-    max_scale_step: int = 32
+    cooldown_up_s: float = field(default_factory=lambda: get_config().autoscaler_cooldown_up_s)
+    cooldown_down_s: float = field(default_factory=lambda: get_config().autoscaler_cooldown_down_s)
+    max_scale_step: int = field(default_factory=lambda: get_config().autoscaler_max_scale_step)
 
 
 @dataclass

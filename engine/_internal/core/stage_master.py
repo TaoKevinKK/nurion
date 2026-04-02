@@ -29,7 +29,6 @@ QueueGroup Model:
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from typing import TYPE_CHECKING, Any, Dict, Optional, Protocol
 
@@ -50,11 +49,7 @@ if TYPE_CHECKING:
     from _internal.core.stage import Stage, StageRuntime
     from _internal.runtime.queue_stats import QueueRef
 
-# Stage-level no-progress timeout. If no worker successfully processes a
-# message within this window, the stage is marked as failed. Prevents jobs
-# from hanging forever due to broker overload, deadlocks, or data issues.
-# Override via environment variable; 0 disables.
-_NO_PROGRESS_TIMEOUT_S = float(os.environ.get("NURION_NO_PROGRESS_TIMEOUT_S", "600"))
+from _internal.config import get_config
 
 
 class BackpressureProvider(Protocol):
@@ -337,13 +332,13 @@ class StageMaster:
 
                 # No-progress timeout: if no worker has completed successfully
                 # within the window, assume the stage is stuck and fail fast.
-                if _NO_PROGRESS_TIMEOUT_S > 0 and self._last_progress_time is not None:
+                if get_config().stage_no_progress_timeout_s > 0 and self._last_progress_time is not None:
                     no_progress_s = time.monotonic() - self._last_progress_time
-                    if no_progress_s > _NO_PROGRESS_TIMEOUT_S:
+                    if no_progress_s > get_config().stage_no_progress_timeout_s:
                         self._failed = True
                         self._failure_message = (
                             f"Stage {self.stage_id}: no progress for "
-                            f"{no_progress_s:.0f}s (limit: {_NO_PROGRESS_TIMEOUT_S:.0f}s)"
+                            f"{no_progress_s:.0f}s (limit: {get_config().stage_no_progress_timeout_s:.0f}s)"
                         )
                         self.logger.error(self._failure_message)
                         break
@@ -475,8 +470,12 @@ class StageMaster:
         except Exception as e:
             self.logger.debug(f"Failed to write worker state: {e}")
 
-    def _mark_finished_with_retry(self, queue_client, max_retries: int = 3) -> None:
+    def _mark_finished_with_retry(
+        self, queue_client, max_retries: int | None = None
+    ) -> None:
         """Mark output group as finished with retries to prevent downstream hangs."""
+        if max_retries is None:
+            max_retries = get_config().stage_mark_finished_max_retries
         for attempt in range(max_retries):
             try:
                 queue_client.mark_group_finished(self._output_group_name)
@@ -536,8 +535,9 @@ class StageMaster:
         if not self._queue_client or not self.upstream:
             return
 
-        poll_interval = 0.1
-        max_consecutive_errors = 10
+        cfg = get_config()
+        poll_interval = cfg.stage_completion_poll_interval_s
+        max_consecutive_errors = cfg.stage_completion_max_errors
         consecutive_errors = 0
 
         while self._running:

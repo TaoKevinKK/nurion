@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import ray
 
+from _internal.config import get_config
 from _internal.core.stage_worker import OutputRouting, StageWorker, WorkerRuntime
 from _internal.utils.logging import create_ray_logger
 
@@ -305,7 +306,7 @@ class WorkerManager:
         """Stop all workers gracefully."""
         for worker_id, worker in list(self._workers.items()):
             try:
-                ray.get(worker.stop.remote(), timeout=5)
+                ray.get(worker.stop.remote(), timeout=get_config().worker_stop_timeout_s)
             except Exception as e:
                 self._logger.warning(f"Error stopping worker {worker_id}: {e}")
 

@@ -151,6 +151,28 @@ class TestStressScenarios:
 
         sink_data = get_sink_records(self.collector_name)
 
+        if len(sink_data) != expected_count:
+            # Diagnostic: identify exactly which IDs are missing
+            expected_ids = {i for i in range(NUM_RECORDS) if i % FILTER_MODULO == FILTER_REMAINDER}
+            actual_ids = {r["id"] for r in sink_data}
+            missing_ids = sorted(expected_ids - actual_ids)
+            extra_ids = sorted(actual_ids - expected_ids)
+            # Identify which batch(es) are affected
+            missing_batches = sorted({mid // BATCH_SIZE for mid in missing_ids})
+            print(f"\n=== DIAGNOSTIC: Data loss in test_many_small_batches_stress ===")
+            print(f"Expected {expected_count}, got {len(sink_data)}, missing {len(missing_ids)} IDs")
+            print(f"Missing IDs (first 20): {missing_ids[:20]}")
+            print(f"Extra IDs (first 20): {extra_ids[:20]}")
+            print(f"Affected batches (split indices): {missing_batches}")
+            # Check collector dedup stats
+            try:
+                collector = ray.get_actor(self.collector_name)
+                dup_count = ray.get(collector.get_duplicate_count.remote())
+                print(f"Collector duplicate count: {dup_count}")
+            except Exception as e:
+                print(f"Failed to get dedup stats: {e}")
+            print(f"=== END DIAGNOSTIC ===\n")
+
         assert validator.verify_count(sink_data, expected_count), (
             f"Data loss with small batches: expected {expected_count}, got {len(sink_data)}"
         )
@@ -374,6 +396,25 @@ class TestLongRunningStability:
         )
 
         sink_data = get_sink_records(self.collector_name)
+
+        if len(sink_data) != expected_count:
+            actual_keys = {(r["id"], r.get("copy_idx", 0)) for r in sink_data}
+            expected_keys = {(i, c) for i in range(NUM_RECORDS) for c in range(EXPLODE_FACTOR)}
+            missing = sorted(expected_keys - actual_keys)
+            missing_source_ids = sorted({k[0] for k in missing})
+            missing_batches = sorted({mid // BATCH_SIZE for mid in missing_source_ids})
+            print(f"\n=== DIAGNOSTIC: Data loss in test_sustained_chaos ===")
+            print(f"Expected {expected_count}, got {len(sink_data)}, missing {len(missing)} records")
+            print(f"Missing source IDs (first 20): {missing_source_ids[:20]}")
+            print(f"Affected batches (split indices): {missing_batches}")
+            print(f"Total kills: {total_kills}")
+            try:
+                collector = ray.get_actor(self.collector_name)
+                dup_count = ray.get(collector.get_duplicate_count.remote())
+                print(f"Collector duplicate count: {dup_count}")
+            except Exception as e:
+                print(f"Failed to get dedup stats: {e}")
+            print(f"=== END DIAGNOSTIC ===\n")
 
         assert validator.verify_count(sink_data, expected_count), (
             f"Data loss in sustained chaos: expected {expected_count}, got {len(sink_data)}"

@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 import ray
 
+from _internal.config import get_config
 from _internal.core.job import Job, WorkflowFlowConfig
 
 if TYPE_CHECKING:
@@ -579,7 +580,7 @@ class RayJobRunner:
                 if not self._master_tasks:
                     break
 
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(get_config().main_loop_sleep_s)
 
             self.logger.info("Pipeline completed successfully")
             return self.get_status()

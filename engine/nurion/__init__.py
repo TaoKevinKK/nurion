@@ -9,6 +9,7 @@ from pkgutil import extend_path
 __path__ = extend_path(__path__, __name__)
 
 from _internal import __version__ as __version__
+from _internal.config import EngineConfig, configure, get_config
 from _internal.core.job import Job, JobConfig, WebUIConfig
 from _internal.core.models import Split, SplitPayload
 from _internal.core.operator import Operator, OperatorConfig, OperatorRuntime, operator
@@ -51,6 +52,9 @@ from _internal.utils.arrow_tensor import arrow_to_ndarray_list, ndarray_list_to_
 
 __all__ = [
     "__version__",
+    "EngineConfig",
+    "configure",
+    "get_config",
     "Job",
     "JobConfig",
     "WebUIConfig",

@@ -32,6 +32,7 @@ from tenacity import (
     wait_exponential,
 )
 
+from _internal.config import get_config
 from _internal.core.models import SourceQueueMessage, Split
 from _internal.core.source import DirectProduceContext, DirectProducer, SplitPlanner
 from _internal.queue.errors import QueueFullError
@@ -208,7 +209,7 @@ class SourceManager:
         self._logger.info(f"Generating splits for source {self._stage_id}")
 
         split_iterator = self._source.plan_splits(self._stage_id)
-        backpressure_check_interval = 10
+        backpressure_check_interval = get_config().source_backpressure_check_interval
         consecutive_pauses = 0
         idx = 0
 
@@ -231,7 +232,7 @@ class SourceManager:
                             f"Source {self._stage_id} paused for "
                             f"{consecutive_pauses} consecutive backpressure checks"
                         )
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(get_config().source_backpressure_pause_sleep_s)
                     if not running_fn():
                         break
 
@@ -263,8 +264,9 @@ class SourceManager:
         """Poll planner queue until drained, then notify workers to exit."""
         assert self._planner_queue_name is not None
 
-        poll_interval = 0.1
-        max_consecutive_errors = 10
+        cfg = get_config()
+        poll_interval = cfg.stage_completion_poll_interval_s
+        max_consecutive_errors = cfg.stage_completion_max_errors
         consecutive_errors = 0
 
         while running_fn():
@@ -298,14 +300,17 @@ class SourceManager:
           downstream workers drain, up to 60 attempts (~ 60s).
         """
 
+        cfg = get_config()
+
         def before_sleep_callback(retry_state: RetryCallState) -> None:
             exc = retry_state.outcome.exception() if retry_state.outcome else None
             self._logger.warning(
-                f"Retry {retry_state.attempt_number}/3 producing split {split.split_id}: {exc}"
+                f"Retry {retry_state.attempt_number}/{cfg.source_produce_max_retries} "
+                f"producing split {split.split_id}: {exc}"
             )
 
         @retry(
-            stop=stop_after_attempt(3),
+            stop=stop_after_attempt(cfg.source_produce_max_retries),
             wait=wait_exponential(multiplier=0.1, min=0.1, max=1.0),
             retry=retry_if_exception_type(_RETRYABLE_EXCEPTIONS),
             before_sleep=before_sleep_callback,
@@ -321,7 +326,7 @@ class SourceManager:
             )
             queue_client.push(self._planner_queue_name, message.to_bytes())
 
-        max_queue_full_retries = 60
+        max_queue_full_retries = cfg.source_queue_full_max_retries
         for attempt in range(max_queue_full_retries):
             try:
                 await _do_produce()
@@ -333,7 +338,7 @@ class SourceManager:
                         f"waiting for downstream to drain "
                         f"(attempt {attempt + 1}/{max_queue_full_retries})"
                     )
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(cfg.source_queue_full_retry_sleep_s)
                 continue
         raise RuntimeError(
             f"Source {self._stage_id}: bounded queue full for "

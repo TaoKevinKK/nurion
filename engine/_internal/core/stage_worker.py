@@ -30,7 +30,6 @@ Source workers claim from planner queue (single queue, not QueueGroup).
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, NamedTuple, Optional
@@ -57,10 +56,7 @@ from _internal.testing.fault_injection import (
 from _internal.utils.logging import create_ray_logger
 from _internal.webui.state.schema import encode_json, event_key, job_namespace, split_key
 
-# Worker-level idle timeout: if no messages claimed within this window,
-# assume broker is unresponsive and fail fast (RecoveryManager respawns).
-# Override via environment variable; 0 disables.
-_IDLE_TIMEOUT_S = float(os.environ.get("NURION_WORKER_IDLE_TIMEOUT_S", "300"))
+from _internal.config import get_config
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -248,7 +244,7 @@ class StageWorker:
                 records = self.queue_client.claim(
                     upstream_queue,
                     batch_size=self._batch_size,
-                    timeout_ms=1000,
+                    timeout_ms=get_config().worker_claim_timeout_ms,
                 )
 
                 if records:
@@ -261,7 +257,7 @@ class StageWorker:
                             pending.clear()
                         break
                     idle_s = time.time() - last_claimed_time
-                    if _IDLE_TIMEOUT_S > 0 and idle_s > _IDLE_TIMEOUT_S:
+                    if get_config().worker_idle_timeout_s > 0 and idle_s > get_config().worker_idle_timeout_s:
                         raise RuntimeError(
                             f"Worker {self.worker_id} idle for {idle_s:.0f}s "
                             f"— broker may be unresponsive. Failing fast."
@@ -270,7 +266,7 @@ class StageWorker:
                     if pending:
                         await self._process_and_ack(pending)
                         pending.clear()
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(get_config().worker_idle_sleep_s)
                     continue
 
                 # Process complete groups
@@ -289,7 +285,7 @@ class StageWorker:
                     self.logger.error(f"Worker {self.worker_id} broker error: {e}")
                     raise RuntimeError("broker_unavailable") from e
                 self.logger.error(f"Error in worker {self.worker_id}: {e}")
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(get_config().worker_error_sleep_s)
 
     async def _run_group_claim_loop(self) -> None:
         """Claim from a QueueGroup via broker-side partition selection.
@@ -323,7 +319,7 @@ class StageWorker:
                 records, source_queue, _ = self.queue_client.claim_from_group(
                     group_name,
                     batch_size=self._batch_size,
-                    timeout_ms=1000,
+                    timeout_ms=get_config().worker_claim_timeout_ms,
                     assigned_partitions=assigned,
                     allow_steal=True,
                     steal_pending_threshold=0,
@@ -349,7 +345,7 @@ class StageWorker:
                         break
                     # Idle timeout: broker may be deadlocked
                     idle_s = time.time() - last_claimed_time
-                    if _IDLE_TIMEOUT_S > 0 and idle_s > _IDLE_TIMEOUT_S:
+                    if get_config().worker_idle_timeout_s > 0 and idle_s > get_config().worker_idle_timeout_s:
                         raise RuntimeError(
                             f"Worker {self.worker_id} idle for {idle_s:.0f}s "
                             f"without claiming any messages — broker may be "
@@ -362,7 +358,7 @@ class StageWorker:
                         )
                         pending.clear()
                         current_source_queue = None
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(get_config().worker_idle_sleep_s)
                     continue
 
                 # Process complete groups
@@ -387,7 +383,7 @@ class StageWorker:
                 # Clear stale pending records to avoid mixing with next iteration
                 pending.clear()
                 current_source_queue = None
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(get_config().worker_error_sleep_s)
 
     # =========================================================================
     # Process and ack (unified for single and merge)
@@ -739,7 +735,8 @@ class StageWorker:
 
         # Retry ack_and_scatter if downstream queue is full (bounded queue).
         # The worker should wait and retry rather than dying and respawning.
-        max_retries = 30
+        cfg = get_config()
+        max_retries = cfg.worker_queue_full_max_retries
         for attempt in range(max_retries):
             try:
                 self.queue_client.ack_and_scatter(
@@ -758,7 +755,7 @@ class StageWorker:
                         f"Worker {self.worker_id}: downstream queue full, "
                         f"waiting for drain (attempt {attempt + 1}/{max_retries})"
                     )
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(cfg.worker_queue_full_retry_sleep_s)
                 continue
         else:
             raise RuntimeError(
@@ -775,7 +772,8 @@ class StageWorker:
     ) -> None:
         """ack_and_forward with QueueFull retry for bounded queues."""
         assert self.queue_client is not None
-        max_retries = 30
+        cfg = get_config()
+        max_retries = cfg.worker_queue_full_max_retries
         for attempt in range(max_retries):
             try:
                 self.queue_client.ack_and_forward(
@@ -794,7 +792,7 @@ class StageWorker:
                         f"Worker {self.worker_id}: downstream queue full, "
                         f"waiting for drain (attempt {attempt + 1}/{max_retries})"
                     )
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(cfg.worker_queue_full_retry_sleep_s)
                 continue
         raise RuntimeError(
             f"Worker {self.worker_id}: downstream queue full for {max_retries}s, giving up"
