@@ -100,10 +100,23 @@ class TestStressScenarios:
         try:
             await runner.initialize()
             await asyncio.wait_for(runner.run(), timeout=120)
+
+            sink_data = get_sink_records(self.collector_name)
+
+            if len(sink_data) != expected_count:
+                expected_keys = {(i, c) for i in range(NUM_RECORDS) for c in range(EXPLODE_FACTOR)}
+                dump_data_loss_diagnostics(
+                    test_name="test_high_throughput_stress",
+                    sink_data=sink_data,
+                    expected_count=expected_count,
+                    collector_name=self.collector_name,
+                    runner=runner,
+                    batch_size=500,
+                    expected_ids=expected_keys,
+                    composite_key_fields=["id", "copy_idx"],
+                )
         finally:
             await runner.stop()
-
-        sink_data = get_sink_records(self.collector_name)
 
         assert validator.verify_count(sink_data, expected_count), (
             f"Data loss in high throughput: expected {expected_count}, got {len(sink_data)}"
@@ -199,10 +212,20 @@ class TestStressScenarios:
         try:
             await runner.initialize()
             await asyncio.wait_for(runner.run(), timeout=120)
+
+            sink_data = get_sink_records(self.collector_name)
+
+            if len(sink_data) != NUM_RECORDS:
+                dump_data_loss_diagnostics(
+                    test_name="test_deep_pipeline_stress",
+                    sink_data=sink_data,
+                    expected_count=NUM_RECORDS,
+                    collector_name=self.collector_name,
+                    runner=runner,
+                    batch_size=200,
+                )
         finally:
             await runner.stop()
-
-        sink_data = get_sink_records(self.collector_name)
 
         assert validator.verify_count(sink_data, NUM_RECORDS), (
             f"Data loss in deep pipeline: expected {NUM_RECORDS}, got {len(sink_data)}"
@@ -299,13 +322,27 @@ class TestLongRunningStability:
                 except asyncio.CancelledError:
                     pass
 
+            sink_data = get_sink_records(self.collector_name)
+
+            if len(sink_data) != expected_count:
+                filtered_ids = {
+                    i for i in range(NUM_RECORDS) if i % FILTER_MODULO == FILTER_REMAINDER
+                }
+                expected_keys = {(i, c) for i in filtered_ids for c in range(EXPLODE_FACTOR)}
+                dump_data_loss_diagnostics(
+                    test_name="test_long_running_stability",
+                    sink_data=sink_data,
+                    expected_count=expected_count,
+                    collector_name=self.collector_name,
+                    runner=runner,
+                    batch_size=100,
+                    expected_ids=expected_keys,
+                    composite_key_fields=["id", "copy_idx"],
+                )
         finally:
             await runner.stop()
 
-        # Force garbage collection
         gc.collect()
-
-        sink_data = get_sink_records(self.collector_name)
 
         assert validator.verify_count(sink_data, expected_count), (
             f"Data loss in long run: expected {expected_count}, got {len(sink_data)}"

@@ -202,14 +202,24 @@ class StageMaster:
         )
 
     def _has_unprocessed_messages(self) -> bool:
-        """Check if upstream queue(s) still have unprocessed messages."""
+        """Check if upstream queue(s) still have pending or claimed messages.
+
+        Uses raw message counts (not ``all_drained``) because the master
+        needs to know "is there actual work?" — regardless of whether
+        upstream has called ``mark_finished`` yet.  The ``finished`` flag
+        is for worker exit decisions (via broker ``upstream_drained``),
+        not for the master's spawn/finish logic.
+        """
         if not self._queue_client or not self.upstream:
             return False
 
         try:
             if self.upstream.is_group:
                 result = self._queue_client.is_group_finished(self.upstream.name)
-                return not result.get("all_drained", False)
+                for p in result.get("partitions", []):
+                    if p.get("pending_count", 0) > 0 or p.get("claimed_count", 0) > 0:
+                        return True
+                return False
 
             stats = self._queue_client.get_stats(self.upstream.name)
             pending = stats.get("pending_count", 0)
@@ -373,27 +383,22 @@ class StageMaster:
                     self._write_worker_state(wid, "FAILED")
 
                 if failed:
-                    # Skip recovery when queue is fully drained — worker failures
-                    # are expected (idle timeout as safety valve).
-                    if not self._has_unprocessed_messages():
-                        self.logger.info(
-                            f"Stage {self.stage_id}: queue drained, "
-                            f"not recovering {len(failed)} workers"
+                    # With broker-driven exit, workers exit cleanly via
+                    # upstream_drained=True (completed). Only crashes produce
+                    # failures — always recover.
+                    self._recovery_manager.record_failures(
+                        len(failed), self._worker_manager.worker_count
+                    )
+                    result = await self._recovery_manager.recover_failed_workers(
+                        failed_worker_ids=failed,
+                    )
+                    if result.should_give_up:
+                        self._state = _StageState.FAILED
+                        self._failure_message = result.give_up_reason
+                        self.logger.error(
+                            f"Stage {self.stage_id} giving up: {result.give_up_reason}"
                         )
-                    else:
-                        self._recovery_manager.record_failures(
-                            len(failed), self._worker_manager.worker_count
-                        )
-                        result = await self._recovery_manager.recover_failed_workers(
-                            failed_worker_ids=failed,
-                        )
-                        if result.should_give_up:
-                            self._state = _StageState.FAILED
-                            self._failure_message = result.give_up_reason
-                            self.logger.error(
-                                f"Stage {self.stage_id} giving up: {result.give_up_reason}"
-                            )
-                            break
+                        break
                 if completed:
                     self._last_progress_time = time.monotonic()
                     self._recovery_manager.record_success()
@@ -404,6 +409,23 @@ class StageMaster:
             # --- Sink finalize ---
             if self._sink_manager and self._state != _StageState.FAILED:
                 await self._sink_manager.finalize(queue_client)
+
+            # Verify output queue is empty before marking finished.
+            # If there are still pending/claimed messages in our output,
+            # marking finished is premature — downstream might miss them.
+            try:
+                out_result = queue_client.is_group_finished(self._output_group_name)
+                for p in out_result.get("partitions", []):
+                    out_pending = p.get("pending_count", 0)
+                    out_claimed = p.get("claimed_count", 0)
+                    if out_pending > 0 or out_claimed > 0:
+                        self.logger.warning(
+                            f"Stage {self.stage_id}: output group has "
+                            f"pending={out_pending} claimed={out_claimed} "
+                            f"at mark_finished time — downstream may lose data!"
+                        )
+            except Exception:
+                pass
 
             # Mark output queue(s) as finished (retry up to 3 times — failure
             # would leave downstream waiting forever)
