@@ -31,7 +31,7 @@ from __future__ import annotations
 import asyncio
 import enum
 import time
-from typing import TYPE_CHECKING, Any, Dict, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from _internal.core.managers import RecoveryManager, SinkManager, SourceManager, WorkerManager
 from _internal.core.models import (
@@ -51,12 +51,6 @@ if TYPE_CHECKING:
     from _internal.runtime.queue_stats import QueueRef
 
 from _internal.config import get_config
-
-
-class BackpressureProvider(Protocol):
-    def is_backpressure_active(self, stage_id: str) -> bool: ...
-
-    def should_pause(self, stage_id: str) -> bool: ...
 
 
 __all__ = [
@@ -117,12 +111,14 @@ class StageMaster:
         self._state = _StageState.INIT
         self._failure_message: Optional[str] = None
         self._start_time: Optional[float] = None
-        self._last_progress_time: Optional[float] = None  # set when first worker completes
+        self._last_completion_time: Optional[float] = None  # set when first worker completes
 
         # Worker and recovery managers (created in _init_managers)
         self._worker_manager: Optional[WorkerManager] = None
         self._recovery_manager: Optional[RecoveryManager] = None
-        self._backpressure_provider: Optional[BackpressureProvider] = None
+
+        # Source pause flag — set by PipelineController each tick
+        self._source_paused: bool = False
 
         # Source manager (SplitPlanner or DirectProducer)
         source = stage.operator_config.create_source()
@@ -156,11 +152,13 @@ class StageMaster:
         self.logger.info(f"Connected to broker at {broker_url}")
 
         # All inter-stage output uses QueueGroup.
-        # Divide total budget by partition count so aggregate stays within budget.
-        # Floor of 1 prevents integer division to zero (which means unlimited).
+        # Divide total budget by partition count.  Use ceil so the aggregate is
+        # at most num_partitions messages over budget (each partition needs >= 1).
+        import math
+
         total_bound = self.runtime.max_pending_total
         per_partition = (
-            max(total_bound // max(self._num_partitions, 1), 1) if total_bound > 0 else 0
+            max(math.ceil(total_bound / max(self._num_partitions, 1)), 1) if total_bound > 0 else 0
         )
         self._queue_client.create_queue_group(
             self._output_group_name,
@@ -288,7 +286,7 @@ class StageMaster:
         if self._source_manager is not None and not self._source_manager.is_direct_producer:
             self._source_manager.start_split_production(
                 queue_client,
-                backpressure_fn=self._check_backpressure,
+                pause_fn=lambda: self._source_paused,
                 running_fn=lambda: self._state == _StageState.RUNNING,
             )
 
@@ -335,30 +333,15 @@ class StageMaster:
         # --- Worker-based run loop ---
         assert self._worker_manager is not None
         assert self._recovery_manager is not None
-        self._last_progress_time = time.monotonic()
+        self._last_completion_time = time.monotonic()
 
         try:
             while self._state == _StageState.RUNNING:
-                # Fail fast if the background split-production task has crashed
-                # (e.g., schema mismatch detected inside plan_splits).
+                # Fail fast if background tasks have crashed
                 if self._source_manager:
                     self._source_manager.raise_if_production_failed()
-
-                # No-progress timeout: if no worker has completed successfully
-                # within the window, assume the stage is stuck and fail fast.
-                if (
-                    get_config().stage_no_progress_timeout_s > 0
-                    and self._last_progress_time is not None
-                ):
-                    no_progress_s = time.monotonic() - self._last_progress_time
-                    if no_progress_s > get_config().stage_no_progress_timeout_s:
-                        self._state = _StageState.FAILED
-                        self._failure_message = (
-                            f"Stage {self.stage_id}: no progress for "
-                            f"{no_progress_s:.0f}s (limit: {get_config().stage_no_progress_timeout_s:.0f}s)"
-                        )
-                        self.logger.error(self._failure_message)
-                        break
+                if self._sink_manager:
+                    self._sink_manager.raise_if_commit_failed()
 
                 if self._worker_manager.worker_count == 0:
                     if self._has_unprocessed_messages():
@@ -400,7 +383,7 @@ class StageMaster:
                         )
                         break
                 if completed:
-                    self._last_progress_time = time.monotonic()
+                    self._last_completion_time = time.monotonic()
                     self._recovery_manager.record_success()
 
                 if self._state == _StageState.FAILED:
@@ -427,13 +410,15 @@ class StageMaster:
             except Exception:
                 pass
 
-            # Mark output queue(s) as finished (retry up to 3 times — failure
-            # would leave downstream waiting forever)
+            # Mark output queue(s) as finished — failure would leave downstream
+            # waiting forever, so treat it as a stage failure.
             try:
                 self._mark_finished_with_retry(queue_client)
             except Exception as mark_err:
                 self.logger.error(f"Failed to mark finished: {mark_err}")
-                # Fall through to write state and raise original failure if any
+                if self._state != _StageState.FAILED:
+                    self._state = _StageState.FAILED
+                    self._failure_message = f"Failed to mark output as finished: {mark_err}"
 
             self._write_stage_state(
                 status="FAILED" if self._state == _StageState.FAILED else "COMPLETED"
@@ -463,18 +448,33 @@ class StageMaster:
         self.logger.info(f"Stage {self.stage_id} stopped")
 
     # =========================================================================
-    # Helpers
+    # Controller interface (called by PipelineController)
     # =========================================================================
 
-    async def _check_backpressure(self) -> bool:
-        """Check if we should pause production due to downstream backpressure."""
-        provider = self._backpressure_provider
-        if not provider:
-            return False
-        try:
-            return provider.should_pause(self.stage_id)
-        except Exception:
-            return False
+    def set_source_paused(self, paused: bool) -> None:
+        """Set source pause flag (called by PipelineController each tick)."""
+        self._source_paused = paused
+
+    def fail(self, reason: str) -> None:
+        """Fail this stage (called by PipelineController on liveness timeout)."""
+        if self._state == _StageState.RUNNING:
+            self._state = _StageState.FAILED
+            self._failure_message = f"Stage {self.stage_id}: {reason}"
+            self.logger.error(self._failure_message)
+
+    def reset_progress_timer(self) -> None:
+        """Reset progress timer (called by controller when output is saturated)."""
+        self._last_completion_time = time.monotonic()
+
+    def report_completion_age(self) -> float:
+        """Seconds since last worker completion (used by controller for liveness)."""
+        if self._last_completion_time is None:
+            return 0.0
+        return time.monotonic() - self._last_completion_time
+
+    # =========================================================================
+    # Helpers
+    # =========================================================================
 
     def _write_worker_state(self, worker_id: str, status: str, **extra: Any) -> None:
         """Write worker lifecycle metadata into Anvil state."""
@@ -510,7 +510,8 @@ class StageMaster:
             except Exception as e:
                 if attempt == max_retries - 1:
                     self.logger.error(
-                        f"Failed to mark group {self._output_group_name} as finished after {max_retries} attempts: {e}"
+                        f"Failed to mark group {self._output_group_name} "
+                        f"as finished after {max_retries} attempts: {e}"
                     )
                     raise
                 self.logger.warning(
@@ -565,12 +566,12 @@ class StageMaster:
         """Get number of output partitions (>= 1; 1 for non-shuffle)."""
         return self._num_partitions
 
-    def get_backpressure_input(self) -> Optional["QueueRef"]:
-        """Get input queue reference for backpressure monitoring."""
+    def get_input_ref(self) -> Optional["QueueRef"]:
+        """Get input queue reference (for controller stats collection)."""
         return self.upstream
 
-    def get_backpressure_output(self) -> "QueueRef":
-        """Get output queue reference for backpressure monitoring."""
+    def get_output_ref(self) -> "QueueRef":
+        """Get output queue reference (for controller stats collection)."""
         from _internal.runtime.queue_stats import QueueRef
 
         if self._sink_manager:
@@ -598,9 +599,7 @@ class StageMaster:
             is_finished=self._state == _StageState.FINISHED,
             failed=self._state == _StageState.FAILED,
             failure_message=self._failure_message,
-            backpressure_active=self._backpressure_provider.is_backpressure_active(self.stage_id)
-            if self._backpressure_provider
-            else False,
+            backpressure_active=self._source_paused,
         )
 
     async def scale_down(self, count: int) -> int:
@@ -646,9 +645,6 @@ class StageMaster:
             f"(now {self._worker_manager.worker_count} workers)"
         )
         return added
-
-    def set_backpressure_provider(self, provider: BackpressureProvider) -> None:
-        self._backpressure_provider = provider
 
     async def cleanup_queue(self) -> None:
         if self._queue_client:

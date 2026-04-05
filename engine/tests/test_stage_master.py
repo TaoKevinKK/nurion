@@ -315,20 +315,20 @@ class TestSourceManagerBackpressure:
             def cleanup(self) -> None:
                 pass
 
-        # Returns True (pause) for the first 3 calls at idx=0, then False.
-        call_count = 0
+        # Synchronous pause flag: paused for first few checks, then cleared.
+        pause_calls = 0
         running_flag = [True]
 
-        async def backpressure_fn():
-            nonlocal call_count
-            call_count += 1
-            return call_count <= 3
+        def pause_fn():
+            nonlocal pause_calls
+            pause_calls += 1
+            return pause_calls <= 3
 
         manager = SourceManager(_StubPlanner(), "job_bp", "stage_bp")
 
         manager.start_split_production(
             queue_client=anvil_backend.client,
-            backpressure_fn=backpressure_fn,
+            pause_fn=pause_fn,
             running_fn=lambda: running_flag[0],
         )
 

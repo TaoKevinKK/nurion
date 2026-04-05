@@ -16,8 +16,7 @@
 | Add a sink | `_internal/operators/sinks/<name>.py` | Config may implement `create_sink_committer()` |
 | Change split routing / stage lifecycle | `core/stage_master.py` | See architecture.md for StageMaster lifecycle |
 | Change claim-process-ack loop | `core/stage_worker.py` | Also update `architecture.md` data flow |
-| Change worker scaling | `runtime/autoscaler.py` | Uses `QueueStatsClient` for decisions |
-| Change backpressure monitoring | `runtime/backpressure.py` | Sends `BackpressureSignal` to `StageMaster` |
+| Change scaling / flow control / liveness | `runtime/pipeline_controller.py` | Unified controller; see `pipeline-controller.md` |
 | Change job orchestration / stage ordering | `runtime/ray_runner.py` | |
 | Change checkpoint / recovery | `core/fault_tolerance.py` + `core/managers/recovery_manager.py` | See design doc |
 | Change how workers spawn/die | `core/managers/worker_manager.py` | |
@@ -145,7 +144,8 @@ Check before proposing architectural changes:
 | Topic | File |
 |---|---|
 | Checkpoint & recovery (deprecated) | `docs/design/deprecated/checkpoint-and-recovery.md` |
-| Worker auto-scaling | `docs/design/dynamic-worker-scaling.md` |
+| Pipeline controller (scaling + flow control + liveness) | `docs/design/pipeline-controller.md` |
+| Worker auto-scaling (deprecated) | `docs/design/dynamic-worker-scaling.md` |
 | GPU scheduling | `docs/design/gpu-scheduling-and-routing.md` |
 | LLM inference | `docs/design/llm-inference.md` |
 | Exactly-once semantics (deprecated) | `docs/design/deprecated/exactly-once-semantics.md` |

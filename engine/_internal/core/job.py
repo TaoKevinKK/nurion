@@ -22,7 +22,6 @@ from _internal.core.stage import Stage
 
 if TYPE_CHECKING:
     from _internal.runtime.ray_runner import RayJobRunner
-    from _internal.runtime.autoscaler import StageAutoscaleConfig
 
 
 @dataclass
@@ -66,7 +65,6 @@ class JobConfig:
         claim_timeout_secs: Seconds before claimed messages are reclaimed from dead workers
         recovery_interval_secs: Interval between recovery task runs
         ray_init_kwargs: Arguments to pass to ray.init()
-        autoscale_config: Configuration for autoscaling (None to disable)
         webui: WebUI debugging interface configuration
         payload_store_uri: URI for the SplitPayloadStore backend.
             ``ray://`` (default) uses Ray Object Store; any fsspec-compatible URI
@@ -79,7 +77,7 @@ class JobConfig:
     claim_timeout_secs: float = 60.0  # Default: 60s before reclaiming from dead workers
     recovery_interval_secs: float = 10.0  # Default: check every 10s for expired claims
     ray_init_kwargs: Dict[str, Any] = field(default_factory=dict)
-    autoscale_config: Optional["StageAutoscaleConfig"] = None
+    autoscale_enabled: bool = False
     webui: WebUIConfig = field(default_factory=WebUIConfig)
     payload_store_uri: str = "ray://"
     payload_store_options: Dict[str, Any] = field(default_factory=dict)

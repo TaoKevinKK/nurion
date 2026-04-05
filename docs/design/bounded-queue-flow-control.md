@@ -5,6 +5,9 @@
 > resource dimensions is complex and fragile; bounding the queue solves all of
 > them implicitly).
 > Builds on: `dynamic-worker-scaling.md` (AIMD autoscaler — keep, extend signals).
+> **Control-plane implementation:** [`pipeline-controller.md`](pipeline-controller.md)
+> — `PipelineController` is the unified control loop that implements §4
+> (autoscaler signals) and §3.2 (source rate control) from this doc.
 > **Update this doc when flow control strategy changes.**
 
 ---

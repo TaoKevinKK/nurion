@@ -820,7 +820,7 @@ requires-dist = [
     { name = "duckdb", marker = "extra == 'duckdb'", specifier = ">=1.5.0" },
     { name = "engine", extras = ["lance", "iceberg", "duckdb", "dedup", "webui", "serve", "spark"], marker = "extra == 'all'" },
     { name = "fastapi", marker = "extra == 'webui'", specifier = ">=0.135.0" },
-    { name = "fsspec", extras = ["s3"], specifier = ">=2026.3.0" },
+    { name = "fsspec", extras = ["s3"], specifier = ">=2024.0.0" },
     { name = "grpcio", specifier = ">=1.80.0" },
     { name = "jinja2", marker = "extra == 'webui'", specifier = ">=3.1.6" },
     { name = "nurion-anvil", editable = "lib/anvil-rs" },

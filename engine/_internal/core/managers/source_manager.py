@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Callable, Awaitable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from tenacity import (
     RetryCallState,
@@ -116,7 +116,7 @@ class SourceManager:
     def start_split_production(
         self,
         queue_client: "AnvilQueueClient",
-        backpressure_fn: Callable[[], Awaitable[bool]],
+        pause_fn: Callable[[], bool],
         running_fn: Callable[[], bool],
     ) -> None:
         """Create planner queue and launch async split production.
@@ -125,6 +125,12 @@ class SourceManager:
         When production finishes, the planner queue is marked as finished so
         the broker knows no more messages will arrive. Workers detect the
         drained state on their own via the broker's drained flag.
+
+        Args:
+            queue_client: Anvil queue client.
+            pause_fn: Returns True when the controller wants to pause production
+                (synchronous — reads a flag set by PipelineController each tick).
+            running_fn: Returns True while the stage is running.
         """
         assert self._planner_queue_name is not None
 
@@ -132,7 +138,7 @@ class SourceManager:
         self._logger.info(f"Created planner queue {self._planner_queue_name}")
 
         self._production_task = asyncio.create_task(
-            self._run_production(queue_client, backpressure_fn, running_fn),
+            self._run_production(queue_client, pause_fn, running_fn),
             name=f"split_production_{self._stage_id}",
         )
 
@@ -172,7 +178,7 @@ class SourceManager:
     async def _run_production(
         self,
         queue_client: "AnvilQueueClient",
-        backpressure_fn: Callable[[], Awaitable[bool]],
+        pause_fn: Callable[[], bool],
         running_fn: Callable[[], bool],
     ) -> None:
         """Background task: produce splits, then mark queue as finished."""
@@ -180,7 +186,7 @@ class SourceManager:
         assert self._planner_queue_name is not None
 
         try:
-            await self._produce_splits(queue_client, backpressure_fn, running_fn)
+            await self._produce_splits(queue_client, pause_fn, running_fn)
 
             # Mark planner queue as finished so workers know no more data
             if running_fn():
@@ -195,15 +201,20 @@ class SourceManager:
     async def _produce_splits(
         self,
         queue_client: "AnvilQueueClient",
-        backpressure_fn: Callable[[], Awaitable[bool]],
+        pause_fn: Callable[[], bool],
         running_fn: Callable[[], bool],
     ) -> None:
-        """Generate splits and push to planner queue with backpressure."""
+        """Generate splits and push to planner queue with flow control.
+
+        ``pause_fn`` is a synchronous predicate set by PipelineController
+        each tick.  When it returns True, the source sleeps until the
+        controller clears the flag (downstream has drained enough).
+        """
         assert isinstance(self._source, SplitPlanner)
         self._logger.info(f"Generating splits for source {self._stage_id}")
 
         split_iterator = self._source.plan_splits(self._stage_id)
-        backpressure_check_interval = get_config().source_backpressure_check_interval
+        check_interval = get_config().source_backpressure_check_interval
         consecutive_pauses = 0
         idx = 0
 
@@ -211,24 +222,19 @@ class SourceManager:
             if not running_fn():
                 break
 
-            # Wait out backpressure *without* advancing the iterator.
-            # The previous pattern used `continue` which advanced the for-loop
-            # to the next split, silently dropping the current one.
-            if idx % backpressure_check_interval == 0:
-                while True:
-                    should_pause = await backpressure_fn()
-                    if not should_pause:
-                        consecutive_pauses = 0
-                        break
+            # Wait out backpressure without advancing the iterator.
+            if idx % check_interval == 0 and pause_fn():
+                while pause_fn():
                     consecutive_pauses += 1
                     if consecutive_pauses >= 100:
                         self._logger.warning(
                             f"Source {self._stage_id} paused for "
-                            f"{consecutive_pauses} consecutive backpressure checks"
+                            f"{consecutive_pauses} consecutive checks"
                         )
                     await asyncio.sleep(get_config().source_backpressure_pause_sleep_s)
                     if not running_fn():
                         break
+                consecutive_pauses = 0
 
             if not running_fn():
                 break

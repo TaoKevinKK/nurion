@@ -44,6 +44,7 @@ class SinkManager:
         self._committer = committer
         self._commit_queue_name = f"{job_id}_{stage_id}_commits"
         self._commit_task: Optional[asyncio.Task] = None
+        self._commit_error: Optional[Exception] = None
         self._logger = logging.getLogger(f"SinkManager-{stage_id}")
 
     @property
@@ -83,6 +84,16 @@ class SinkManager:
                 pass
             self._commit_task = None
 
+    def raise_if_commit_failed(self) -> None:
+        """Re-raise the commit loop's exception if it has already failed.
+
+        Call from the StageMaster run-loop so that commit errors surface
+        immediately instead of silently blocking workers until no-progress
+        timeout fires.
+        """
+        if self._commit_error is not None:
+            raise self._commit_error
+
     async def _run_loop_safe(self, queue_client: "AnvilQueueClient") -> None:
         """Wrapper with error handling for the commit loop."""
         try:
@@ -90,4 +101,5 @@ class SinkManager:
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            self._commit_error = e
             self._logger.error(f"Sink commit loop error: {e}")

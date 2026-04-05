@@ -1,12 +1,10 @@
 # Dynamic Worker Scaling Design
 
-> NOTE: The current implementation uses the embedded Anvil backend. See
-> `work-queue-redesign.md`.
->
-> **Next evolution**: [`bounded-queue-flow-control.md`](bounded-queue-flow-control.md)
-> unifies autoscaling + backpressure. Autoscaler signals will change from
-> queue-depth to `source_blocked_ratio` / `worker_idle_ratio` under bounded
-> queues. AIMD structure and cooldowns are retained.
+> **DEPRECATED** — Superseded by [`pipeline-controller.md`](pipeline-controller.md).
+> The AIMD logic, cooldowns, eager fill, and resource-aware spawning are all
+> preserved in `PipelineController`, but the standalone `SimpleAutoscaler` is
+> retired. Scaling, flow control, and liveness detection are now unified in a
+> single control loop. See `pipeline-controller.md` for the current design.
 
 _Design document for Nurion Engine auto-scaling feature_
 _Created: December 2025_
