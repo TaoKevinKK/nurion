@@ -1,5 +1,5 @@
 [project]
-name = "engine"
+name = "nurion-engine"
 version = "0.2.2"
 description = "Nurion engine: a Ray-based distributed streaming processing framework"
 authors = [

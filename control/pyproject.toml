@@ -1,5 +1,5 @@
 [project]
-name = "control"
+name = "nurion-control"
 version = "0.2.2"
 description = "Nurion control plane service (FastAPI)"
 readme = "README.md"
