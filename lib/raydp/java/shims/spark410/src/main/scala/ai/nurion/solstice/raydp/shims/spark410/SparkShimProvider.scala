@@ -15,23 +15,23 @@
  * limitations under the License.
  */
 
-package ai.nurion.solstice.raydp.shims.spark350
+package ai.nurion.solstice.raydp.shims.spark410
 
-import ai.nurion.solstice.raydp.shims.{Spark350Shims, SparkShimDescriptor, SparkShims}
+import ai.nurion.solstice.raydp.shims.{Spark410Shims, SparkShimDescriptor, SparkShims}
 
 object SparkShimProvider {
-  val DESCRIPTOR: SparkShimDescriptor = SparkShimDescriptor(3, 5, 0)
-  // Any 3.5.x patch matches this shim. Keeping the match a prefix check means
-  // newly-released patches (e.g. 3.5.8, 3.5.9 ...) work without a shim rebuild.
-  val SUPPORTED_PREFIX = "3.5."
+  val DESCRIPTOR: SparkShimDescriptor = SparkShimDescriptor(4, 1, 1)
+  // Any 4.0.x or 4.1.x patch matches this shim. Once Spark 4.2.x ships and we
+  // verify API compatibility, extend this list.
+  val SUPPORTED_PREFIXES = Seq("4.0.", "4.1.")
 }
 
 class SparkShimProvider extends ai.nurion.solstice.raydp.shims.SparkShimProvider {
   def createShim: SparkShims = {
-    new Spark350Shims()
+    new Spark410Shims()
   }
 
   def matches(version: String): Boolean = {
-    version.startsWith(SparkShimProvider.SUPPORTED_PREFIX)
+    SparkShimProvider.SUPPORTED_PREFIXES.exists(version.startsWith)
   }
 }

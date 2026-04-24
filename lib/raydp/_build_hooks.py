@@ -16,12 +16,16 @@
 #
 
 """
-Custom build hooks for fusionflowkit package.
-Handles JAR file preparation during build process.
+Custom build hooks for the raydp package.
+
+Handles Maven invocation and JAR file staging during build. The build flavor
+(NURION_RAYDP_FLAVOR) selects the Maven profile (scala-2.12 vs scala-2.13) and
+the JAR suffix filter so only the matching Scala variant ends up in the wheel.
 """
 
 import glob
 import os
+import re
 import subprocess
 import sys
 from shutil import copy2
@@ -29,8 +33,35 @@ from shutil import copy2
 from setuptools.command.build_py import build_py as _build_py
 from setuptools.command.sdist import sdist as _sdist
 
-# JAR files go to jars/ directory (which maps to raydp.jars via package-dir)
-JARS_TARGET = "jars"
+# The shared Python source root (and the `jars/` staging dir) is the directory
+# containing this file. We anchor all paths here so the hooks behave identically
+# whether invoked from lib/raydp/ directly or from a packaging/spark{3,4}/ subdir.
+_SHARED_ROOT = os.path.dirname(os.path.abspath(__file__))
+JARS_TARGET = os.path.join(_SHARED_ROOT, "jars")
+
+# Flavor -> (Maven profile id, Scala binary version suffix that JAR finalNames carry)
+_FLAVOR_BUILD_MATRIX = {
+    "spark3": ("scala-2.12", "2.12"),
+    "spark4": ("scala-2.13", "2.13"),
+}
+
+
+def _resolve_flavor() -> tuple[str, str, str]:
+    """Return (flavor, maven_profile, scala_binary) from the env."""
+    flavor = os.environ.get("NURION_RAYDP_FLAVOR", "spark3").lower()
+    if flavor not in _FLAVOR_BUILD_MATRIX:
+        raise RuntimeError(
+            f"NURION_RAYDP_FLAVOR={flavor!r} is not supported. "
+            f"Valid values: {sorted(_FLAVOR_BUILD_MATRIX)}"
+        )
+    profile, scala_bin = _FLAVOR_BUILD_MATRIX[flavor]
+    return flavor, profile, scala_bin
+
+
+# JAR finalName pattern produced by Maven is `raydp[-shims-...]_<scala_bin>-<version>.jar`.
+# Match on `_<scala_bin>-` so we only pick up the active flavor's jars.
+def _scala_suffix_matcher(scala_bin: str) -> re.Pattern:
+    return re.compile(rf"_{re.escape(scala_bin)}-[^/\\]+\.jar$")
 
 
 class BuildWithJars(_build_py):
@@ -45,33 +76,38 @@ class BuildWithJars(_build_py):
 
     def setup_jars(self):
         """Set up JAR files for packaging."""
-        # Java directory is a subdirectory of the raydp package
-        CORE_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "java"))
+        flavor, maven_profile, scala_bin = _resolve_flavor()
+        print(f"[raydp] flavor={flavor} maven_profile={maven_profile} scala_bin={scala_bin}")
 
-        # Build JAR files using Maven
-        self.build_jars(CORE_DIR)
+        # Java directory is a subdirectory of the shared source root (alongside this file).
+        CORE_DIR = os.path.join(_SHARED_ROOT, "java")
 
-        JARS_PATH = glob.glob(
-            os.path.join(CORE_DIR, "**/target/raydp-*.jar"), recursive=True
-        ) + glob.glob(os.path.join(CORE_DIR, "thirdparty/*.jar"))
+        # Build JAR files using Maven (pinned to this flavor's profile)
+        self.build_jars(CORE_DIR, maven_profile)
+
+        # Pick only the jars whose finalName carries the matching `_<scala_bin>-` suffix.
+        suffix_pattern = _scala_suffix_matcher(scala_bin)
+        all_jars = glob.glob(os.path.join(CORE_DIR, "**/target/raydp*.jar"), recursive=True)
+        matched = [p for p in all_jars if suffix_pattern.search(p)]
+        thirdparty = glob.glob(os.path.join(CORE_DIR, "thirdparty/*.jar"))
+        JARS_PATH = matched + thirdparty
 
         if len(JARS_PATH) == 0:
             print(
-                "Can't find core module jars after Maven build. Build may have failed.",
+                f"Can't find core module jars for flavor {flavor!r} (expected suffix "
+                f"_{scala_bin}-) after Maven build. Available jars: {all_jars}",
                 file=sys.stderr,
             )
             raise RuntimeError("JAR files not found after Maven build")
 
-        # Clean up existing temp directory if it exists
+        # Clean stale jars from the staging dir before copying fresh ones.
         if os.path.exists(JARS_TARGET):
-            # Remove only JAR files, not the entire directory
-            if os.path.exists(JARS_TARGET):
-                for jar_file in glob.glob(os.path.join(JARS_TARGET, "*.jar")):
-                    try:
-                        os.remove(jar_file)
-                        print(f"Removed existing JAR file: {jar_file}")
-                    except OSError as e:
-                        print(f"Failed to remove {jar_file}: {e}", file=sys.stderr)
+            for jar_file in glob.glob(os.path.join(JARS_TARGET, "*.jar")):
+                try:
+                    os.remove(jar_file)
+                    print(f"Removed existing JAR file: {jar_file}")
+                except OSError as e:
+                    print(f"Failed to remove {jar_file}: {e}", file=sys.stderr)
 
         try:
             os.makedirs(JARS_TARGET, exist_ok=True)
@@ -88,8 +124,8 @@ class BuildWithJars(_build_py):
             print(f"Failed to copy JAR files: {e}", file=sys.stderr)
             raise
 
-    def build_jars(self, core_dir):
-        """Build JAR files using Maven."""
+    def build_jars(self, core_dir, maven_profile):
+        """Build JAR files using Maven under the given profile."""
         # Check if Maven is available
         try:
             subprocess.run(["mvn", "--version"], check=True, capture_output=True)
@@ -97,18 +133,18 @@ class BuildWithJars(_build_py):
             print("Maven (mvn) could not be found. Please install Maven first.", file=sys.stderr)
             raise RuntimeError("Maven not found") from None
 
-        print(f"Building JAR files in {core_dir}")
+        print(f"Building JAR files in {core_dir} (profile={maven_profile})")
 
         # Save current directory
         original_dir = os.getcwd()
 
         try:
-            # Change to core directory and run Maven build
             os.chdir(core_dir)
-            print("Running: mvn clean package -DskipTests")
+            cmd = ["mvn", "-P", maven_profile, "clean", "package", "-DskipTests"]
+            print(f"Running: {' '.join(cmd)}")
 
             subprocess.run(
-                ["mvn", "clean", "package", "-DskipTests"],
+                cmd,
                 check=True,
                 capture_output=False,  # Let Maven output be visible
             )

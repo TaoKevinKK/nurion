@@ -15,23 +15,19 @@
  * limitations under the License.
  */
 
-package ai.nurion.solstice.raydp.shims.spark350
+package org.apache.spark.spark410
 
-import ai.nurion.solstice.raydp.shims.{Spark350Shims, SparkShimDescriptor, SparkShims}
+import java.util.Properties
 
-object SparkShimProvider {
-  val DESCRIPTOR: SparkShimDescriptor = SparkShimDescriptor(3, 5, 0)
-  // Any 3.5.x patch matches this shim. Keeping the match a prefix check means
-  // newly-released patches (e.g. 3.5.8, 3.5.9 ...) work without a shim rebuild.
-  val SUPPORTED_PREFIX = "3.5."
-}
+import org.apache.spark.{SparkEnv, TaskContext, TaskContextImpl}
+import org.apache.spark.memory.TaskMemoryManager
 
-class SparkShimProvider extends ai.nurion.solstice.raydp.shims.SparkShimProvider {
-  def createShim: SparkShims = {
-    new Spark350Shims()
-  }
-
-  def matches(version: String): Boolean = {
-    version.startsWith(SparkShimProvider.SUPPORTED_PREFIX)
+object TaskContextUtils {
+  // TODO(spark4): TaskContextImpl has gained additional constructor parameters in 4.x
+  // (e.g., cpus, numPartitions, resources Map). Align this call with Spark 4.x's current
+  // primary constructor if compilation fails.
+  def getDummyTaskContext(partitionId: Int, env: SparkEnv): TaskContext = {
+    new TaskContextImpl(0, 0, partitionId, -1024, 0, 0,
+        new TaskMemoryManager(env.memoryManager, 0), new Properties(), env.metricsSystem)
   }
 }

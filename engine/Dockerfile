@@ -58,29 +58,28 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
     rm -rf /root/.rustup && \
     apt-get remove -y protobuf-compiler && apt-get autoremove -y
 
-# Build RayDP JARs, then cleanup Maven artifacts (all in one layer)
+# Build RayDP JARs (Spark 4.1 / Scala 2.13 track), then cleanup Maven artifacts.
 RUN cd /app/build/java && \
-    mvn clean package -DskipTests -q && \
+    mvn -P scala-2.13 clean package -DskipTests -q && \
     mkdir -p /app/lib/raydp/jars && \
-    cp raydp-main/target/raydp-*.jar /app/lib/raydp/jars/ && \
-    cp shims/common/target/raydp-shims-*.jar /app/lib/raydp/jars/ && \
-    cp shims/spark340/target/raydp-shims-*.jar /app/lib/raydp/jars/ && \
-    cp shims/spark350/target/raydp-shims-*.jar /app/lib/raydp/jars/ && \
+    cp raydp-main/target/raydp_2.13-*.jar /app/lib/raydp/jars/ && \
+    cp shims/common/target/raydp-shims-*_2.13-*.jar /app/lib/raydp/jars/ && \
+    cp shims/spark410/target/raydp-shims-spark410_2.13-*.jar /app/lib/raydp/jars/ && \
     # Cleanup Maven build and source
     rm -rf /app/build && \
     rm -rf /root/.m2
 
-# Install pyspark
-RUN uv pip install --system --no-cache "pyspark==3.5.6"
+# Install pyspark (Spark 4.1.x, Scala 2.13)
+RUN uv pip install --system --no-cache "pyspark>=4.1,<5"
 
-# Download extra JARs for Spark S3/Lance support
+# Download extra JARs for Spark S3/Lance support (Scala 2.13 / Spark 4.1 variants)
 ENV M=https://repo1.maven.org/maven2
 RUN PYSPARK_JARS=$(python -c "import pyspark; print(pyspark.__path__[0])")/jars && \
     rm -f ${PYSPARK_JARS}/arrow-*.jar && \
-    wget -q ${M}/org/apache/spark/spark-hadoop-cloud_2.12/3.5.6/spark-hadoop-cloud_2.12-3.5.6.jar \
+    wget -q ${M}/org/apache/spark/spark-hadoop-cloud_2.13/4.1.1/spark-hadoop-cloud_2.13-4.1.1.jar \
          ${M}/org/apache/hadoop/hadoop-aws/3.3.4/hadoop-aws-3.3.4.jar \
          ${M}/com/amazonaws/aws-java-sdk-bundle/1.12.367/aws-java-sdk-bundle-1.12.367.jar \
-         ${M}/org/lance/lance-spark-bundle-3.5_2.12/0.1.3-beta.7/lance-spark-bundle-3.5_2.12-0.1.3-beta.7.jar \
+         ${M}/org/lance/lance-spark-bundle-4.1_2.13/0.4.0/lance-spark-bundle-4.1_2.13-0.4.0.jar \
          -P ${PYSPARK_JARS}/
 
 # Install Python runtime dependencies (minimal set for Ray + data processing)

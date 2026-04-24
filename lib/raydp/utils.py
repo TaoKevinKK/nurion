@@ -202,6 +202,20 @@ def divide_blocks(
     return results
 
 
+def _pyspark_scala_binary() -> str:
+    """Return the Scala binary version pyspark was built against ("2.12" or "2.13").
+
+    pyspark 3.x ships against Scala 2.12; pyspark 4.x ships against Scala 2.13.
+    """
+    import pyspark
+
+    try:
+        major = int(pyspark.__version__.split(".")[0])
+    except (AttributeError, ValueError):
+        return "2.12"
+    return "2.13" if major >= 4 else "2.12"
+
+
 def code_search_path() -> list[str]:
     import pyspark
 
@@ -213,10 +227,31 @@ def code_search_path() -> list[str]:
 
 
 def code_search_jars() -> list[str]:
+    """Return JAR paths to add to the JVM classpath.
+
+    RayDP's own shaded jars carry a ``_<scala_binary>-`` suffix in their
+    finalName (e.g. ``raydp_2.13-1.7.0-SNAPSHOT.jar``). We keep only those
+    matching pyspark's Scala binary so a mismatched shim never gets loaded.
+    Third-party jars staged under the same directory (``java/thirdparty/*.jar``)
+    are plain Java artifacts without a ``_<scala>-`` token; pass them through
+    unfiltered. Spark's own jars under ``$SPARK_HOME/jars`` are never filtered.
+    """
+    scala_bin = _pyspark_scala_binary()
+    active_suffix_re = re.compile(rf"_{re.escape(scala_bin)}-[^/\\]+\.jar$")
+    any_scala_suffix_re = re.compile(r"_2\.(?:12|13)-[^/\\]+\.jar$")
+
     paths = code_search_path()
-    jars = []
-    for path in paths:
-        jars.extend(glob.glob(os.path.join(path, "*.jar")))
+    jars: list[str] = []
+    if paths:
+        raydp_cp, *rest = paths
+        for p in glob.glob(os.path.join(raydp_cp, "*.jar")):
+            if active_suffix_re.search(p):
+                jars.append(p)  # raydp jar matching active Scala binary
+            elif not any_scala_suffix_re.search(p):
+                jars.append(p)  # no Scala suffix at all (thirdparty, pure Java)
+            # else: a raydp jar for the other Scala binary; drop it.
+        for path in rest:
+            jars.extend(glob.glob(os.path.join(path, "*.jar")))
     return jars
 
 

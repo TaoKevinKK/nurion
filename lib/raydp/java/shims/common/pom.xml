@@ -17,6 +17,7 @@
   <packaging>jar</packaging>
 
   <build>
+      <finalName>${project.artifactId}_${scala.binary.version}-${project.version}</finalName>
       <plugins>
           <plugin>
               <groupId>net.alchim31.maven</groupId>

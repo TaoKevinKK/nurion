@@ -104,25 +104,37 @@
             <artifactId>grpc-stub</artifactId>
         </dependency>
 
+        <!--
+            Jackson is on the compile classpath (RayPythonWorkerUtils.java uses ObjectMapper)
+            but is *provided* at runtime by Spark itself. Bundling our old jackson into the
+            shaded raydp jar causes NoSuchMethodError against PySpark's newer jackson (e.g.
+            PySpark 3.5.8 calls JsonFactoryBuilder.streamReadConstraints which didn't exist
+            in jackson 2.13.x). Keeping scope=provided avoids the shade.
+        -->
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-core</artifactId>
+            <scope>provided</scope>
         </dependency>
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
+            <scope>provided</scope>
         </dependency>
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-annotations</artifactId>
+            <scope>provided</scope>
         </dependency>
         <dependency>
             <groupId>com.fasterxml.jackson.module</groupId>
             <artifactId>jackson-module-scala_${scala.binary.version}</artifactId>
+            <scope>provided</scope>
         </dependency>
         <dependency>
             <groupId>com.fasterxml.jackson.module</groupId>
             <artifactId>jackson-module-jaxb-annotations</artifactId>
+            <scope>provided</scope>
         </dependency>
 
         <!-- JSON serialization for Queue messages -->
@@ -150,6 +162,7 @@
     </dependencies>
 
     <build>
+        <finalName>${project.artifactId}_${scala.binary.version}-${project.version}</finalName>
         <extensions>
             <extension>
                 <groupId>kr.motd.maven</groupId>
@@ -229,6 +242,35 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>2.7</version>
+            </plugin>
+
+            <!--
+                Spark-major-version-specific source roots. A few files in this module
+                (PythonWorkerFactory, SparkSubmit, ObjectStoreWriter) are copy-and-patch
+                forks of Spark internals whose APIs drift across 3.x <-> 4.x and cannot
+                share a single source. We keep the common code in src/main/scala/ and
+                put the version-divergent copies under src/main/scala-spark3/ and
+                src/main/scala-spark4/. The active Scala profile adds exactly one of
+                those as an extra source root.
+            -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <id>add-spark-major-sources</id>
+                        <phase>generate-sources</phase>
+                        <goals>
+                            <goal>add-source</goal>
+                        </goals>
+                        <configuration>
+                            <sources>
+                                <source>src/main/scala-${spark.major.version}</source>
+                            </sources>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
 
             <plugin>

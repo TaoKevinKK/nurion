@@ -24,13 +24,13 @@ COPY pyproject.toml uv.lock ./
 COPY control/pyproject.toml ./control/
 
 # Create venv and install dependencies (without workspace package)
-RUN uv sync --package control --no-dev --no-install-workspace
+RUN uv sync --package nurion-control --no-dev --no-install-workspace
 
 # Copy control source code
 COPY control/ ./control/
 
 # Install control package
-RUN uv sync --package control --no-dev
+RUN uv sync --package nurion-control --no-dev
 
 WORKDIR /app/control
 

@@ -29,7 +29,7 @@ except ImportError:
     LanceTableSourceConfig = optional_dependency_placeholder("LanceTableSourceConfig", "lance")  # type: ignore[assignment,misc]
     LanceSplitPlanner = optional_dependency_placeholder("LanceSplitPlanner", "lance")  # type: ignore[assignment,misc]
 
-# Spark sources require optional [spark] extra (pyspark + nurion-raydp)
+# Spark sources require optional [spark] extra (pyspark + nurion-raydp-spark4)
 try:
     from _internal.operators.sources.spark import (
         SparkSource,

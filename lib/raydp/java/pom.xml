@@ -13,9 +13,10 @@
     <url>https://github.com/oap-project/raydp.git</url>
 
     <properties>
-        <spark.version>3.5.6</spark.version>
-        <spark340.version>3.4.3</spark340.version>
+        <!-- Spark version per shim module. The active ${spark.version} is selected by the
+             active Scala profile below, and is used by dependencyManagement defaults. -->
         <spark350.version>3.5.6</spark350.version>
+        <spark410.version>4.1.1</spark410.version>
         <snappy.version>1.1.10.4</snappy.version>
         <netty.version>4.1.94.Final</netty.version>
         <commons.text.version>1.10.0</commons.text.version>
@@ -27,20 +28,66 @@
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
         <maven.compiler.source>1.8</maven.compiler.source>
         <maven.compiler.target>1.8</maven.compiler.target>
-        <scala.version>2.12.18</scala.version>
         <jackson.version>2.13.5</jackson.version>
-        <scala.binary.version>2.12</scala.binary.version>
         <!-- <canoe.version>1.0.7</canoe.version> -->
         <io.grpc.version>1.56.0</io.grpc.version>
         <ray.version>2.47.0</ray.version>
+        <!-- scala.version / scala.binary.version / spark.version are set per profile -->
     </properties>
 
-    <modules>
-        <module>shims/common</module>
-        <module>shims/spark340</module>
-        <module>shims/spark350</module>
-        <module>raydp-main</module>
-    </modules>
+    <!--
+        Cross-build strategy:
+
+          * Profile `scala-2.12` (activeByDefault) builds the Spark 3.5 track:
+              scala.binary.version = 2.12, spark.version = ${spark350.version}
+              modules = [shims/common, shims/spark350, raydp-main]
+
+          * Profile `scala-2.13` builds the Spark 4.1 track:
+              scala.binary.version = 2.13, spark.version = ${spark410.version}
+              modules = [shims/common, shims/spark410, raydp-main]
+
+        All module jars carry a _${scala.binary.version} suffix in their finalName, so
+        artifacts from the two profiles never collide.
+
+        Build commands:
+          mvn -P scala-2.12 clean package -DskipTests    # Spark 3.5 / Scala 2.12
+          mvn -P scala-2.13 clean package -DskipTests    # Spark 4.1 / Scala 2.13
+    -->
+    <profiles>
+        <profile>
+            <id>scala-2.12</id>
+            <activation>
+                <activeByDefault>true</activeByDefault>
+            </activation>
+            <properties>
+                <scala.version>2.12.18</scala.version>
+                <scala.binary.version>2.12</scala.binary.version>
+                <spark.version>${spark350.version}</spark.version>
+                <!-- Selects which scala-sparkN/ source root raydp-main compiles -->
+                <spark.major.version>spark3</spark.major.version>
+            </properties>
+            <modules>
+                <module>shims/common</module>
+                <module>shims/spark350</module>
+                <module>raydp-main</module>
+            </modules>
+        </profile>
+
+        <profile>
+            <id>scala-2.13</id>
+            <properties>
+                <scala.version>2.13.14</scala.version>
+                <scala.binary.version>2.13</scala.binary.version>
+                <spark.version>${spark410.version}</spark.version>
+                <spark.major.version>spark4</spark.major.version>
+            </properties>
+            <modules>
+                <module>shims/common</module>
+                <module>shims/spark410</module>
+                <module>raydp-main</module>
+            </modules>
+        </profile>
+    </profiles>
 
     <!-- <repositories> -->
     <!--     <repository> -->

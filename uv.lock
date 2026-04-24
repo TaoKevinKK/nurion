@@ -9,9 +9,9 @@ resolution-markers = [
 
 [manifest]
 members = [
-    "control",
-    "engine",
     "nurion",
+    "nurion-control",
+    "nurion-engine",
 ]
 
 [[package]]
@@ -515,71 +515,6 @@ wheels = [
 ]
 
 [[package]]
-name = "control"
-version = "0.1.0"
-source = { editable = "control" }
-dependencies = [
-    { name = "alembic" },
-    { name = "asyncpg" },
-    { name = "boto3" },
-    { name = "fastapi" },
-    { name = "fsspec" },
-    { name = "kubernetes" },
-    { name = "lance-namespace" },
-    { name = "psycopg", extra = ["binary"] },
-    { name = "pydantic-settings" },
-    { name = "pyiceberg", extra = ["sql-postgres"] },
-    { name = "pylance" },
-    { name = "pyyaml" },
-    { name = "s3fs" },
-    { name = "sqlalchemy", extra = ["asyncio"] },
-    { name = "uvicorn", extra = ["standard"] },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "httpx" },
-    { name = "mypy" },
-    { name = "pyiceberg" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-    { name = "ruff" },
-    { name = "testcontainers", extra = ["k3s", "minio"] },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "alembic", specifier = ">=1.18.0" },
-    { name = "asyncpg", specifier = ">=0.31.0" },
-    { name = "boto3", specifier = ">=1.42.0" },
-    { name = "fastapi", specifier = ">=0.135.0" },
-    { name = "fsspec", specifier = ">=2026.3.0" },
-    { name = "kubernetes", specifier = ">=35.0.0" },
-    { name = "lance-namespace", specifier = ">=0.6.0" },
-    { name = "psycopg", extras = ["binary"], specifier = ">=3.3.0" },
-    { name = "pydantic-settings", specifier = ">=2.13.0" },
-    { name = "pyiceberg", extras = ["sql-postgres"], specifier = ">=0.11.1" },
-    { name = "pylance", specifier = ">=4.0.0" },
-    { name = "pyyaml", specifier = ">=6.0.0" },
-    { name = "s3fs", specifier = ">=2026.3.0" },
-    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.48" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.42.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "httpx", specifier = ">=0.28.1" },
-    { name = "mypy", specifier = ">=1.20.0" },
-    { name = "pyiceberg", specifier = ">=0.11.1" },
-    { name = "pytest", specifier = ">=9.0.0" },
-    { name = "pytest-asyncio", specifier = ">=1.3.0" },
-    { name = "pytest-cov", specifier = ">=7.1.0" },
-    { name = "ruff", specifier = ">=0.15.0" },
-    { name = "testcontainers", extras = ["k3s", "minio", "postgres"], specifier = ">=4.14.0" },
-]
-
-[[package]]
 name = "coverage"
 version = "7.13.1"
 source = { registry = "https://pypi.org/simple" }
@@ -727,143 +662,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/9d/a4/e44218c2b394e31a6dd0d6b095c4e1f32d0be54c2a4b250032d717647bab/durationpy-0.10.tar.gz", hash = "sha256:1fa6893409a6e739c9c72334fc65cca1f355dbdd93405d30f726deb5bde42fba", size = 3335, upload-time = "2025-05-17T13:52:37.26Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b0/0d/9feae160378a3553fa9a339b0e9c1a048e147a4127210e286ef18b730f03/durationpy-0.10-py3-none-any.whl", hash = "sha256:3b41e1b601234296b4fb368338fdcd3e13e0b4fb5b67345948f4f2bf9868b286", size = 3922, upload-time = "2025-05-17T13:52:36.463Z" },
-]
-
-[[package]]
-name = "engine"
-version = "0.2.0"
-source = { editable = "engine" }
-dependencies = [
-    { name = "click" },
-    { name = "fsspec", extra = ["s3"] },
-    { name = "grpcio" },
-    { name = "nurion-anvil" },
-    { name = "pandas" },
-    { name = "pyarrow" },
-    { name = "ray", extra = ["default"] },
-    { name = "tenacity" },
-]
-
-[package.optional-dependencies]
-all = [
-    { name = "duckdb" },
-    { name = "fastapi" },
-    { name = "jinja2" },
-    { name = "nurion-raydp" },
-    { name = "prometheus-client" },
-    { name = "py-spy" },
-    { name = "pyiceberg", extra = ["sql-sqlite"] },
-    { name = "pylance" },
-    { name = "pyspark" },
-    { name = "slatedb" },
-    { name = "sqlalchemy" },
-    { name = "sse-starlette" },
-    { name = "uvicorn" },
-    { name = "xxhash" },
-]
-dedup = [
-    { name = "xxhash" },
-]
-duckdb = [
-    { name = "duckdb" },
-]
-iceberg = [
-    { name = "pyiceberg", extra = ["sql-sqlite"] },
-    { name = "sqlalchemy" },
-]
-lance = [
-    { name = "pylance" },
-]
-serve = [
-    { name = "prometheus-client" },
-]
-spark = [
-    { name = "nurion-raydp" },
-    { name = "pyspark" },
-]
-webui = [
-    { name = "fastapi" },
-    { name = "jinja2" },
-    { name = "py-spy" },
-    { name = "slatedb" },
-    { name = "sse-starlette" },
-    { name = "uvicorn" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "alembic" },
-    { name = "asyncpg" },
-    { name = "boto3" },
-    { name = "diff-cover" },
-    { name = "engine", extra = ["all"] },
-    { name = "httpx" },
-    { name = "kubernetes" },
-    { name = "lance-namespace" },
-    { name = "minio" },
-    { name = "mypy" },
-    { name = "psycopg", extra = ["binary"] },
-    { name = "pydantic-settings" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-    { name = "pytest-timeout" },
-    { name = "requests" },
-    { name = "ruff" },
-    { name = "s3fs" },
-    { name = "testcontainers", extra = ["minio"] },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "click", specifier = ">=8.1.7" },
-    { name = "duckdb", marker = "extra == 'duckdb'", specifier = ">=1.5.0" },
-    { name = "engine", extras = ["lance", "iceberg", "duckdb", "dedup", "webui", "serve", "spark"], marker = "extra == 'all'" },
-    { name = "fastapi", marker = "extra == 'webui'", specifier = ">=0.135.0" },
-    { name = "fsspec", extras = ["s3"], specifier = ">=2024.0.0" },
-    { name = "grpcio", specifier = ">=1.80.0" },
-    { name = "jinja2", marker = "extra == 'webui'", specifier = ">=3.1.6" },
-    { name = "nurion-anvil", editable = "lib/anvil-rs" },
-    { name = "nurion-raydp", marker = "extra == 'spark'", editable = "lib/raydp" },
-    { name = "pandas", specifier = ">=2.0.0" },
-    { name = "prometheus-client", marker = "extra == 'serve'", specifier = ">=0.24.0" },
-    { name = "py-spy", marker = "extra == 'webui'", specifier = ">=0.4.1" },
-    { name = "pyarrow", specifier = ">=23.0.0" },
-    { name = "pyiceberg", extras = ["sql-sqlite"], marker = "extra == 'iceberg'", specifier = ">=0.11.1" },
-    { name = "pylance", marker = "extra == 'lance'", specifier = ">=4.0.0" },
-    { name = "pyspark", marker = "extra == 'spark'", specifier = "==3.5.6" },
-    { name = "ray", extras = ["default"], specifier = "==2.54.0" },
-    { name = "slatedb", marker = "extra == 'webui'", specifier = ">=0.11.0" },
-    { name = "sqlalchemy", marker = "extra == 'iceberg'", specifier = ">=2.0.48" },
-    { name = "sse-starlette", marker = "extra == 'webui'", specifier = ">=3.3.0" },
-    { name = "tenacity", specifier = ">=9.1.0" },
-    { name = "uvicorn", marker = "extra == 'webui'", specifier = ">=0.42.0" },
-    { name = "xxhash", marker = "extra == 'dedup'", specifier = ">=3.6.0" },
-]
-provides-extras = ["lance", "iceberg", "duckdb", "dedup", "webui", "serve", "spark", "all"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "alembic", specifier = ">=1.18.0" },
-    { name = "asyncpg", specifier = ">=0.31.0" },
-    { name = "boto3", specifier = ">=1.42.0" },
-    { name = "diff-cover", specifier = ">=9.0.0" },
-    { name = "engine", extras = ["all"] },
-    { name = "httpx", specifier = ">=0.28.0" },
-    { name = "kubernetes", specifier = ">=35.0.0" },
-    { name = "lance-namespace", specifier = ">=0.6.0" },
-    { name = "minio", specifier = ">=7.2.0" },
-    { name = "mypy", specifier = ">=1.20.0" },
-    { name = "psycopg", extras = ["binary"], specifier = ">=3.3.0" },
-    { name = "pydantic-settings", specifier = ">=2.13.0" },
-    { name = "pytest", specifier = ">=9.0.0" },
-    { name = "pytest-asyncio", specifier = ">=1.3.0" },
-    { name = "pytest-cov", specifier = ">=7.1.0" },
-    { name = "pytest-timeout", specifier = ">=2.3.1" },
-    { name = "requests", specifier = ">=2.32.0" },
-    { name = "ruff", specifier = ">=0.15.0" },
-    { name = "s3fs", specifier = ">=2026.3.0" },
-    { name = "testcontainers", extras = ["minio", "postgres"], specifier = ">=4.14.0" },
 ]
 
 [[package]]
@@ -1860,7 +1658,7 @@ wheels = [
 
 [[package]]
 name = "nurion"
-version = "0.1.0"
+version = "0.2.2"
 source = { virtual = "." }
 
 [package.dev-dependencies]
@@ -1875,7 +1673,7 @@ dev = [{ name = "pandas", specifier = ">=2.3.3" }]
 
 [[package]]
 name = "nurion-anvil"
-version = "0.1.0"
+version = "0.2.2"
 source = { editable = "lib/anvil-rs" }
 dependencies = [
     { name = "grpcio" },
@@ -1891,9 +1689,213 @@ requires-dist = [
 ]
 
 [[package]]
-name = "nurion-raydp"
+name = "nurion-control"
+version = "0.2.2"
+source = { editable = "control" }
+dependencies = [
+    { name = "alembic" },
+    { name = "asyncpg" },
+    { name = "boto3" },
+    { name = "fastapi" },
+    { name = "fsspec" },
+    { name = "kubernetes" },
+    { name = "lance-namespace" },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "pydantic-settings" },
+    { name = "pyiceberg", extra = ["sql-postgres"] },
+    { name = "pylance" },
+    { name = "pyyaml" },
+    { name = "s3fs" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "httpx" },
+    { name = "mypy" },
+    { name = "pyiceberg" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+    { name = "testcontainers", extra = ["k3s", "minio"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "alembic", specifier = ">=1.18.0" },
+    { name = "asyncpg", specifier = ">=0.31.0" },
+    { name = "boto3", specifier = ">=1.42.0" },
+    { name = "fastapi", specifier = ">=0.135.0" },
+    { name = "fsspec", specifier = ">=2026.3.0" },
+    { name = "kubernetes", specifier = ">=35.0.0" },
+    { name = "lance-namespace", specifier = ">=0.6.0" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.3.0" },
+    { name = "pydantic-settings", specifier = ">=2.13.0" },
+    { name = "pyiceberg", extras = ["sql-postgres"], specifier = ">=0.11.1" },
+    { name = "pylance", specifier = ">=4.0.0" },
+    { name = "pyyaml", specifier = ">=6.0.0" },
+    { name = "s3fs", specifier = ">=2026.3.0" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.48" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.42.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "mypy", specifier = ">=1.20.0" },
+    { name = "pyiceberg", specifier = ">=0.11.1" },
+    { name = "pytest", specifier = ">=9.0.0" },
+    { name = "pytest-asyncio", specifier = ">=1.3.0" },
+    { name = "pytest-cov", specifier = ">=7.1.0" },
+    { name = "ruff", specifier = ">=0.15.0" },
+    { name = "testcontainers", extras = ["k3s", "minio", "postgres"], specifier = ">=4.14.0" },
+]
+
+[[package]]
+name = "nurion-engine"
+version = "0.2.2"
+source = { editable = "engine" }
+dependencies = [
+    { name = "click" },
+    { name = "fsspec", extra = ["s3"] },
+    { name = "grpcio" },
+    { name = "nurion-anvil" },
+    { name = "pandas" },
+    { name = "pyarrow" },
+    { name = "ray", extra = ["default"] },
+    { name = "tenacity" },
+]
+
+[package.optional-dependencies]
+all = [
+    { name = "duckdb" },
+    { name = "fastapi" },
+    { name = "jinja2" },
+    { name = "nurion-raydp-spark4" },
+    { name = "prometheus-client" },
+    { name = "py-spy" },
+    { name = "pyiceberg", extra = ["sql-sqlite"] },
+    { name = "pylance" },
+    { name = "pyspark" },
+    { name = "slatedb" },
+    { name = "sqlalchemy" },
+    { name = "sse-starlette" },
+    { name = "uvicorn" },
+    { name = "xxhash" },
+]
+dedup = [
+    { name = "xxhash" },
+]
+duckdb = [
+    { name = "duckdb" },
+]
+iceberg = [
+    { name = "pyiceberg", extra = ["sql-sqlite"] },
+    { name = "sqlalchemy" },
+]
+lance = [
+    { name = "pylance" },
+]
+serve = [
+    { name = "prometheus-client" },
+]
+spark = [
+    { name = "nurion-raydp-spark4" },
+    { name = "pyspark" },
+]
+webui = [
+    { name = "fastapi" },
+    { name = "jinja2" },
+    { name = "py-spy" },
+    { name = "slatedb" },
+    { name = "sse-starlette" },
+    { name = "uvicorn" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "alembic" },
+    { name = "asyncpg" },
+    { name = "boto3" },
+    { name = "diff-cover" },
+    { name = "httpx" },
+    { name = "kubernetes" },
+    { name = "lance-namespace" },
+    { name = "minio" },
+    { name = "mypy" },
+    { name = "nurion-engine", extra = ["all"] },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "pydantic-settings" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+    { name = "pytest-rerunfailures" },
+    { name = "pytest-timeout" },
+    { name = "requests" },
+    { name = "ruff" },
+    { name = "s3fs" },
+    { name = "testcontainers", extra = ["minio"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "click", specifier = ">=8.1.7" },
+    { name = "duckdb", marker = "extra == 'duckdb'", specifier = ">=1.5.0" },
+    { name = "fastapi", marker = "extra == 'webui'", specifier = ">=0.135.0" },
+    { name = "fsspec", extras = ["s3"], specifier = ">=2024.0.0" },
+    { name = "grpcio", specifier = ">=1.80.0" },
+    { name = "jinja2", marker = "extra == 'webui'", specifier = ">=3.1.6" },
+    { name = "nurion-anvil", editable = "lib/anvil-rs" },
+    { name = "nurion-engine", extras = ["lance", "iceberg", "duckdb", "dedup", "webui", "serve", "spark"], marker = "extra == 'all'" },
+    { name = "nurion-raydp-spark4", marker = "extra == 'spark'", editable = "lib/raydp/packaging/spark4" },
+    { name = "pandas", specifier = ">=2.0.0" },
+    { name = "prometheus-client", marker = "extra == 'serve'", specifier = ">=0.24.0" },
+    { name = "py-spy", marker = "extra == 'webui'", specifier = ">=0.4.1" },
+    { name = "pyarrow", specifier = ">=23.0.0" },
+    { name = "pyiceberg", extras = ["sql-sqlite"], marker = "extra == 'iceberg'", specifier = ">=0.11.1" },
+    { name = "pylance", marker = "extra == 'lance'", specifier = ">=4.0.0" },
+    { name = "pyspark", marker = "extra == 'spark'", specifier = ">=4.1,<5" },
+    { name = "ray", extras = ["default"], specifier = "==2.54.0" },
+    { name = "slatedb", marker = "extra == 'webui'", specifier = ">=0.11.0" },
+    { name = "sqlalchemy", marker = "extra == 'iceberg'", specifier = ">=2.0.48" },
+    { name = "sse-starlette", marker = "extra == 'webui'", specifier = ">=3.3.0" },
+    { name = "tenacity", specifier = ">=9.1.0" },
+    { name = "uvicorn", marker = "extra == 'webui'", specifier = ">=0.42.0" },
+    { name = "xxhash", marker = "extra == 'dedup'", specifier = ">=3.6.0" },
+]
+provides-extras = ["lance", "iceberg", "duckdb", "dedup", "webui", "serve", "spark", "all"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "alembic", specifier = ">=1.18.0" },
+    { name = "asyncpg", specifier = ">=0.31.0" },
+    { name = "boto3", specifier = ">=1.42.0" },
+    { name = "diff-cover", specifier = ">=9.0.0" },
+    { name = "httpx", specifier = ">=0.28.0" },
+    { name = "kubernetes", specifier = ">=35.0.0" },
+    { name = "lance-namespace", specifier = ">=0.6.0" },
+    { name = "minio", specifier = ">=7.2.0" },
+    { name = "mypy", specifier = ">=1.20.0" },
+    { name = "nurion-engine", extras = ["all"] },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.3.0" },
+    { name = "pydantic-settings", specifier = ">=2.13.0" },
+    { name = "pytest", specifier = ">=9.0.0" },
+    { name = "pytest-asyncio", specifier = ">=1.3.0" },
+    { name = "pytest-cov", specifier = ">=7.1.0" },
+    { name = "pytest-rerunfailures", specifier = ">=15.1.0" },
+    { name = "pytest-timeout", specifier = ">=2.3.1" },
+    { name = "requests", specifier = ">=2.32.0" },
+    { name = "ruff", specifier = ">=0.15.0" },
+    { name = "s3fs", specifier = ">=2026.3.0" },
+    { name = "testcontainers", extras = ["minio", "postgres"], specifier = ">=4.14.0" },
+]
+
+[[package]]
+name = "nurion-raydp-spark4"
 version = "1.7.0"
-source = { editable = "lib/raydp" }
+source = { editable = "lib/raydp/packaging/spark4" }
 dependencies = [
     { name = "pandas" },
     { name = "pyarrow" },
@@ -1905,7 +1907,7 @@ dependencies = [
 requires-dist = [
     { name = "pandas", specifier = ">=1.0.0" },
     { name = "pyarrow", specifier = ">=8.0.0" },
-    { name = "pyspark", specifier = ">=3.4.0" },
+    { name = "pyspark", specifier = ">=4.1,<5" },
     { name = "ray", extras = ["default"], specifier = ">=2.0.0" },
 ]
 
@@ -2655,12 +2657,12 @@ wheels = [
 
 [[package]]
 name = "pyspark"
-version = "3.5.6"
+version = "4.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "py4j" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2e/62/36e50d38e5fe158e97cddec983b44f9417b1e205b02320e3c463b5f802fa/pyspark-3.5.6.tar.gz", hash = "sha256:f8b1c4360e41ab398c64904fae08740503bcb6bd389457d659fa6d9f2952cc48", size = 317359167, upload-time = "2025-05-27T08:24:20.82Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/19/bf/58ee13add151469c25825b7125bbf62c3bdcec05eec4d458fcb5c5516066/pyspark-4.1.1.tar.gz", hash = "sha256:77f78984aa84fbe865c717dd37b49913b4e5c97d76ef6824f932f1aefa6621ec", size = 455359625, upload-time = "2026-01-09T09:38:38.28Z" }
 
 [[package]]
 name = "pytest"
@@ -2703,6 +2705,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/b1/51/a849f96e117386044471c8ec2bd6cfebacda285da9525c9106aeb28da671/pytest_cov-7.1.0.tar.gz", hash = "sha256:30674f2b5f6351aa09702a9c8c364f6a01c27aae0c1366ae8016160d1efc56b2", size = 55592, upload-time = "2026-03-21T20:11:16.284Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9d/7a/d968e294073affff457b041c2be9868a40c1c71f4a35fcc1e45e5493067b/pytest_cov-7.1.0-py3-none-any.whl", hash = "sha256:a0461110b7865f9a271aa1b51e516c9a95de9d696734a2f71e3e78f46e1d4678", size = 22876, upload-time = "2026-03-21T20:11:14.438Z" },
+]
+
+[[package]]
+name = "pytest-rerunfailures"
+version = "16.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+    { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/de/04/71e9520551fc8fe2cf5c1a1842e4e600265b0815f2016b7c27ec85688682/pytest_rerunfailures-16.1.tar.gz", hash = "sha256:c38b266db8a808953ebd71ac25c381cb1981a78ff9340a14bcb9f1b9bff1899e", size = 30889, upload-time = "2025-10-10T07:06:01.238Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/77/54/60eabb34445e3db3d3d874dc1dfa72751bfec3265bd611cb13c8b290adea/pytest_rerunfailures-16.1-py3-none-any.whl", hash = "sha256:5d11b12c0ca9a1665b5054052fcc1084f8deadd9328962745ef6b04e26382e86", size = 14093, upload-time = "2025-10-10T07:06:00.019Z" },
 ]
 
 [[package]]
