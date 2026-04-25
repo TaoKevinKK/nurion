@@ -248,23 +248,52 @@ class RaySplitPayloadStore(SplitPayloadStore):
         """Get the actor name."""
         return self._actor_name
 
-    def wait_ready(self, timeout: float = 30.0) -> None:
+    def wait_ready(self, timeout: float = 30.0, max_retries: int = 3) -> None:
         """Wait for the actor to be fully initialized.
 
         Call this before starting any workers that will use the store.
 
+        Ray occasionally cancels an actor during creation under cluster
+        pressure (CI under coverage instrumentation reliably triggers
+        ``ActorDiedError: The actor never ran — it was cancelled before
+        it started running``). When that happens, transparently recreate
+        the actor and retry — the contract this method exposes is "the
+        store is ready to use", not "the specific actor handle from
+        __init__ is alive". Up to ``max_retries`` recreations.
+
         Args:
-            timeout: Maximum seconds to wait
+            timeout: Maximum seconds to wait per attempt
+            max_retries: Maximum recreation attempts on actor death
 
         Raises:
             TimeoutError: If actor doesn't respond within timeout
+            ActorDiedError: If actor keeps dying after all retries
         """
-        try:
-            ray.get(self._actor.ping.remote(), timeout=timeout)
-        except ray.exceptions.GetTimeoutError:
-            raise TimeoutError(
-                f"SplitPayloadStore actor '{self._actor_name}' did not become ready within {timeout}s"
-            )
+        for attempt in range(max_retries + 1):
+            try:
+                ray.get(self._actor.ping.remote(), timeout=timeout)
+                return
+            except ray.exceptions.GetTimeoutError:
+                raise TimeoutError(
+                    f"SplitPayloadStore actor '{self._actor_name}' did not become ready within {timeout}s"
+                )
+            except ray.exceptions.ActorDiedError:
+                if attempt == max_retries:
+                    raise
+                logger.warning(
+                    f"SplitPayloadStore actor '{self._actor_name}' died during startup "
+                    f"(attempt {attempt + 1}/{max_retries + 1}), recreating"
+                )
+                # Best-effort: remove any leftover named-actor binding before
+                # recreating, so the new actor can take the same name.
+                try:
+                    existing = ray.get_actor(self._actor_name)
+                    ray.kill(existing)
+                except (ValueError, ray.exceptions.RayActorError):
+                    pass
+                self._actor = _RaySplitPayloadStoreActor.options(  # type: ignore[attr-defined]
+                    name=self._actor_name
+                ).remote()
 
     def store(self, key: str, payload: SplitPayload) -> str:
         # Put directly to object store with actor as owner

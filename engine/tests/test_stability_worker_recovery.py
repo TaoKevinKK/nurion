@@ -517,11 +517,18 @@ class TestExactlyOnceSemantics:
             await runner.initialize()
             run_task = asyncio.create_task(runner.run())
 
-            # Kill one worker after initial progress
+            # Kill one worker after initial progress.
+            # Restrict to the transform stage: killing the source worker is
+            # unrecoverable in this pipeline (source has parallelism=(1,1)
+            # and no offset checkpoint), so a kill there bypasses the
+            # offset-commit-atomicity property the test is meant to
+            # validate and just shows up as ~600 source records never
+            # produced. The chaos tests in test_chaos_stress.py already
+            # apply this same restriction for the same reason.
             await wait_for_progress(
                 runner, min_processed=200, timeout=30, collector_name=self.collector_name
             )
-            await kill_random_worker(runner)
+            await kill_random_worker(runner, stage_id="transform")
 
             await asyncio.wait_for(run_task, timeout=60)
         finally:
