@@ -285,7 +285,16 @@ class InferenceWorker:
         return cmd
 
     def _build_sglang_command(self) -> list[str]:
-        """Build SGLang server command."""
+        """Build SGLang server command.
+
+        Maps ModelConfig fields to SGLang's launch_server flags:
+          gpu_memory_utilization → --mem-fraction-static
+          max_model_len          → --context-length
+          tensor_parallel_size   → --tp-size
+
+        --enable-metrics is always set so /metrics is exposed for the
+        heartbeat loop's Prometheus scrape.
+        """
         config = self._config
 
         cmd = [
@@ -300,6 +309,13 @@ class InferenceWorker:
             str(self._port),
             "--tp-size",
             str(config.tensor_parallel_size),
+            "--context-length",
+            str(config.max_model_len),
+            "--mem-fraction-static",
+            str(config.gpu_memory_utilization),
+            "--dtype",
+            config.dtype,
+            "--enable-metrics",
         ]
 
         if config.trust_remote_code:
@@ -307,6 +323,18 @@ class InferenceWorker:
 
         if config.quantization:
             cmd.extend(["--quantization", config.quantization])
+
+        for key, value in config.extra_engine_kwargs.items():
+            arg_name = key.replace("_", "-")
+            if isinstance(value, bool):
+                if value:
+                    cmd.append(f"--{arg_name}")
+            elif isinstance(value, (dict, list)):
+                import json as _json
+
+                cmd.extend([f"--{arg_name}", _json.dumps(value)])
+            else:
+                cmd.extend([f"--{arg_name}", str(value)])
 
         return cmd
 
@@ -405,13 +433,22 @@ class InferenceWorker:
         return {"pending": 0, "running": 0}
 
     def _parse_prometheus_metrics(self, text: str) -> dict[str, Any]:
-        """Parse vLLM Prometheus metrics text format."""
+        """Parse vLLM/SGLang Prometheus metrics text format.
+
+        Both engines expose Prometheus-formatted metrics under different
+        prefixes; we map them onto the shared ``pending``/``running`` keys
+        used by the autoscaler.
+        """
         from prometheus_client.parser import text_string_to_metric_families
 
         metrics: dict[str, Any] = {}
         mapping = {
+            # vLLM
             "vllm:num_requests_waiting": "pending",
             "vllm:num_requests_running": "running",
+            # SGLang
+            "sglang:num_queue_reqs": "pending",
+            "sglang:num_running_reqs": "running",
         }
 
         for family in text_string_to_metric_families(text):
@@ -427,7 +464,7 @@ class InferenceWorker:
             return
 
         loop = asyncio.get_running_loop()
-        prefix = f"[vllm:{self._worker_id}]"
+        prefix = f"[{self._config.backend}:{self._worker_id}]"
 
         while not self._shutdown_event.is_set():
             # Read one line from subprocess stdout in a thread to avoid blocking
