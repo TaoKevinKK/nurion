@@ -40,34 +40,37 @@ ENV PATH="/root/.local/bin:${JAVA_HOME}/bin:${PATH}"
 
 WORKDIR /app
 
-# Copy only what's needed for building (anvil-rs and java from lib/)
-COPY lib/anvil-rs /app/build/anvil-rs
-COPY lib/raydp/java /app/build/java
+# Mirror the repo's lib/ layout in the image so RayDP's protobuf-maven-plugin
+# can resolve its proto source: raydp-main/pom.xml points protoSourceRoot at
+# ${project.basedir}/../../../anvil-rs/proto, i.e. the sibling lib/anvil-rs/proto.
+# Copying to /app/build/lib/{anvil-rs,raydp/java} keeps that relative path valid.
+COPY lib/anvil-rs /app/build/lib/anvil-rs
+COPY lib/raydp/java /app/build/lib/raydp/java
 
-# Install Rust and protoc, build anvil-rs, then cleanup completely (all in one layer)
+# Build the anvil-rs Python wheel and the RayDP JARs in a single layer. Both
+# consume anvil-rs/proto (anvil-rs via prost, RayDP's gRPC stubs via grpc-java),
+# and the RayDP maven build must run while that proto is still present, so the
+# two cannot be split without either breaking proto resolution or bloating the
+# image. Clean every build dependency (Rust, protoc, .m2, sources) at the end.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
     export PATH="/root/.cargo/bin:$PATH" && \
     cargo install maturin && \
     apt-get update && apt-get install -y protobuf-compiler && \
-    cd /app/build/anvil-rs && \
+    # anvil-rs Python wheel
+    cd /app/build/lib/anvil-rs && \
     maturin build --release && \
     uv pip install --system --no-cache target/wheels/*.whl && \
-    # Cleanup Rust, protoc and source completely
-    rm -rf /app/build/anvil-rs && \
-    rm -rf /root/.cargo && \
-    rm -rf /root/.rustup && \
-    apt-get remove -y protobuf-compiler && apt-get autoremove -y
-
-# Build RayDP JARs (Spark 4.1 / Scala 2.13 track), then cleanup Maven artifacts.
-RUN cd /app/build/java && \
+    # RayDP JARs (Spark 4.1 / Scala 2.13); gRPC stubs generated from anvil proto
+    cd /app/build/lib/raydp/java && \
     mvn -P scala-2.13 clean package -DskipTests -q && \
     mkdir -p /app/lib/raydp/jars && \
     cp raydp-main/target/raydp_2.13-*.jar /app/lib/raydp/jars/ && \
     cp shims/common/target/raydp-shims-*_2.13-*.jar /app/lib/raydp/jars/ && \
     cp shims/spark410/target/raydp-shims-spark410_2.13-*.jar /app/lib/raydp/jars/ && \
-    # Cleanup Maven build and source
-    rm -rf /app/build && \
-    rm -rf /root/.m2
+    # Cleanup all build deps + sources in this same layer
+    rm -rf /app/build /root/.m2 /root/.cargo /root/.rustup && \
+    apt-get remove -y protobuf-compiler && apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
 
 # Install pyspark (Spark 4.1.x, Scala 2.13)
 RUN uv pip install --system --no-cache "pyspark>=4.1,<5"
@@ -79,7 +82,7 @@ RUN PYSPARK_JARS=$(python -c "import pyspark; print(pyspark.__path__[0])")/jars 
     wget -q ${M}/org/apache/spark/spark-hadoop-cloud_2.13/4.1.1/spark-hadoop-cloud_2.13-4.1.1.jar \
          ${M}/org/apache/hadoop/hadoop-aws/3.3.4/hadoop-aws-3.3.4.jar \
          ${M}/com/amazonaws/aws-java-sdk-bundle/1.12.367/aws-java-sdk-bundle-1.12.367.jar \
-         ${M}/org/lance/lance-spark-bundle-4.1_2.13/0.4.0/lance-spark-bundle-4.1_2.13-0.4.0.jar \
+         ${M}/org/lance/lance-spark-bundle-4.1_2.13/0.5.1/lance-spark-bundle-4.1_2.13-0.5.1.jar \
          -P ${PYSPARK_JARS}/
 
 # Install Python runtime dependencies (minimal set for Ray + data processing)
@@ -89,7 +92,7 @@ RUN uv pip install --system --no-cache \
     pandas>=2.0.0 \
     click>=8.1.7 \
     "fsspec[s3]>=2024.6.0" \
-    pylance>=0.38.0 \
+    pylance==7.0.0 \
     s3fs>=2024.6.0 \
     grpcio>=1.68.0
 
