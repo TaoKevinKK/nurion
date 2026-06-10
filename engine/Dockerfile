@@ -96,6 +96,23 @@ RUN uv pip install --system --no-cache \
     s3fs>=2024.6.0 \
     grpcio>=1.68.0
 
+# Install the raydp Python package (raydp.init_spark) so this base is a complete
+# Spark-on-Ray image, not just the jars. The Scala-2.13 jars built above
+# (/app/lib/raydp/jars) are staged into the package — raydp/utils.py resolves
+# jars at <pkg>/jars/ — and raydp's runtime deps (ray, pyspark, pandas) are
+# installed above. The source is copied from the build context, so there is no
+# Maven rebuild and downstream consumers (e.g. data-api query_processor) need no
+# nurion git access to get `import raydp`.
+COPY lib/raydp/__init__.py lib/raydp/context.py lib/raydp/utils.py /tmp/raydp-src/
+COPY lib/raydp/spark /tmp/raydp-src/spark
+RUN SP="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" && \
+    mkdir -p "$SP/raydp/jars" && \
+    cp /tmp/raydp-src/*.py "$SP/raydp/" && \
+    cp -r /tmp/raydp-src/spark "$SP/raydp/spark" && \
+    cp /app/lib/raydp/jars/*.jar "$SP/raydp/jars/" && \
+    rm -rf /tmp/raydp-src && \
+    python -c "import raydp; print('raydp:', raydp.__file__)"
+
 # Verify installations and remove build dependencies
 RUN python -c "import ray; print(f'Ray: {ray.__version__}')" && \
     python -c "import anvil_py; print('anvil_py: OK')" && \
