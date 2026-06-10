@@ -121,6 +121,15 @@ def stage_jar_selection() -> str:
         f"found jars not matching expected suffix {expected_suffix}: "
         f"{[os.path.basename(j) for j in bad]}"
     )
+
+    # The shaded connect-repl/spark-connect-client-jvm jar (a pyspark/jars
+    # subdirectory) must never be on the classpath: its relocated-Arrow
+    # ArrowUtils shadows the real one and breaks the shim's toArrowSchema.
+    shaded = [j for j in jars if "spark-connect-client" in os.path.basename(j)]
+    assert not shaded, (
+        "code_search_jars() must exclude the shaded spark-connect-client-jvm "
+        f"jar (got {[os.path.basename(j) for j in shaded]})"
+    )
     return f"{len(raydp_jars)} raydp jars, all carry {expected_suffix}"
 
 
@@ -130,7 +139,7 @@ def stage_init_spark() -> str:
     import ray
     from ray.job_config import JobConfig
     import raydp
-    from raydp.utils import code_search_path
+    from raydp.utils import code_search_jars
 
     ray.shutdown()  # defensive against lingering Ray from a previous iteration
 
@@ -146,11 +155,17 @@ def stage_init_spark() -> str:
     # Cross-language actors (RayDP's Java RayAppMaster + PyWorkerFactory) require
     # the jar classpath to be declared on the Ray driver's JobConfig, otherwise
     # Ray refuses with "Cross language feature needs --load-code-from-local".
+    #
+    # Pass code_search_jars() (filtered jar files), not code_search_path()
+    # (directories). Ray scans code_search_path directories recursively and would
+    # otherwise add pyspark's shaded connect-repl/spark-connect-client-jvm jar,
+    # whose relocated-Arrow ArrowUtils shadows the real spark-sql-api one and
+    # breaks the RayDP shim's toArrowSchema call. See code_search_jars().
     ray.init(
         num_cpus=2,
         include_dashboard=False,
         ignore_reinit_error=True,
-        job_config=JobConfig(code_search_path=code_search_path()),
+        job_config=JobConfig(code_search_path=code_search_jars()),
     )
 
     spark = raydp.init_spark(

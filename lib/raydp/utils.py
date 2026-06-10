@@ -235,6 +235,17 @@ def code_search_jars() -> list[str]:
     Third-party jars staged under the same directory (``java/thirdparty/*.jar``)
     are plain Java artifacts without a ``_<scala>-`` token; pass them through
     unfiltered. Spark's own jars under ``$SPARK_HOME/jars`` are never filtered.
+
+    Prefer this over passing the bare ``code_search_path()`` directories to
+    Ray's ``JobConfig(code_search_path=...)``: Ray scans those directories
+    *recursively*, which adds pyspark's shaded
+    ``connect-repl/spark-connect-client-jvm`` jar. That jar bundles its own
+    ``org.apache.spark.sql.util.ArrowUtils`` whose ``toArrowSchema`` returns a
+    relocated ``org.sparkproject...arrow`` ``Schema``; if it wins classpath
+    ordering it shadows the real ``spark-sql-api`` ``ArrowUtils`` and the shim
+    fails with ``NoSuchMethodError: ArrowUtils$.toArrowSchema``. The
+    ``glob.glob(dir/*.jar)`` below is intentionally non-recursive so that
+    nested shaded jar (and any other ``*/jars/<subdir>/*.jar``) is excluded.
     """
     scala_bin = _pyspark_scala_binary()
     active_suffix_re = re.compile(rf"_{re.escape(scala_bin)}-[^/\\]+\.jar$")

@@ -583,12 +583,24 @@ def ray_cluster():
         ray.shutdown()
         time.sleep(1.0)  # Wait for cleanup
 
-    # Try to get raydp jars if available
+    # Try to get raydp jars if available.
+    #
+    # Use code_search_jars() (explicit, filtered jar files) rather than
+    # code_search_path() (the pyspark/jars + raydp/jars *directories*). Ray
+    # scans directories on the code_search_path recursively, which pulls in
+    # pyspark's shaded connect-repl/spark-connect-client-jvm jar. That jar
+    # bundles its own org.apache.spark.sql.util.ArrowUtils whose toArrowSchema
+    # returns a *relocated* org.sparkproject...arrow Schema; when it wins
+    # classpath ordering (deterministically on Linux/CI) it shadows the real
+    # spark-sql-api ArrowUtils and the RayDP shim dies with
+    # NoSuchMethodError: ArrowUtils$.toArrowSchema(StructType, String, Z, Z).
+    # code_search_jars() globs each dir non-recursively, so the subdir jar is
+    # excluded.
     jars_paths = []
     try:
-        from raydp.utils import code_search_path
+        from raydp.utils import code_search_jars
 
-        jars_paths = code_search_path()
+        jars_paths = code_search_jars()
     except ImportError:
         pass
 
